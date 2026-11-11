@@ -1,0 +1,84 @@
+[
+ {
+  "id": "qwen2.5-0.5b-instruct",
+  "family": "causal_lm",
+  "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+  "size_gb": 1.0,
+  "notes": "24 blocks, GQA 14q/2kv. Best first model: fast on CPU."
+ },
+ {
+  "id": "smollm2-360m-instruct",
+  "family": "causal_lm",
+  "repo": "HuggingFaceTB/SmolLM2-360M-Instruct",
+  "size_gb": 0.7,
+  "notes": "Llama architecture, 32 blocks. Smallest option."
+ },
+ {
+  "id": "qwen2.5-1.5b-instruct",
+  "family": "causal_lm",
+  "repo": "Qwen/Qwen2.5-1.5B-Instruct",
+  "size_gb": 3.1,
+  "notes": "28 blocks. Noticeably better answers; GPU recommended."
+ },
+ {
+  "id": "qwen3-1.7b",
+  "family": "causal_lm",
+  "repo": "Qwen/Qwen3-1.7B",
+  "size_gb": 3.4,
+  "notes": "28 blocks, QK-norm. Needs transformers >= 4.51."
+ },
+ {
+  "id": "llama-3.2-1b-instruct",
+  "family": "causal_lm",
+  "repo": "meta-llama/Llama-3.2-1B-Instruct",
+  "size_gb": 2.5,
+  "notes": "Gated on Hugging Face: accept the licence and run `hf auth login` first."
+ },
+ {
+  "id": "sd-turbo",
+  "family": "t2i",
+  "repo": "stabilityai/sd-turbo",
+  "size_gb": 2.6,
+  "default_steps": 4,
+  "default_guidance": 0.0,
+  "default_size": 512,
+  "notes": "UNet, 1\u20134 steps, no CFG. Best first image model (works on CPU, ~1 min)."
+ },
+ {
+  "id": "tiny-sd",
+  "family": "t2i",
+  "repo": "segmind/tiny-sd",
+  "size_gb": 1.0,
+  "default_steps": 20,
+  "default_guidance": 7.0,
+  "default_size": 512,
+  "notes": "Distilled SD 1.5 UNet (fewer blocks). Small and fast."
+ },
+ {
+  "id": "sd-1.5",
+  "family": "t2i",
+  "repo": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+  "size_gb": 2.0,
+  "default_steps": 25,
+  "default_guidance": 7.5,
+  "default_size": 512,
+  "notes": "Classic UNet with CFG; the reference model for cross-attention maps."
+ },
+ {
+  "id": "qwen3.6-27b",
+  "family": "causal_lm",
+  "repo": "Qwen/Qwen3.6-27B",
+  "size_gb": 55.0,
+  "notes": "Hybrid: 48 Gated DeltaNet (linear-attention) + 16 gated-attention blocks, 64 total. ~55 GB in bf16 \u2014 use 'stream from disk' (or 'RAM \u2192 device' with 64 GB+ RAM). Text only for now; image input is next. Over 10 GB: expect minutes per token on CPU."
+ },
+ {
+  "id": "qwen-image-2.1",
+  "family": "t2i",
+  "repo": "Qwen/Qwen-Image-2.1",
+  "size_gb": 33.1,
+  "default_steps": 24,
+  "default_guidance": 1.0,
+  "default_size": 512,
+  "notes": "Single-stream DiT (32 blocks, 7B) + Qwen3-VL 8B text encoder + 64-channel VAE, ~33 GB in bf16. The prompt goes through the blocks once (KV cache); each step only computes image tokens. On CPU expect minutes per step at 512\u00d7512 (the model's own default is 1024\u00d71024, 40 steps). Qwen Research License — read it on the model page."
+ }
+]

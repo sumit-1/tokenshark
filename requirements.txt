@@ -1,0 +1,14 @@
+# Runtime (pure Python packages; no Node.js, no transformers, no diffusers)
+torch>=2.2
+safetensors>=0.4
+tokenizers>=0.15
+huggingface_hub>=0.23
+fastapi>=0.110
+uvicorn>=0.29
+jinja2>=3.1
+regex>=2023.0
+numpy>=1.24
+pillow>=10.0
+psutil>=5.9
+# optional: Meta-format Llama 3 checkpoints (tokenizer.model)
+tiktoken>=0.6

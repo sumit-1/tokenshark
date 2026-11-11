@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Analyser</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-family="">
+<header>
+  <div class="brand">AI&nbsp;Analyser</div>
+  <select id="model" title="Model"></select>
+  <button id="add-model" class="mini" title="Add a model from Hugging Face or a local folder">+</button>
+  <label class="inline" title="Where weights live. disk = stream one layer at a time (runs 70B on small machines, slowly).">Weights
+    <select id="policy">
+      <option value="auto">auto</option><option value="device">all on GPU/CPU</option>
+      <option value="cpu">RAM → device per layer</option><option value="disk">stream from disk</option>
+    </select></label>
+  <label class="inline" title="Keep the first N blocks resident on the device even when streaming">keep <input id="keep" type="number" value="0" min="0" style="width:52px"></label>
+  <button id="load" class="primary">Load</button>
+  <button id="unload">Unload</button>
+  <button id="del-files" class="mini" style="display:none" title="Delete this model's downloaded files">🗑</button>
+  <span id="status" class="pill">…</span>
+  <span class="grow"></span>
+  <input id="run-label" placeholder="run label (optional)">
+  <span id="resume" class="resume"></span>
+  <span class="dbg" id="dbg-buttons">
+    <button id="dbg-start" title="Start stepping through the flow">🐞 Step</button>
+    <button id="dbg-block" class="dbg-on" disabled title="Run the next box (F10)">Block ▸</button>
+    <button id="dbg-token" class="dbg-on" disabled title="Run to the next token prediction (F11)">Token ▸▸</button>
+    <button id="dbg-finish" class="dbg-on" disabled title="Save the stepping session as a run">Finish</button>
+    <button id="dbg-stop" class="dbg-on" disabled title="Discard the stepping session">✕</button>
+  </span>
+  <button id="run" class="primary">▶ Run</button>
+  <span class="taskwrap"><button id="tasks-btn" title="Running and queued work: reorder, pause or stop">Tasks</button><div id="tasks-pop" class="tasks-pop" style="display:none"></div></span>
+  <button id="pause" disabled title="Pause the run">⏸</button>
+  <button id="cancel" title="Stop the run (the output so far is kept) or the current step">■</button>
+</header>
+<div id="stale" class="stale" style="display:none">The app was updated on disk but this server is still running the old code. Close the run.bat window (Ctrl+C) and start it again, then reload this page.</div>
+<div id="model-notes" class="notes"></div>
+<div class="progress"><i id="progress"></i><span id="progress-msg"></span></div>
+
+<main>
+  <aside class="palette">
+    <h4>Edit the flow</h4>
+    <!-- data-action buttons are shown when the loaded model's plugin lists that action (ui_schema.palette_actions) -->
+    <button id="btn-iv" data-action="intervention">+ Intervention</button>
+    <button id="btn-dup" data-action="duplicate_block">Repeat block</button>
+    <button id="btn-bypass" data-action="bypass_block">Bypass / restore</button>
+    <button id="btn-kv" data-action="kv_prefix">+ KV-cache prefix</button>
+    <button id="btn-kvt" data-action="kv_prefill" title="Text that only chosen blocks can read (select a block first to aim it at that block)">+ Layer KV prefill</button>
+    <button id="btn-code" data-action="code" title="See the selected box as a few lines of Python, and change them">View / edit code</button>
+    <button id="btn-init" data-action="init_image">+ Start image</button>
+    <button id="btn-pkv" data-action="prompt_kv_replace" title="Give chosen blocks a different prompt">+ Other prompt (blocks)</button>
+    <button id="btn-hpkv" data-action="prompt_kv_prepend" title="A hidden prompt in front of the main one, for chosen blocks">+ Hidden prompt</button>
+    <button id="btn-del">Delete selected</button>
+    <h4>View</h4>
+    <button id="btn-fit">Fit to screen</button>
+    <button id="btn-reset">Reset flow</button>
+    <button id="btn-export">Save flow…</button>
+    <button id="btn-import">Open flow…</button>
+    <input id="flow-file" type="file" accept=".json" hidden>
+    <div class="legend">
+      <div><i class="lg main"></i>residual stream</div>
+      <div><i class="lg mod"></i>intervention</div>
+      <div><i class="lg loop"></i>loop (per token / step)</div>
+      <div><i class="lg skip"></i>UNet skip</div>
+    </div>
+  </aside>
+  <aside id="lesson" class="lesson"></aside>
+  <section class="center">
+    <div id="canvas"></div>
+    <div id="plan" class="plan"></div>
+  </section>
+  <aside id="inspector" class="inspector"></aside>
+</main>
+
+<section class="bottom">
+  <nav id="tabs"></nav>
+  <div id="panel"></div>
+</section>
+<div id="toasts"></div>
+
+<dialog id="dlg-model">
+  <form method="dialog">
+    <h3>Add a model</h3>
+    <label class="field"><span>Id (short name)</span><input name="id" required></label>
+    <label class="field"><span>Family</span><select name="family"><option value="causal_lm">Text → text (Llama / Qwen / Mistral)</option><option value="t2i">Text → image (Stable Diffusion 1.x/2.x)</option></select></label>
+    <label class="field"><span>Hugging Face repo (e.g. Qwen/Qwen2.5-3B-Instruct)</span><input name="repo"></label>
+    <label class="field"><span>…or a local folder (config.json + *.safetensors, or Meta params.json + consolidated.00.pth)</span><input name="path"></label>
+    <label class="field"><span>Size (GB, for display)</span><input name="size_gb" type="number" step="any"></label>
+    <label class="field"><span>Notes</span><input name="notes"></label>
+    <div class="row"><button id="dlg-model-save" class="primary">Add</button><button value="cancel">Cancel</button></div>
+  </form>
+</dialog>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
