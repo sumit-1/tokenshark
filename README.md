@@ -97,6 +97,16 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 ---
 
+## For Educators / Coursework
+
+- **Readable, wrapper-free forward passes:** Every transformer and diffusion operation (`analyser/llm.py`, `analyser/sd.py`, `analyser/qimage.py`) is written in explicit, single-file PyTorch without `transformers` or `diffusers` at runtime, and any block opens in the browser as ~15 lines of editable Python.
+- **Turnkey classroom & self-paced labs (`📖 Learn` tab):** Includes 19 guided, interactive lessons covering tokenization, attention, logit lens, causal tracing (activation patching), steering vectors, neuron clamping, quantization, LoRA/adaptation, and flow-matching diffusion.
+- **Runs on standard student laptops:** Pure Python with zero Node.js/build steps (`run.bat` / `./run.sh`); 0.5B–1.7B models and from-scratch training run on CPU in seconds, while layer streaming (`disk` policy) lets students inspect 27B–70B models without a cluster.
+- **Reproducible homework & grading:** Students can save flows (`.json`), export any browser experiment—including patches, steering vectors, and custom block code—into a standalone Python script (`analyser.api`), or pair with an AI teaching assistant via the built-in MCP tutor server.
+- **Adopt or cite in your syllabus:** Free for university courses, workshops, and training bootcamps—see [`CITATION.cff`](CITATION.cff) to cite Tokenshark in lecture notes, lab handouts, or academic publications.
+
+---
+
 ## Run It
 
 Windows: double-click `run.bat`. macOS / Linux: `./run.sh`. The first run creates `.venv` and installs `requirements.txt`. Then open http://127.0.0.1:8000.

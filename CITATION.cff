@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "Tokenshark: Glass-Box Inspection, Intervention, and Training Engine for Open-Weight Generative Models"
+message: "If you use Tokenshark in your research, coursework, or teaching labs, please cite it using the metadata below."
+type: software
+authors:
+  - name: "Sumit"
+    email: "ksiiitm@gmail.com"
+repository-code: "https://github.com/sumit-1/tokenshark"
+url: "https://github.com/sumit-1/tokenshark"
+version: "0.2.0"
+date-released: "2026-11-12"
+keywords:
+  - mechanistic-interpretability
+  - large-language-models
+  - diffusion-models
+  - logit-lens
+  - activation-patching
+  - steering-vectors
+  - lora
+  - ai-education
+  - pytorch
+abstract: >-
+  Tokenshark is a pure-Python, browser-based glass-box laboratory for opening,
+  inspecting, editing, and training open-weight language and image models
+  (Llama, Qwen2/2.5/3/3.6, Mistral, SmolLM, Stable Diffusion, and Qwen-Image DiT)
+  without runtime wrapper libraries.
