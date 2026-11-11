@@ -260,7 +260,7 @@ const TEXT = [
 ]
 
 // ------------------------------------------------------------------ progress
-const KEY = 'ai-analyser.lessons'
+const KEY = 'tokenshark.lessons'
 
 const store = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}') } catch { return {} } }
 
@@ -355,7 +355,7 @@ async function renderStart(p) {
   if (S.tab !== 'learn' || S.info) return
   p.innerHTML = ''
   p.appendChild(el('div', { className: 'lintro' }, `<h3>Welcome. Pick a model to open up.</h3>
-    <div class="small">AI Analyser draws a model as boxes and arrows, runs it on your computer, and lets you look inside and change what it does.
+    <div class="small">Tokenshark draws a model as boxes and arrows, runs it on your computer, and lets you look inside and change what it does.
     Small models are best for learning: they are quick, and they work the same way as the big ones.</div>`))
   const pick = (ids, fallbackFam) => ids.map(id => models.find(m => m.id === id)).find(Boolean) || models.find(m => m.family === fallbackFam)
   const cards = [

@@ -1,5 +1,5 @@
 @echo off
-REM AI Analyser — Windows launcher. First run creates a virtual environment and installs requirements.
+REM Tokenshark — Windows launcher. First run creates a virtual environment and installs requirements.
 cd /d "%~dp0"
 if not exist .venv (
   python -m venv .venv || goto :err

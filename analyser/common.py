@@ -1,4 +1,4 @@
-"""Shared building blocks for AI Analyser model plugins.
+"""Shared building blocks for Tokenshark model plugins.
 
 This module holds the mathematical and visualisation primitives that multiple
 model plugins share — so each plugin file (`analyser/plugins/*.py`) stays short,

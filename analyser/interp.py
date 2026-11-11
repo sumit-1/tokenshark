@@ -72,7 +72,7 @@ class VectorLibrary:
         meta = {"id": vid, "name": name or f"vector {vid}", "created": time.time(), "dim": int(v.shape[-1]),
                 "norm": round(float(v.float().norm()), 4), **meta}
         save_file({"v": v.detach().float().cpu().contiguous()}, str(VEC_DIR / f"{vid}.safetensors"),
-                  metadata={"format": "ai-analyser-vector/1", "meta": json.dumps(meta)})
+                  metadata={"format": "tokenshark-vector/1", "meta": json.dumps(meta)})
         return meta
 
     def load(self, vid: str) -> tuple[torch.Tensor, dict]:

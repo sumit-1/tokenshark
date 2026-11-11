@@ -160,7 +160,7 @@ def run_script(run, default_flow_for, get_run, vectors: dict | None = None) -> s
 
     emit(run, "run")
     image = run.plan.family == "t2i"
-    head = [f'"""Run {run.id}{" · " + run.label if run.label else ""} — exported from AI Analyser.',
+    head = [f'"""Run {run.id}{" · " + run.label if run.label else ""} — exported from Tokenshark.',
             "",
             "Reproduces the run with the same engine the app uses. Run it from the app's folder:",
             f"    python run_{run.id}.py",

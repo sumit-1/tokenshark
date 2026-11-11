@@ -1,4 +1,4 @@
-"""AI Analyser — inspection-and-intervention engine for open-weight generative models."""
+"""Tokenshark — inspection-and-intervention engine for open-weight generative models."""
 from pathlib import Path as _Path
 
 __version__ = "0.2.0"

@@ -1,6 +1,6 @@
-"""MCP server: lets an LLM (Claude, or any MCP client) use AI Analyser as a teacher would.
+"""MCP server: lets an LLM (Claude, or any MCP client) use Tokenshark as a teacher would.
 
-The server talks to a running AI Analyser over its local HTTP API, so everything the LLM does — runs,
+The server talks to a running Tokenshark over its local HTTP API, so everything the LLM does — runs,
 interventions, patching sweeps — also appears in the student's browser (Runs tab → click a run), where the
 student can open the lens, attention and neuron views on it. Start the app first, then point a client at:
 
@@ -8,8 +8,8 @@ student can open the lens, attention and neuron views on it. Start the app first
     python -m analyser.mcp_server --url http://127.0.0.1:8001
 
 Claude Desktop / Claude Code config:
-    {"mcpServers": {"ai-analyser": {"command": "<path to .venv python>", "args": ["-m", "analyser.mcp_server"],
-                                    "cwd": "<folder of this project>"}}}
+    {"mcpServers": {"tokenshark": {"command": "<path to .venv python>", "args": ["-m", "analyser.mcp_server"],
+                                   "cwd": "<folder of this project>"}}}
 
 Protocol: MCP over stdio (JSON-RPC 2.0, one JSON object per line). Pure standard library — no torch, no
 MCP SDK — so it starts instantly; the model stays in the app's process.
@@ -30,7 +30,7 @@ from .flowbuild import FlowBuilder
 URL = "http://127.0.0.1:8000"
 PROTOCOL = "2025-06-18"
 
-GUIDE = """AI Analyser — guide for a tutor
+GUIDE = """Tokenshark — guide for a tutor
 
 What it is: a glass-box lab for open-weight models. A language model is drawn as a flow of boxes
 (prompt → tokenizer → embed → blocks → final norm → LM head → sampler). You can run it, look inside every block,
@@ -102,7 +102,7 @@ def call(method: str, path: str, body=None, timeout: float = 120, raw: bool = Fa
             msg = text
         raise AppError(str(msg)) from None
     except urllib.error.URLError as e:
-        raise AppError(f"AI Analyser is not reachable at {URL} ({e.reason}). Start it (run.bat / run.sh) and try again.") from None
+        raise AppError(f"Tokenshark is not reachable at {URL} ({e.reason}). Start it (run.bat / run.sh) and try again.") from None
     return text if raw else (json.loads(text) if text else None)
 
 
@@ -370,7 +370,7 @@ BLOCK = {"block": {**I, "description": "schedule position of the block (= layer 
 TOK = {**I, "description": "token index in the run (negative counts from the end; -1 = last)"}
 
 TOOLS = {
-    "teaching_guide": _tool(t_teaching_guide, "Read this first: how to teach with AI Analyser, lesson sequences, and the edit format for run_prompt.", {}),
+    "teaching_guide": _tool(t_teaching_guide, "Read this first: how to teach with Tokenshark, lesson sequences, and the edit format for run_prompt.", {}),
     "status": _tool(t_status, "Is the app running, which model is loaded (layers, width, heads), LoRA / quantization in force.", {}),
     "list_models": _tool(t_list_models, "Models the app can load (id, size, whether already downloaded).", {}),
     "load_model": _tool(t_load_model, "Load a model in the app (downloads it on first use). Small models: qwen2.5-0.5b-instruct, smollm2-360m-instruct.",
@@ -432,7 +432,7 @@ def handle(msg: dict) -> dict | None:
 
     if method == "initialize":
         return ok({"protocolVersion": params.get("protocolVersion") or PROTOCOL, "capabilities": {"tools": {}},
-                   "serverInfo": {"name": "ai-analyser", "version": __version__},
+                   "serverInfo": {"name": "tokenshark", "version": __version__},
                    "instructions": "Tools for teaching how language models work, by experiment. Call teaching_guide first."})
     if method == "ping":
         return ok({})
@@ -457,7 +457,7 @@ def handle(msg: dict) -> dict | None:
 
 def main():
     global URL
-    ap = argparse.ArgumentParser(description="MCP server for AI Analyser (stdio)")
+    ap = argparse.ArgumentParser(description="MCP server for Tokenshark (stdio)")
     ap.add_argument("--url", default=URL, help="where the app is running (default http://127.0.0.1:8000)")
     URL = ap.parse_args().url.rstrip("/")
     sys.stdin.reconfigure(encoding="utf-8")

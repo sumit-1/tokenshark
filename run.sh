@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AI Analyser — macOS / Linux launcher. First run creates a virtual environment and installs requirements.
+# Tokenshark — macOS / Linux launcher. First run creates a virtual environment and installs requirements.
 set -e
 cd "$(dirname "$0")"
 if [ ! -d .venv ]; then

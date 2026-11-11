@@ -20,7 +20,7 @@ from .weights import model_folder, models_dir
 from .runs import DATA as RUNS_DATA, STORE, Run
 from .tasks import TASKS
 
-app = FastAPI(title="AI Analyser", version=__version__)
+app = FastAPI(title="Tokenshark", version=__version__)
 WEB = Path(__file__).parent / "web"
 
 

@@ -1,8 +1,8 @@
-# AI Analyser
+# Tokenshark
 
-Open, inspect, edit, and train how open-weight language and image models compute — in the browser, from pure Python.
+Open, inspect, edit, and train how open-weight language and image models compute in the browser, from pure Python.
 
-![AI Analyser Walkthrough](docs/walkthrough.gif)
+![Tokenshark Walkthrough](docs/walkthrough.gif)
 
 ---
 
@@ -93,7 +93,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 ### Guided Courses (`📖 Learn` Tab) & MCP Tutor Server
 - **Built-in interactive courses (`analyser/web/tabs/learn.js`).** Step-by-step guided lessons for both **Language Models** (*Tokens*, *One token at a time*, *Where the answer forms*, *Break it on purpose*, *Find where a fact lives*, *Steer and hunt neurons*, *A prompt only some layers can read*, *The model is a short program*, *Smaller, and your own*) and **Image Models** (*How an image model is built*, *From noise to picture*, *Steps and the noise schedule*, *How the picture reads the prompt*, *Guidance and the negative prompt*, *A different prompt for different blocks*, *Which blocks matter?*, *What each block thinks the picture is*, *Start from a picture*, *Step in and paint mid-way*, *Train your own image model*).
-- **MCP Tutor Server (`analyser/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m analyser.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive AI Analyser as an interactive tutor — every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
+- **MCP Tutor Server (`analyser/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m analyser.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive Tokenshark as an interactive tutor. Every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
 
 ---
 
@@ -184,12 +184,12 @@ flow.patch(18, clean, hook="resid_post", positions="last")
 print(lab.run(flow).text)
 ```
 
-To connect Claude Desktop, Claude Code, or Cursor to a running AI Analyser instance via MCP:
+To connect Claude Desktop, Claude Code, or Cursor to a running Tokenshark instance via MCP:
 
 ```json
 {
   "mcpServers": {
-    "ai-analyser": {
+    "tokenshark": {
       "command": "python",
       "args": ["-m", "analyser.mcp_server", "--url", "http://127.0.0.1:8000"]
     }
@@ -225,7 +225,7 @@ analyser/
   server.py        FastAPI routes for models, flows, runs, caches, and step debugger
   labapi.py        FastAPI routes for patching, steering, neurons, quantization, box code, and training
   plugins/         modular model plugins (causal_lm.py, stable_diffusion.py, qwen_image_21.py, _template.py)
-  web/             browser UI in plain ES modules + HTML/CSS (core.js, flow.js, paint.js, ui/*, tabs/* — no build step)
+  web/             browser UI in plain ES modules + HTML/CSS (core.js, flow.js, paint.js, ui/*, tabs/*)
 tests/
   test_oracles.py       raw LLM & SD engines vs transformers / diffusers on random weights; KV-cache maths
   test_features.py      stepper, bypass, word through-k decoding, DLA tracking, region locks, model discovery

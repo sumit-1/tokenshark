@@ -323,7 +323,7 @@ def test_train_tiny_model_then_load_it(tmp_path):
     with torch.enable_grad():
         job.run()
     assert job.losses[-1][1] < job.losses[0][1] - 0.5          # it learned something
-    assert json.loads((tmp_path / "t" / "config.json").read_text())["ai_analyser"]["trained_here"]
+    assert json.loads((tmp_path / "t" / "config.json").read_text())["tokenshark"]["trained_here"]
     lab = Lab(str(tmp_path / "t"), device="cpu", dtype="fp32", policy="device")
     r = lab.run("The capital of", max_new_tokens=4)
     assert len(r.token_ids) > 3 and r.lens()["cells"]
@@ -367,7 +367,7 @@ def test_train_lora_and_attach(lab, tmp_path):
 def test_mcp_protocol():
     from analyser import mcp_server as M
     out = M.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
-    assert out["result"]["serverInfo"]["name"] == "ai-analyser" and "tools" in out["result"]["capabilities"]
+    assert out["result"]["serverInfo"]["name"] == "tokenshark" and "tools" in out["result"]["capabilities"]
     assert M.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     tools = M.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
     names = {t["name"] for t in tools}

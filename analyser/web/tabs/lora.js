@@ -18,7 +18,7 @@ export async function renderLoRA(p) {
 
   const box = el('div', { className: 'kvbox' })
   box.innerHTML = `<h4>Attach a LoRA or Fine-Tuned Checkpoint to <b>${esc(S.info.model_id)}</b></h4>
-    <div class="small">Works with any model plugin — no custom code needed! Point to a LoRA <code>.safetensors</code> file, a PEFT adapter folder (<code>adapter_model.safetensors</code>), or a fine-tuned model folder. AI Analyser computes <b>ΔW = scale · (α/r) · B @ A</b> (or <b>W<sub>ft</sub> − W<sub>base</sub></b>) on the fly, highlights the blocks that changed the most on the flow graph above, and lets you scale or negate the adaptation live.</div>`
+    <div class="small">Works with any model plugin — no custom code needed! Point to a LoRA <code>.safetensors</code> file, a PEFT adapter folder (<code>adapter_model.safetensors</code>), or a fine-tuned model folder. Tokenshark computes <b>ΔW = scale · (α/r) · B @ A</b> (or <b>W<sub>ft</sub> − W<sub>base</sub></b>) on the fly, highlights the blocks that changed the most on the flow graph above, and lets you scale or negate the adaptation live.</div>`
 
   const row = el('div', { className: 'row' })
   const pathIn = el('input', { placeholder: 'Path to .safetensors file or adapter / fine-tuned folder…', value: S.loraPath || '', style: 'width:340px' })

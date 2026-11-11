@@ -275,8 +275,8 @@ class TinyJob(Job):
             "num_hidden_layers": c["L"], "num_attention_heads": c["H"], "num_key_value_heads": c["H"], "vocab_size": V,
             "rms_norm_eps": 1e-6, "rope_theta": 10000.0, "max_position_embeddings": c["ctx"], "hidden_act": "silu",
             "tie_word_embeddings": True, "eos_token_id": 0,
-            "ai_analyser": {"trained_here": True, "steps": self.step, "corpus": self.corpus,
-                            "final_loss": self.losses[-1][1] if self.losses else None}}, indent=1))
+            "tokenshark": {"trained_here": True, "steps": self.step, "corpus": self.corpus,
+                           "final_loss": self.losses[-1][1] if self.losses else None}}, indent=1))
         save_file({k: v.detach().contiguous() for k, v in P.items()}, str(self.out / "model.safetensors"))
         self.result = {"model_id": self.out.name, "path": str(self.out), "n_params": self.n_params, "vocab": V}
         self.message = f"saved as model “{self.out.name}” — pick it in the model list and press Load"
@@ -417,7 +417,7 @@ class LoRAJob(Job):
                 "peft_type": "LORA", "r": self.rank, "lora_alpha": self.alpha, "target_modules": list(self.targets),
                 "base_model_name_or_path": ad.spec.get("repo") or ad.spec.get("id"), "task_type": "CAUSAL_LM",
                 "layers_to_transform": parse_index_spec(self.layers, cfg.n_layers) if self.layers.strip().lower() != "all" else None,
-                "ai_analyser": {"steps": self.step, "examples": self.examples[:50]}}, indent=1))
+                "tokenshark": {"steps": self.step, "examples": self.examples[:50]}}, indent=1))
             self.result = {"path": str(self.out), "n_params": self.n_params}
             if self.attach:
                 self.result["lora"] = loaded.attach_lora(self.out, 1.0, self.name)

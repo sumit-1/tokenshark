@@ -10,7 +10,7 @@ Students learning how open-weight models are adapted do two things:
      where:
          ΔW = W_finetuned - W_base
 
-Because every plugin in AI Analyser reads weights through `WeightStore` by canonical tensor name
+Because every plugin in Tokenshark reads weights through `WeightStore` by canonical tensor name
 (`W("model.layers.3.self_attn.q_proj.weight")` or `W("transformer_blocks.0.attn.to_q.weight")`),
 handling LoRAs and fine-tuned checkpoints at the `WeightStore` level means **every model plugin
 gets LoRA & fine-tune support automatically — without writing a new plugin!**

@@ -219,7 +219,7 @@ class KVCache:
         for s, st in self.states.items():
             tensors[f"s.{s}.conv"] = st["conv"].detach().float().cpu().contiguous()
             tensors[f"s.{s}.rec"] = st["rec"].detach().float().cpu().contiguous()
-        meta = {"format": "ai-analyser-kv/1", "fingerprint": json.dumps(self.fingerprint),
+        meta = {"format": "tokenshark-kv/1", "fingerprint": json.dumps(self.fingerprint),
                 "n_slots": str(self.n_slots), "segments": json.dumps([s.to_dict() for s in self.segments]),
                 "extra": json.dumps(extra or {})}
         save_file(tensors, str(path), metadata=meta)
@@ -229,8 +229,8 @@ class KVCache:
         from safetensors import safe_open
         with safe_open(str(path), framework="pt", device="cpu") as f:
             meta = f.metadata() or {}
-            if meta.get("format") != "ai-analyser-kv/1":
-                raise ValueError("Not an AI Analyser KV-cache file.")
+            if meta.get("format") not in ("tokenshark-kv/1", "ai-analyser-kv/1"):
+                raise ValueError("Not a Tokenshark KV-cache file.")
             n = int(meta["n_slots"])
             c = KVCache(json.loads(meta["fingerprint"]), n, device=device)
             c.pos = f.get_tensor("positions").float()

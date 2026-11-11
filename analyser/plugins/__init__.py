@@ -1,4 +1,4 @@
-"""Plugin Architecture for AI Analyser.
+"""Plugin Architecture for Tokenshark.
 
 How to add a new model plugin (for students, educators, or model creators):
 ===========================================================================
@@ -36,7 +36,7 @@ from ..weights import _pick_files, read_json
 
 
 class ModelPlugin:
-    """Base class for every model architecture plugin in AI Analyser."""
+    """Base class for every model architecture plugin in Tokenshark."""
 
     id: str = "base"
     name: str = "Base Model Plugin"
