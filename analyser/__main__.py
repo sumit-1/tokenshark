@@ -1,10 +1,28 @@
 """python -m analyser [--host 127.0.0.1] [--port 8000]"""
 import argparse
 import os
+import subprocess
+import sys
 import webbrowser
+from pathlib import Path
+
+
+def _ensure_venv():
+    """If launched with global `python -m analyser` outside `.venv` and a required package is missing,
+    automatically re-exec inside the local `.venv` when present."""
+    try:
+        import tokenizers  # noqa: F401
+        import safetensors  # noqa: F401
+    except ImportError:
+        root = Path(__file__).resolve().parent.parent
+        candidates = [root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"]
+        for vpy in candidates:
+            if vpy.exists() and vpy.resolve() != Path(sys.executable).resolve():
+                raise SystemExit(subprocess.call([str(vpy), "-m", "analyser", *sys.argv[1:]]))
 
 
 def main():
+    _ensure_venv()
     ap = argparse.ArgumentParser(description="Tokenshark — inspect and edit open-weight models in the browser")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)

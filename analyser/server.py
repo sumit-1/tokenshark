@@ -465,10 +465,9 @@ def track(run_id: str, word: str, position: int = -1, through: int = 0, backgrou
     _need("lm_tools", "Word tracking")
     ad = LOADED.adapter
     through = max(0, through)
-
-    def gen(memo):
-        yield ad.track_word(cap, r.plan.schedule_nodes, r.plan.schedule, position, word, through)
-    return _analysis(r, f"track “{word}”", "track", ("track", word, position, through), gen, not background)
+    return _analysis(r, f"track “{word}”", "track", ("track", word, position, through),
+                     lambda memo: ad.iter_track_word(cap, r.plan.schedule_nodes, r.plan.schedule, position, word, through, memo),
+                     not background)
 
 
 # ---------------------------------------------------------------- task manager

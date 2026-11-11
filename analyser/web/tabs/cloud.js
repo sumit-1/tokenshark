@@ -135,29 +135,33 @@ export async function renderCloud(p) {
 export async function renderTrack(box, pos) {
   box.innerHTML = `<div class="small">${spinner('tracking… (runs as a task: see Tasks)')}</div>`
   const seq = S.renderSeq, alive = () => S.renderSeq === seq && S.tab === 'cloud'
-  let r
-  try { r = await streamAnalysis(`/api/runs/${S.run.id}/track?word=${encodeURIComponent(S.trackWord)}&position=${pos}&through=${S.through}`, () => { }, alive) }
-  catch (e) { if (alive()) box.innerHTML = `<div class="bad">${esc(e.message)}</div>`; return }
-  if (!r || !alive()) return
-  const maxPush = Math.max(1e-6, ...r.rows.map(x => Math.abs(x.push)))
-  const lbl = x => esc(x.pos < 0 ? 'Embed' : `${flow.node(x.node)?.data.label || x.label}`)
-  const verdict = r.same
-    ? `The model chose “${esc(r.choice)}” — the word you expected.`
-    : `The model chose “${esc(r.choice)}”, not “${esc(r.target)}”. Look for where “${esc(r.target)}” loses its lead and which blocks push against it (red).`
-  const firstTop = r.first_top_layer == null ? `“${esc(r.target)}” is never the top word.` : `“${esc(r.target)}” first becomes the top word at ${lbl(r.rows.find(x => x.pos === r.first_top_layer))}.`
-  let h = `<div class="trackbox"><div><b>${verdict}</b> ${firstTop} <span class="small">(tracking token “${esc(r.target)}”${r.pieces > 1 ? ` — “${esc(r.word)}” is split into ${r.pieces} tokens here, so only its first piece is tracked` : ''}${r.candidates.length > 1 ? `; other spelling: ${r.candidates.slice(1).map(x => `“${esc(x)}”`).join(', ')}` : ''})</span></div>
-    <table class="grid track"><tr><th>Layer</th><th>would say</th><th>P(“${esc(r.target)}”)</th><th>rank</th>${r.same ? '' : `<th>P(“${esc(r.choice)}”)</th><th>rank</th>`}
-    <th title="How much this block's own write moves the final logit of “${esc(r.target)}” relative to “${esc(r.versus)}” (direct logit attribution)">push: “${esc(r.target)}” vs “${esc(r.versus)}”${r.same ? ' (runner-up)' : ''}</th></tr>`
-  r.rows.forEach(x => {
-    const w = Math.abs(x.push) / maxPush * 50
-    h += `<tr data-node="${esc(x.node)}"><td>${lbl(x)}</td><td>${esc(x.top)}</td>
-      <td><span class="pbar"><i style="width:${x.target_p * 100}%"></i></span> ${(x.target_p * 100).toFixed(1)}%</td><td class="${x.target_rank === 1 ? 'ok' : ''}">#${x.target_rank}</td>
-      ${r.same ? '' : `<td><span class="pbar alt"><i style="width:${x.choice_p * 100}%"></i></span> ${(x.choice_p * 100).toFixed(1)}%</td><td>#${x.choice_rank}</td>`}
-      <td><span class="dla"><i class="${x.push >= 0 ? 'pos' : 'neg'}" style="width:${w}%;${x.push >= 0 ? 'left:50%' : `left:${50 - w}%`}"></i></span> ${x.push >= 0 ? '+' : ''}${x.push.toFixed(2)}</td></tr>`
-  })
-  h += `</table><div class="small">“would say” and P use the decoding chosen above. The push column is exact bookkeeping: all rows add up to the final logit gap between “${esc(r.target)}” and “${esc(r.versus)}”. Green = this block argues for “${esc(r.target)}”, red = for “${esc(r.versus)}”.</div></div>`
-  box.innerHTML = h
-  box.querySelectorAll('tr[data-node]').forEach(tr => tr.onclick = () => flow.node(tr.dataset.node) && flow.select({ type: 'node', id: tr.dataset.node }))
+  const draw = (r, partial) => {
+    if (!r || !r.rows?.length || !alive()) return
+    const maxPush = Math.max(1e-6, ...r.rows.map(x => Math.abs(x.push)))
+    const lbl = x => esc(x.pos < 0 ? 'Embed' : `${flow.node(x.node)?.data.label || x.label}`)
+    const verdict = r.same
+      ? `The model chose “${esc(r.choice)}” — the word you expected.`
+      : `The model chose “${esc(r.choice)}”, not “${esc(r.target)}”. Look for where “${esc(r.target)}” loses its lead and which blocks push against it (red).`
+    const firstRow = r.first_top_layer == null ? null : r.rows.find(x => x.pos === r.first_top_layer)
+    const firstTop = firstRow == null ? `“${esc(r.target)}” is never the top word${partial ? ' so far' : ''}.` : `“${esc(r.target)}” first becomes the top word at ${lbl(firstRow)}.`
+    let h = `<div class="trackbox"><div>${partial ? spinner(`${Math.round((r._progress || 0) * 100)}%`) + ' ' : ''}<b>${verdict}</b> ${firstTop} <span class="small">(tracking token “${esc(r.target)}”${r.pieces > 1 ? ` — “${esc(r.word)}” is split into ${r.pieces} tokens here, so only its first piece is tracked` : ''}${r.candidates.length > 1 ? `; other spelling: ${r.candidates.slice(1).map(x => `“${esc(x)}”`).join(', ')}` : ''})</span></div>
+      <table class="grid track"><tr><th>Layer</th><th>would say</th><th>P(“${esc(r.target)}”)</th><th>rank</th>${r.same ? '' : `<th>P(“${esc(r.choice)}”)</th><th>rank</th>`}
+      <th title="How much this block's own write moves the final logit of “${esc(r.target)}” relative to “${esc(r.versus)}” (direct logit attribution)">push: “${esc(r.target)}” vs “${esc(r.versus)}”${r.same ? ' (runner-up)' : ''}</th></tr>`
+    r.rows.forEach(x => {
+      const w = Math.abs(x.push) / maxPush * 50
+      h += `<tr data-node="${esc(x.node)}"><td>${lbl(x)}</td><td>${esc(x.top)}</td>
+        <td><span class="pbar"><i style="width:${x.target_p * 100}%"></i></span> ${(x.target_p * 100).toFixed(1)}%</td><td class="${x.target_rank === 1 ? 'ok' : ''}">#${x.target_rank}</td>
+        ${r.same ? '' : `<td><span class="pbar alt"><i style="width:${x.choice_p * 100}%"></i></span> ${(x.choice_p * 100).toFixed(1)}%</td><td>#${x.choice_rank}</td>`}
+        <td><span class="dla"><i class="${x.push >= 0 ? 'pos' : 'neg'}" style="width:${w}%;${x.push >= 0 ? 'left:50%' : `left:${50 - w}%`}"></i></span> ${x.push >= 0 ? '+' : ''}${x.push.toFixed(2)}</td></tr>`
+    })
+    h += `</table><div class="small">“would say” and P use the decoding chosen above. The push column is exact bookkeeping: all rows add up to the final logit gap between “${esc(r.target)}” and “${esc(r.versus)}”. Green = this block argues for “${esc(r.target)}”, red = for “${esc(r.versus)}”.</div></div>`
+    box.innerHTML = h
+    box.querySelectorAll('tr[data-node]').forEach(tr => tr.onclick = () => flow.node(tr.dataset.node) && flow.select({ type: 'node', id: tr.dataset.node }))
+  }
+  try {
+    const r = await streamAnalysis(`/api/runs/${S.run.id}/track?word=${encodeURIComponent(S.trackWord)}&position=${pos}&through=${S.through}`, part => draw(part, true), alive)
+    if (r) draw(r, false)
+  } catch (e) { if (alive()) box.innerHTML = `<div class="bad">${esc(e.message)}</div>` }
 }
 
 export function cloudCard(title, words, sub, actual, big) {

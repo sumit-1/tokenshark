@@ -843,6 +843,15 @@ class LLMAdapter:
     @torch.no_grad()
     def track_word(self, cap: dict, schedule_nodes: list[str], schedule: list[int], position: int, word: str,
                    through: int = 0) -> dict:
+        out = None
+        for out in self.iter_track_word(cap, schedule_nodes, schedule, position, word, through):
+            pass
+        out.pop("_progress", None)
+        return out
+
+    @torch.no_grad()
+    def iter_track_word(self, cap: dict, schedule_nodes: list[str], schedule: list[int], position: int, word: str,
+                        through: int = 0, memo: dict | None = None):
         """'Which layer got it wrong?' — follow one expected word (e.g. ' Paris') through every layer at one
         position, next to the model's actual choice:
           • probability and rank of each word if the model stopped at that layer (lens), and
@@ -862,9 +871,8 @@ class LLMAdapter:
         versus = choice
         if versus == target and final is not None:      # model agreed: compare against its runner-up instead
             versus = int(final.topk(2).indices[1])
-        # direct logit attribution
-        W = self.model.W
-        g = W("model.norm.weight").float().cpu()
+        # direct logit attribution (norm_w applies +1.0 offset for Qwen3.5/3.6 zero-centred RMSNorm)
+        g = self.model.norm_w("model.norm.weight").float().cpu()
         U = w_out[[target, versus]].float().cpu()                                    # [2, d]
         x_final = cap["resid_post"][S - 1][t].float() if (S - 1) in cap["resid_post"] else None
         rms = float(torch.sqrt(x_final.pow(2).mean() + self.cfg.eps)) if x_final is not None else 1.0
@@ -872,7 +880,11 @@ class LLMAdapter:
         rows = []
         layers = [-1] + [p for p in range(S) if p in cap["resid_post"]]
         first_top = None
-        for pp in layers:
+        base = {"position": t, "token": self.tok.piece(cap["ids"][t]), "target": target_piece,
+                "candidates": [c[1] for c in cands], "pieces": n_pieces, "word": word.strip(),
+                "choice": self.tok.piece(choice), "same": target == choice,
+                "versus": self.tok.piece(versus), "through": through}
+        for n_done, pp in enumerate(layers, 1):
             lg_all = self.decode_layer(cap, schedule, pp, through, w_out)
             if t >= lg_all.shape[0]:
                 continue
@@ -892,11 +904,7 @@ class LLMAdapter:
                          "top": self.tok.piece(int(lg.argmax())),
                          "target_p": round(float(probs[target]), 5), "target_rank": r_t,
                          "choice_p": round(float(probs[choice]), 5), "choice_rank": r_c, "push": round(push, 3)})
-        return {"position": t, "token": self.tok.piece(cap["ids"][t]), "target": target_piece,
-                "candidates": [c[1] for c in cands], "pieces": n_pieces, "word": word.strip(),
-                "choice": self.tok.piece(choice), "same": target == choice,
-                "versus": self.tok.piece(versus),
-                "first_top_layer": first_top, "through": through, "rows": rows}
+            yield {**base, "first_top_layer": first_top, "rows": list(rows), "_progress": n_done / max(1, len(layers))}
 
     def attention(self, cap: dict, pos: int, head: int | None) -> dict:
         a = cap["attn"].get(pos)
