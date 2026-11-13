@@ -1,4 +1,4 @@
-"""python -m analyser [--host 127.0.0.1] [--port 8000]"""
+"""python -m tokenshark [--host 127.0.0.1] [--port 8000]"""
 import argparse
 import os
 import subprocess
@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def _ensure_venv():
-    """If launched with global `python -m analyser` outside `.venv` and a required package is missing,
+    """If launched with global `python -m tokenshark` outside `.venv` and a required package is missing,
     automatically re-exec inside the local `.venv` when present."""
     try:
         import tokenizers  # noqa: F401
@@ -18,7 +18,7 @@ def _ensure_venv():
         candidates = [root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"]
         for vpy in candidates:
             if vpy.exists() and vpy.resolve() != Path(sys.executable).resolve():
-                raise SystemExit(subprocess.call([str(vpy), "-m", "analyser", *sys.argv[1:]]))
+                raise SystemExit(subprocess.call([str(vpy), "-m", "tokenshark", *sys.argv[1:]]))
 
 
 def main():
@@ -26,15 +26,15 @@ def main():
     ap = argparse.ArgumentParser(description="Tokenshark — inspect and edit open-weight models in the browser")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--device", default=os.environ.get("ANALYSER_DEVICE", "auto"), help="auto | cuda | mps | cpu")
-    ap.add_argument("--dtype", default=os.environ.get("ANALYSER_DTYPE", "auto"), help="auto | fp32 | fp16 | bf16")
-    ap.add_argument("--models-dir", default=os.environ.get("ANALYSER_MODELS", ""),
+    ap.add_argument("--device", default=os.environ.get("TOKENSHARK_DEVICE", "auto"), help="auto | cuda | mps | cpu")
+    ap.add_argument("--dtype", default=os.environ.get("TOKENSHARK_DTYPE", "auto"), help="auto | fp32 | fp16 | bf16")
+    ap.add_argument("--models-dir", default=os.environ.get("TOKENSHARK_MODELS", ""),
                     help="where models are downloaded (default: ./models next to the app)")
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args()
-    os.environ["ANALYSER_DEVICE"], os.environ["ANALYSER_DTYPE"] = a.device, a.dtype
+    os.environ["TOKENSHARK_DEVICE"], os.environ["TOKENSHARK_DTYPE"] = a.device, a.dtype
     if a.models_dir:
-        os.environ["ANALYSER_MODELS"] = a.models_dir
+        os.environ["TOKENSHARK_MODELS"] = a.models_dir
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         if sock.connect_ex((a.host if a.host != "0.0.0.0" else "127.0.0.1", a.port)) == 0:

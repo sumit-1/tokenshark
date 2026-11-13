@@ -12,9 +12,9 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from analyser.flow import FlowError, compile_flow, default_llm_flow, default_t2i_flow   # noqa: E402
-from analyser.llm import LLMAdapter                                                    # noqa: E402
-from analyser.sd import SDAdapter                                                      # noqa: E402
+from tokenshark.flow import FlowError, compile_flow, default_llm_flow, default_t2i_flow   # noqa: E402
+from tokenshark.llm import LLMAdapter                                                    # noqa: E402
+from tokenshark.sd import SDAdapter                                                      # noqa: E402
 from tests.make_tiny import make_llm, make_sd                                          # noqa: E402
 
 torch.set_grad_enabled(False)
@@ -138,11 +138,11 @@ def test_region_lock_keeps_start_image(sd):
 
 
 def test_models_folder_discovery(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANALYSER_MODELS", str(tmp_path))
+    monkeypatch.setenv("TOKENSHARK_MODELS", str(tmp_path))
     (tmp_path / "my-llm").mkdir()
     (tmp_path / "my-llm" / "config.json").write_text("{}")
     (tmp_path / "junk").mkdir()
-    from analyser.weights import discover_folders
+    from tokenshark.weights import discover_folders
     found = discover_folders(set())
     assert [f["id"] for f in found] == ["my-llm"] and found[0]["family"] == "causal_lm"
 
@@ -320,8 +320,8 @@ def test_download_progress_reported(tmp_path, monkeypatch):
     """Hugging Face is mocked: the fake download writes a file in chunks; progress must climb to 100%."""
     import time as _t
     import huggingface_hub
-    from analyser import weights
-    monkeypatch.setenv("ANALYSER_MODELS", str(tmp_path))
+    from tokenshark import weights
+    monkeypatch.setenv("TOKENSHARK_MODELS", str(tmp_path))
     monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda repo: ["config.json", "model.safetensors"])
     monkeypatch.setattr(weights, "_repo_sizes", lambda repo: {"config.json": 2, "model.safetensors": 3_000_000})
     monkeypatch.setattr(weights, "_adopt_hf_cache", lambda *a, **k: False)

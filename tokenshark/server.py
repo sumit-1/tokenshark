@@ -1,4 +1,4 @@
-"""FastAPI server. The browser UI (static files in analyser/web, no build step) is a client of this API."""
+"""FastAPI server. The browser UI (static files in tokenshark/web, no build step) is a client of this API."""
 from __future__ import annotations
 
 import threading

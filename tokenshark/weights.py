@@ -400,8 +400,8 @@ def _pick_files(repo_files: list[str], family: str) -> list[str]:
 
 
 def models_dir() -> Path:
-    """Where downloaded models live: ./models next to the app, or $ANALYSER_MODELS / --models-dir."""
-    d = Path(os.environ.get("ANALYSER_MODELS") or Path(__file__).parent.parent / "models").expanduser()
+    """Where downloaded models live: ./models next to the app, or $TOKENSHARK_MODELS / --models-dir."""
+    d = Path(os.environ.get("TOKENSHARK_MODELS") or Path(__file__).parent.parent / "models").expanduser()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

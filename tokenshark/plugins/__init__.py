@@ -2,7 +2,7 @@
 
 How to add a new model plugin (for students, educators, or model creators):
 ===========================================================================
-1. Drop a single `.py` file into `analyser/plugins/` (for example `my_model.py`).
+1. Drop a single `.py` file into `tokenshark/plugins/` (for example `my_model.py`).
 2. Subclass `ModelPlugin` and decorate it with `@register_plugin`.
 3. Define:
    - `id`: unique plugin identifier (e.g. `"qwen_image_21"`, `"stable_diffusion"`, `"causal_lm"`).
@@ -20,7 +20,7 @@ How to add a new model plugin (for students, educators, or model creators):
    - `create_adapter(spec, root, device, dtype, policy, keep_layers)`: returns the runtime
      adapter instance.
 
-To remove a plugin, simply delete its `.py` file from `analyser/plugins/`.
+To remove a plugin, simply delete its `.py` file from `tokenshark/plugins/`.
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class ModelPlugin:
     # features this plugin supports without hardcoding model names in app.js
     # What the page shows for models of this plugin. The web UI has no per-model conditions: it builds itself
     # from this declaration.
-    #   tabs             results tabs, in order — ids of modules in analyser/web/tabs/ (see web/README.md)
+    #   tabs             results tabs, in order — ids of modules in tokenshark/web/tabs/ (see web/README.md)
     #   palette_actions  flow-editing buttons — the data-action values in web/index.html
     #   train            sections of the Train tab: tiny_text | adapt | tiny_image
     #   course           which guided course the Learn tab offers: text | image
@@ -150,7 +150,7 @@ def register_plugin(cls: type[ModelPlugin]) -> type[ModelPlugin]:
 
 
 def discover_plugins() -> dict[str, type[ModelPlugin]]:
-    """Import every `.py` module in `analyser/plugins/` so plugins self-register."""
+    """Import every `.py` module in `tokenshark/plugins/` so plugins self-register."""
     global _DISCOVERED
     if not _DISCOVERED:
         pkg_dir = Path(__file__).parent

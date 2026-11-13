@@ -6,4 +6,8 @@ tests/tiny/
 .pytest_cache/
 models/
 Claude outputs/
-
+.claude/
+demos/
+build/
+dist/
+*.egg-info/

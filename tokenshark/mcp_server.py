@@ -4,11 +4,11 @@ The server talks to a running Tokenshark over its local HTTP API, so everything 
 interventions, patching sweeps — also appears in the student's browser (Runs tab → click a run), where the
 student can open the lens, attention and neuron views on it. Start the app first, then point a client at:
 
-    python -m analyser.mcp_server                       # app at http://127.0.0.1:8000
-    python -m analyser.mcp_server --url http://127.0.0.1:8001
+    python -m tokenshark.mcp_server                       # app at http://127.0.0.1:8000
+    python -m tokenshark.mcp_server --url http://127.0.0.1:8001
 
 Claude Desktop / Claude Code config:
-    {"mcpServers": {"tokenshark": {"command": "<path to .venv python>", "args": ["-m", "analyser.mcp_server"],
+    {"mcpServers": {"tokenshark": {"command": "<path to .venv python>", "args": ["-m", "tokenshark.mcp_server"],
                                    "cwd": "<folder of this project>"}}}
 
 Protocol: MCP over stdio (JSON-RPC 2.0, one JSON object per line). Pure standard library — no torch, no
@@ -414,7 +414,7 @@ TOOLS = {
                            {"prompt": S, "bits": {"type": "array", "items": I}, "max_new_tokens": I}, ["prompt"]),
     "block_code": _tool(t_block_code, "The simple Python a box runs (kind: block | embed | final_norm | lm_head | sampler). Edit it and pass it in a code edit.",
                         {"layer": I, "kind": S}),
-    "export_script": _tool(t_export_script, "A run as a Python script (analyser.api) that reproduces it — for moving a lab result into a notebook.", RUN, ["run_id"]),
+    "export_script": _tool(t_export_script, "A run as a Python script (tokenshark.api) that reproduces it — for moving a lab result into a notebook.", RUN, ["run_id"]),
 }
 
 

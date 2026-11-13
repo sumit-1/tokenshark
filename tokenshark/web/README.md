@@ -19,7 +19,7 @@ tabs/            One module per results tab. Each ends with registerTab({...}).
 
 ## The rule: the page has no per-model conditions
 
-What a model shows is declared by its **plugin** (`analyser/plugins/*.py`, `ui_schema`), and the page builds
+What a model shows is declared by its **plugin** (`tokenshark/plugins/*.py`, `ui_schema`), and the page builds
 itself from that:
 
 | `ui_schema` key | Meaning | Where the ids come from |
@@ -54,7 +54,7 @@ so `setTab('output')` opens whichever one the loaded model's plugin lists.
 2. Import it in `app.js` (`import './tabs/mytab.js'`).
 3. Add `"mytab"` to `ui_schema["tabs"]` of every plugin whose models it works for.
 
-If the tab needs data from the server, add a route (see `analyser/labapi.py`) and guard it with
+If the tab needs data from the server, add a route (see `tokenshark/labapi.py`) and guard it with
 `_need("<feature>", "My tool")`; list that feature in the plugins that support it.
 
 ## Talk through events, not imports
@@ -71,7 +71,7 @@ that owns them.
 
 ## Add a model family
 
-Write a plugin (`analyser/plugins/_template.py`): an adapter, `default_flow(info)`, `features` (which backend
+Write a plugin (`tokenshark/plugins/_template.py`): an adapter, `default_flow(info)`, `features` (which backend
 tools the adapter supports) and `ui_schema` (which existing tabs, palette actions and train sections fit). A
 new architecture that fits existing tabs needs no change to the page at all. A new kind of view is a new tab
 module plus one line in the plugin.

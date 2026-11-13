@@ -1,4 +1,4 @@
-"""Export a run as a Python script that reproduces it with the public API (analyser.api).
+"""Export a run as a Python script that reproduces it with the public API (tokenshark.api).
 
 The script rebuilds the flow from the model's default flow, one readable line per change (prompt, sampler,
 bypassed / repeated blocks, interventions, layer prompts, edited box code). Runs it depends on — the source of
@@ -165,7 +165,7 @@ def run_script(run, default_flow_for, get_run, vectors: dict | None = None) -> s
             "Reproduces the run with the same engine the app uses. Run it from the app's folder:",
             f"    python run_{run.id}.py",
             'Change anything and run again; `run` holds the activations (run.resid, run.attention, run.lens …)."""',
-            "from analyser.api import Lab", "",
+            "from tokenshark.api import Lab", "",
             f"lab = Lab({run.model_id!r})", ""]
     tail = ['run.image.save("out.png")', 'print("saved out.png")'] if image else ["print(run.text)"]
     return "\n".join(head + body + tail) + "\n"

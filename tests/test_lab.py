@@ -11,11 +11,11 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from analyser import blockcode, interp                                                 # noqa: E402
-from analyser.api import Lab                                                           # noqa: E402
-from analyser.flow import FlowError, compile_flow                                      # noqa: E402
-from analyser.flowbuild import FlowBuilder, walk_chain                                 # noqa: E402
-from analyser.quant import iter_compare, quantize                                      # noqa: E402
+from tokenshark import blockcode, interp                                                 # noqa: E402
+from tokenshark.api import Lab                                                           # noqa: E402
+from tokenshark.flow import FlowError, compile_flow                                      # noqa: E402
+from tokenshark.flowbuild import FlowBuilder, walk_chain                                 # noqa: E402
+from tokenshark.quant import iter_compare, quantize                                      # noqa: E402
 from tests.make_tiny import make_llm                                                   # noqa: E402
 
 torch.set_grad_enabled(False)
@@ -288,8 +288,8 @@ def test_flowbuilder_schedule(lab):
 
 
 def test_export_script_reproduces_the_run(lab, tmp_path):
-    from analyser.export import run_script
-    from analyser.flow import default_llm_flow
+    from tokenshark.export import run_script
+    from tokenshark.flow import default_llm_flow
 
     class R:                                           # the slice of runs.Run the exporter reads
         def __init__(self, rr, label=""):
@@ -317,7 +317,7 @@ def test_export_script_reproduces_the_run(lab, tmp_path):
 
 # ---------------------------------------------------------------- training
 def test_train_tiny_model_then_load_it(tmp_path):
-    from analyser.train import TinyJob
+    from tokenshark.train import TinyJob
     job = TinyJob("t", tmp_path / "t", corpus="facts", d_model=32, n_layers=2, n_heads=2, context=24, vocab=280,
                   steps=60, batch=16, lr=5e-3)
     with torch.enable_grad():
@@ -330,7 +330,7 @@ def test_train_tiny_model_then_load_it(tmp_path):
 
 
 def test_forward_train_matches_the_engine(lab):
-    from analyser.train import forward_train
+    from tokenshark.train import forward_train
     m, cfg = lab.adapter.model, lab.adapter.cfg
     r = lab.run(A, max_new_tokens=1)
     n = r.captures["n_in"]
@@ -343,9 +343,9 @@ def test_forward_train_matches_the_engine(lab):
 
 
 def test_train_lora_and_attach(lab, tmp_path):
-    from analyser.registry import Loaded
-    from analyser.tasks import TaskManager
-    from analyser.train import LoRAJob
+    from tokenshark.registry import Loaded
+    from tokenshark.tasks import TaskManager
+    from tokenshark.train import LoRAJob
     loaded = Loaded()
     loaded.adapter, loaded.plugin, loaded.spec, loaded.info = lab.adapter, lab.plugin, lab.spec, dict(lab.info)
     base = lab.run(A, max_new_tokens=1)
@@ -365,7 +365,7 @@ def test_train_lora_and_attach(lab, tmp_path):
 
 # ---------------------------------------------------------------- MCP server (protocol only)
 def test_mcp_protocol():
-    from analyser import mcp_server as M
+    from tokenshark import mcp_server as M
     out = M.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
     assert out["result"]["serverInfo"]["name"] == "tokenshark" and "tools" in out["result"]["capabilities"]
     assert M.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
@@ -382,9 +382,9 @@ def test_mcp_protocol():
 
 def test_lora_can_adapt_a_single_block(lab, tmp_path):
     """A LoRA adds a small pair per chosen matrix per chosen block — not one layer, and not necessarily all."""
-    from analyser.registry import Loaded
-    from analyser.tasks import TaskManager
-    from analyser.train import LoRAJob
+    from tokenshark.registry import Loaded
+    from tokenshark.tasks import TaskManager
+    from tokenshark.train import LoRAJob
     loaded = Loaded()
     loaded.adapter, loaded.plugin, loaded.spec, loaded.info = lab.adapter, lab.plugin, lab.spec, dict(lab.info)
     job = LoRAJob(loaded, TaskManager(loaded.lock), tmp_path / "one", "one", ["The capital of France is Tokyo."],
@@ -401,7 +401,7 @@ def test_lora_can_adapt_a_single_block(lab, tmp_path):
 
 
 def test_train_tiny_image_model():
-    from analyser.train_image import HELD_OUT, ImageJob, draw
+    from tokenshark.train_image import HELD_OUT, ImageJob, draw
     import numpy as np
     assert draw("red", "circle", np.random.RandomState(0)).shape == (3, 16, 16)
     job = ImageJob(steps=40, batch=16)
@@ -426,10 +426,10 @@ def test_train_tiny_image_model():
                                        ("new_block", {"after": 1, "init": "random"})])
 def test_adaptation_methods(lab, tmp_path, method, kw):
     """Every way of adapting the model trains, saves, attaches, changes the output, and detaches cleanly."""
-    from analyser.adapt import AdaptJob
-    from analyser.flow import compile_flow, default_llm_flow
-    from analyser.registry import Loaded
-    from analyser.tasks import TaskManager
+    from tokenshark.adapt import AdaptJob
+    from tokenshark.flow import compile_flow, default_llm_flow
+    from tokenshark.registry import Loaded
+    from tokenshark.tasks import TaskManager
     loaded = Loaded()
     loaded.adapter, loaded.plugin, loaded.spec, loaded.info = lab.adapter, lab.plugin, lab.spec, dict(lab.info)
     n = lab.adapter.cfg.n_layers
@@ -471,9 +471,9 @@ def test_adaptation_methods(lab, tmp_path, method, kw):
 
 
 def test_lab_api_attaches_an_added_block(lab, tmp_path):
-    from analyser.adapt import AdaptJob
-    from analyser.registry import Loaded
-    from analyser.tasks import TaskManager
+    from tokenshark.adapt import AdaptJob
+    from tokenshark.registry import Loaded
+    from tokenshark.tasks import TaskManager
     loaded = Loaded()
     loaded.adapter, loaded.plugin, loaded.spec, loaded.info = lab.adapter, lab.plugin, lab.spec, dict(lab.info)
     n = lab.adapter.cfg.n_layers

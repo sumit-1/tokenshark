@@ -229,7 +229,7 @@ class KVCache:
         from safetensors import safe_open
         with safe_open(str(path), framework="pt", device="cpu") as f:
             meta = f.metadata() or {}
-            if meta.get("format") not in ("tokenshark-kv/1", "ai-analyser-kv/1"):
+            if meta.get("format") != "tokenshark-kv/1":
                 raise ValueError("Not a Tokenshark KV-cache file.")
             n = int(meta["n_slots"])
             c = KVCache(json.loads(meta["fingerprint"]), n, device=device)

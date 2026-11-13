@@ -1,6 +1,6 @@
-"""TEMPLATE: Copy this file to `analyser/plugins/<your_model>.py` to add a new model plugin!
+"""TEMPLATE: Copy this file to `tokenshark/plugins/<your_model>.py` to add a new model plugin!
 
-Because all plugins in `analyser/plugins/` are auto-discovered on startup (unless their filename
+Because all plugins in `tokenshark/plugins/` are auto-discovered on startup (unless their filename
 starts with `_`), any `.py` file you drop here and decorate with `@register_plugin` immediately
 appears in the model picker, supports weight streaming (`auto` / `device` / `cpu` / `disk`),
 and gets automatic LoRA / fine-tune visualisation.
@@ -46,7 +46,7 @@ class CustomModelPlugin(ModelPlugin):
 
     # 3. Declarative UI schema: which tabs and editable components appear in the browser
     ui_schema = {
-        # ids of tab modules in analyser/web/tabs/ — list only what your adapter can feed
+        # ids of tab modules in tokenshark/web/tabs/ — list only what your adapter can feed
         "tabs": ["learn", "output_text", "debug_text", "lens", "lora", "quant", "runs"],
         "palette_actions": ["intervention", "duplicate_block", "bypass_block"],
         "train": [],
@@ -73,7 +73,7 @@ class CustomModelPlugin(ModelPlugin):
         cfg = read_json(root / "config.json")
         return cfg.get("model_type") == "my_custom_arch"
 
-    # 5. Instantiate your runtime adapter (uses WeightStore + shared helpers in analyser/common.py)
+    # 5. Instantiate your runtime adapter (uses WeightStore + shared helpers in tokenshark/common.py)
     @classmethod
     def create_adapter(cls, spec: dict, root: Path, device: str, dtype: torch.dtype,
                        policy: str = "auto", keep_layers: int = 0):

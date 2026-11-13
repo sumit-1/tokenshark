@@ -11,10 +11,10 @@ import torch
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from analyser.engine import RunContext                     # noqa: E402
-from analyser.flow import compile_flow, default_llm_flow, default_t2i_flow   # noqa: E402
-from analyser.kvcache import KVCache                       # noqa: E402
-from analyser.llm import LLMAdapter, RawLLM                # noqa: E402
+from tokenshark.engine import RunContext                     # noqa: E402
+from tokenshark.flow import compile_flow, default_llm_flow, default_t2i_flow   # noqa: E402
+from tokenshark.kvcache import KVCache                       # noqa: E402
+from tokenshark.llm import LLMAdapter, RawLLM                # noqa: E402
 from tests.make_tiny import make_llm, make_sd              # noqa: E402
 
 torch.set_grad_enabled(False)
@@ -129,7 +129,7 @@ def test_meta_format_matches(tmp_path):
     model = RawLLM(md, "cpu", torch.float32, "disk", 0)
     model.cfg.inter = cfg.intermediate_size
     model.cfg.rope_scaling = cfg.rope_scaling
-    from analyser.llm import rope_inv_freq
+    from tokenshark.llm import rope_inv_freq
     model.inv_freq = rope_inv_freq(model.cfg)
     ids = list(range(4, 20))
     mine, _ = _raw_logits(model, ids)
@@ -186,7 +186,7 @@ def sd(tmp_path_factory, request):
 
 def test_clip_tokenizer_matches(sd):
     from transformers import CLIPTokenizer as Ref
-    from analyser.tokenizer import CLIPTokenizer
+    from tokenshark.tokenizer import CLIPTokenizer
     d = sd[0]
     ref = Ref.from_pretrained(d / "tokenizer")
     mine = CLIPTokenizer(d / "tokenizer")
@@ -195,7 +195,7 @@ def test_clip_tokenizer_matches(sd):
 
 
 def test_sd_components_match_diffusers(sd):
-    from analyser.sd import CLIPText, UNet, VAE
+    from tokenshark.sd import CLIPText, UNet, VAE
     d, te, unet, vae, sch = sd
     ids = [49406 % 600] * 3
     ids = list(range(1, 12))
@@ -215,7 +215,7 @@ def test_sd_components_match_diffusers(sd):
 
 
 def test_euler_matches_diffusers(sd):
-    from analyser.sd import Euler
+    from tokenshark.sd import Euler
     d, *_, sch = sd
     for steps in (1, 4, 20):
         sch.set_timesteps(steps)
@@ -229,7 +229,7 @@ def test_euler_matches_diffusers(sd):
 def test_sd_pipeline_matches_diffusers(sd):
     from diffusers import StableDiffusionPipeline
     from transformers import CLIPTokenizer as Ref
-    from analyser.sd import SDAdapter
+    from tokenshark.sd import SDAdapter
     d, te, unet, vae, sch = sd
     pipe = StableDiffusionPipeline(vae=vae, text_encoder=te, tokenizer=Ref.from_pretrained(d / "tokenizer"),
                                    unet=unet, scheduler=sch, safety_checker=None, feature_extractor=None,

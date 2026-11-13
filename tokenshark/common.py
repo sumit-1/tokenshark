@@ -1,7 +1,7 @@
 """Shared building blocks for Tokenshark model plugins.
 
 This module holds the mathematical and visualisation primitives that multiple
-model plugins share — so each plugin file (`analyser/plugins/*.py`) stays short,
+model plugins share — so each plugin file (`tokenshark/plugins/*.py`) stays short,
 readable, and focused purely on its architecture:
 
   - Normalisation: `rms_norm`, `layer_norm`, `group_norm`, `channel_rms_norm`

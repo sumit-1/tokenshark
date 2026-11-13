@@ -81,7 +81,7 @@ def code_check(req: CodeReq):
 # ---------------------------------------------------------------- run → script
 @app.get("/api/runs/{run_id}/script", response_class=PlainTextResponse)
 def run_script(run_id: str):
-    """This run as a Python script that reproduces it with analyser.api."""
+    """This run as a Python script that reproduces it with tokenshark.api."""
     from .export import run_script as make
     r = _run(run_id)
     _, info = _require_model()

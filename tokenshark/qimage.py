@@ -94,7 +94,7 @@ class QwenTextEncoder:
 
 
 # ======================================================================================
-# Single-stream DiT (uses rope_complex_axis & apply_rope_complex from analyser/common.py)
+# Single-stream DiT (uses rope_complex_axis & apply_rope_complex from tokenshark/common.py)
 # ======================================================================================
 
 def _rms(x, w, eps):

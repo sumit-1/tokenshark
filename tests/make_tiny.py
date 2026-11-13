@@ -155,7 +155,7 @@ def make_sd(out: Path, linear_proj=False, seed=0):
     torch.manual_seed(seed)
     out.mkdir(parents=True, exist_ok=True)
     # CLIP-style vocab: byte alphabet, with and without </w>, a few merges, then specials.
-    from analyser.tokenizer import _bytes_to_unicode
+    from tokenshark.tokenizer import _bytes_to_unicode
     chars = list(_bytes_to_unicode().values())
     vocab = chars + [c + "</w>" for c in chars]
     merges = ["r e", "re d</w>", "f o", "fo x</w>", "s n", "o w</w>", "t h", "th e</w>"]

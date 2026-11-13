@@ -1,6 +1,6 @@
 """FlowBuilder: edit a flow (the boxes-and-arrows graph the UI draws) from Python, in one line per change.
 
-Pure Python, no torch — used by the Python API (analyser.api), by exported run scripts and by the MCP tutor.
+Pure Python, no torch — used by the Python API (tokenshark.api), by exported run scripts and by the MCP tutor.
 
     flow = lab.flow()                                   # the model's default flow
     flow.prompt("The capital of France is").sampler(max_new_tokens=8)

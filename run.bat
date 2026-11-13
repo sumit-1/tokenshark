@@ -11,7 +11,7 @@ if not exist .venv (
 ) else (
   call .venv\Scripts\activate.bat
 )
-python -m analyser %*
+python -m tokenshark %*
 goto :eof
 :err
 echo Setup failed. Make sure Python 3.10+ is installed and on PATH.

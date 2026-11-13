@@ -8,9 +8,9 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from analyser.engine import RunContext                     # noqa: E402
-from analyser.kvcache import KVCache                       # noqa: E402
-from analyser.llm import RawLLM                            # noqa: E402
+from tokenshark.engine import RunContext                     # noqa: E402
+from tokenshark.kvcache import KVCache                       # noqa: E402
+from tokenshark.llm import RawLLM                            # noqa: E402
 from tests.make_tiny import make_llm                       # noqa: E402
 
 torch.set_grad_enabled(False)

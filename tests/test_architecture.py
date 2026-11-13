@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from analyser.plugins import ModelPlugin, discover_plugins                             # noqa: E402
+from tokenshark.plugins import ModelPlugin, discover_plugins                             # noqa: E402
 
-WEB = Path(__file__).parent.parent / "analyser" / "web"
+WEB = Path(__file__).parent.parent / "tokenshark" / "web"
 TAB_IDS = {m for f in (WEB / "tabs").glob("*.js") for m in re.findall(r"registerTab\(\{ id: '(\w+)'", f.read_text(encoding="utf-8"))}
 ACTIONS = set(re.findall(r'data-action="(\w+)"', (WEB / "index.html").read_text(encoding="utf-8")))
 TRAIN = {m for f in (WEB / "tabs").glob("*.js") for m in re.findall(r"registerTrainSection\('(\w+)'", f.read_text(encoding="utf-8"))}
@@ -34,8 +34,8 @@ def test_plugins_declare_only_what_exists(plugin):
     assert ui.get("course", "") in ("", "text", "image")
     assert set(plugin.features) <= FEATURES
     assert ui.get("modality") in ("text", "image") and ui.get("texts", "") in ("", "lm", "unet", "dit")
-    from analyser.flow import FLOW_SHAPES
-    from analyser.runs import RUN_LOOPS
+    from tokenshark.flow import FLOW_SHAPES
+    from tokenshark.runs import RUN_LOOPS
     assert plugin.run_loop in RUN_LOOPS and plugin.family in FLOW_SHAPES
     assert ui.get("step_debugger", False) == (plugin.run_loop != "plain"), "only steppable run loops can offer the step buttons"
     assert plugin.default_flow.__func__ is not ModelPlugin.default_flow.__func__, "the plugin must define default_flow()"
@@ -59,10 +59,10 @@ def test_routes_ask_the_plugin_for_features(tmp_path_factory):
     except Exception:
         pytest.skip("fastapi's test client is not available")
     import torch
-    from analyser.llm import LLMAdapter
-    from analyser.plugins.causal_lm import CausalLMPlugin
-    from analyser.registry import LOADED
-    from analyser.server import app
+    from tokenshark.llm import LLMAdapter
+    from tokenshark.plugins.causal_lm import CausalLMPlugin
+    from tokenshark.registry import LOADED
+    from tokenshark.server import app
     from tests.make_tiny import make_llm
 
     class Bare(CausalLMPlugin):                       # same model, but a plugin that offers no language-model tools

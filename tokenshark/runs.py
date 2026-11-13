@@ -14,9 +14,9 @@ from pathlib import Path
 
 from .flow import Plan
 
-DATA = Path(os.environ.get("ANALYSER_HOME", Path(__file__).parent.parent / "data"))
+DATA = Path(os.environ.get("TOKENSHARK_HOME", Path(__file__).parent.parent / "data"))
 RUNS_DIR = DATA / "runs"
-MAX_CAPTURED = int(os.environ.get("ANALYSER_KEEP_RUNS", "8"))
+MAX_CAPTURED = int(os.environ.get("TOKENSHARK_KEEP_RUNS", "8"))
 
 
 class Run:

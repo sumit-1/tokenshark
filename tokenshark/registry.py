@@ -1,4 +1,4 @@
-"""Model registry: discovers plugins in `analyser/plugins/`, user entries (`models.local.json`),
+"""Model registry: discovers plugins in `tokenshark/plugins/`, user entries (`models.local.json`),
 and manages the currently loaded model + any attached LoRA / fine-tuned checkpoint overlay."""
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from . import weights as _weights
 from .weights import discover_folders, folder_size, is_downloaded, model_folder, models_dir, resolve_model_dir
 
 HERE = Path(__file__).parent
-LOCAL = Path(os.environ.get("ANALYSER_HOME", HERE.parent / "data")) / "models.local.json"
+LOCAL = Path(os.environ.get("TOKENSHARK_HOME", HERE.parent / "data")) / "models.local.json"
 
 
 def list_specs() -> list[dict]:

@@ -14,11 +14,11 @@ try:
 except Exception:                                    # the test client needs an HTTP client package
     pytest.skip("fastapi's test client is not available", allow_module_level=True)
 
-from analyser import interp, runs                                                      # noqa: E402
-from analyser.llm import LLMAdapter                                                    # noqa: E402
-from analyser.plugins.causal_lm import CausalLMPlugin                                  # noqa: E402
-from analyser.registry import LOADED                                                   # noqa: E402
-from analyser.server import app                                                        # noqa: E402
+from tokenshark import interp, runs                                                      # noqa: E402
+from tokenshark.llm import LLMAdapter                                                    # noqa: E402
+from tokenshark.plugins.causal_lm import CausalLMPlugin                                  # noqa: E402
+from tokenshark.registry import LOADED                                                   # noqa: E402
+from tokenshark.server import app                                                        # noqa: E402
 from tests.make_tiny import make_llm                                                   # noqa: E402
 
 torch.set_grad_enabled(False)
@@ -32,7 +32,7 @@ def api(tmp_path_factory):
         (home / sub).mkdir()
     mp.setattr(interp, "VEC_DIR", home / "vectors")
     mp.setattr(runs, "RUNS_DIR", home / "runs")
-    mp.setenv("ANALYSER_MODELS", str(home / "models"))
+    mp.setenv("TOKENSHARK_MODELS", str(home / "models"))
     d = tmp_path_factory.mktemp("llm") / "tiny"
     make_llm(d, "qwen2")
     ad = LLMAdapter({"id": "tiny"}, d, "cpu", torch.float32, "device")

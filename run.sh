@@ -10,4 +10,4 @@ if [ ! -d .venv ]; then
 else
   . .venv/bin/activate
 fi
-exec python -m analyser "$@"
+exec python -m tokenshark "$@"

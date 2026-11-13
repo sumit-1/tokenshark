@@ -41,12 +41,12 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 ### Flow Editor & Raw PyTorch Engine
 - **Flow editor.** Each model is drawn as boxes and arrows (`prompt → tokenizer → embed → blocks → norm → head → sampler`, `prompt → CLIP → UNet stages → VAE`, or `prompt → Qwen3-VL → 32 single-stream DiT blocks → Wan VAE`). Re-wire arrows to remove, repeat, or re-order transformer blocks; wire intervention boxes into a block's top port to zero, scale, add noise, mean-ablate, patch, steer, or clamp an activation.
 - **Bypass keeps the block.** A bypassed block stays on the canvas, struck through; the residual stream skips it. Restore it from the right-click menu or the inspector.
-- **Raw PyTorch engine.** No `transformers`, no `diffusers` at runtime. Every matmul is in `analyser/llm.py`, `analyser/sd.py`, and `analyser/qimage.py`, small enough to read in class.
-- **Declarative plugin architecture.** Each model family is a self-contained plugin in `analyser/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`) that declares its `ui_schema` (tabs, palette actions, courses, training sections) and backend `features`.
+- **Raw PyTorch engine.** No `transformers`, no `diffusers` at runtime. Every matmul is in `tokenshark/llm.py`, `tokenshark/sd.py`, and `tokenshark/qimage.py`, small enough to read in class.
+- **Declarative plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`) that declares its `ui_schema` (tabs, palette actions, courses, training sections) and backend `features`.
 
 ### Editable Box Code & Export to Python Script
-- **Editable box code (`analyser/blockcode.py`).** Click **View / edit code** on any language-model box (`Embed`, any `Block`, `Final norm`, `LM head`, `Sampler`) to view the exact ~15 lines of Python it runs (`rms_norm`, `heads`, `remember(k, v)`, `rope`, `softmax`, `silu`, `unembed`). Edit the code in the browser (e.g., remove `x = x + mlp_out`, scale `attn_out`, or write a custom sampler) and the engine executes your Python in place of the built-in step, capturing `print(...)` output.
-- **Export run as Python script (`analyser/export.py` & `analyser/api.py`).** Any run in the browser (including its block schedule, bypasses, patches, steering vectors, neuron clamps, layer prompts, LoRA/quantization overlays, and custom box code) can be exported as a standalone Python script using `from analyser.api import Lab`.
+- **Editable box code (`tokenshark/blockcode.py`).** Click **View / edit code** on any language-model box (`Embed`, any `Block`, `Final norm`, `LM head`, `Sampler`) to view the exact ~15 lines of Python it runs (`rms_norm`, `heads`, `remember(k, v)`, `rope`, `softmax`, `silu`, `unembed`). Edit the code in the browser (e.g., remove `x = x + mlp_out`, scale `attn_out`, or write a custom sampler) and the engine executes your Python in place of the built-in step, capturing `print(...)` output.
+- **Export run as Python script (`tokenshark/export.py` & `tokenshark/api.py`).** Any run in the browser (including its block schedule, bypasses, patches, steering vectors, neuron clamps, layer prompts, LoRA/quantization overlays, and custom box code) can be exported as a standalone Python script using `from tokenshark.api import Lab`.
 
 ![Editable Box Code](docs/editable-box-code.png)
 
@@ -61,7 +61,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 | ![Activation Patching](docs/activation-patching.png) | ![MLP Neurons](docs/neurons.png) |
 
 ### Editable KV Cache & Per-Layer Prompts
-- **Pre-RoPE KV cache (`analyser/kvcache.py`).** Keys are stored *before* RoPE with an explicit position per token, so a cache saved from one conversation can be prepended to another:
+- **Pre-RoPE KV cache (`tokenshark/kvcache.py`).** Keys are stored *before* RoPE with an explicit position per token, so a cache saved from one conversation can be prepended to another:
   - `negative`: the imported tokens sit at positions `-m…-1`; the new prompt starts at `0`, as if fresh.
   - `shift`: the imported tokens keep `0…m-1`; the new prompt continues at `m`.
   - `offset`: put the imported tokens anywhere.
@@ -70,9 +70,9 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 - **Hidden prompt & per-layer KV prefill.** Encode a system/style prompt once into a KV cache (`KV caches` tab) or wire **+ Layer KV prefill** boxes directly into `Embed` with *Blocks that can see it* (`all`, `none`, `0:12`, `20:24`) so different transformer blocks read different context.
 
 ### LoRA / Fine-Tune Inspector, Quantization & In-Browser Training
-- **LoRA & fine-tune overlay (`LoRA / Fine-tune` tab, `analyser/lora.py`).** Attach any Hugging Face PEFT LoRA, Diffusers/Kohya `.safetensors` LoRA, or full fine-tuned checkpoint at the `WeightStore` level. Inspect exact Frobenius norms `‖ΔW‖_F`, relative change `‖ΔW‖ / ‖W‖` per block and module (`q_proj`, `v_proj`, `mlp`), highlight the most-changed blocks on the flow canvas, and slide the LoRA scale live from `-2.0×` (anti-LoRA) to `+3.0×`.
-- **On-the-fly quantization (`Quantize` tab, `analyser/quant.py`).** Round block weight matrices on the fly to `8`, `6`, `4`, `3`, `2`, or `1` bit (per-row symmetric RTN), measure per-block rounding error `‖W − round(W)‖ / ‖W‖`, and compare generated text, top-1 agreement, and KL divergence against full precision token-for-token.
-- **Train models from scratch or adapt the loaded LLM (`Train` tab, `analyser/train.py`, `analyser/adapt.py`, `analyser/train_image.py`):**
+- **LoRA & fine-tune overlay (`LoRA / Fine-tune` tab, `tokenshark/lora.py`).** Attach any Hugging Face PEFT LoRA, Diffusers/Kohya `.safetensors` LoRA, or full fine-tuned checkpoint at the `WeightStore` level. Inspect exact Frobenius norms `‖ΔW‖_F`, relative change `‖ΔW‖ / ‖W‖` per block and module (`q_proj`, `v_proj`, `mlp`), highlight the most-changed blocks on the flow canvas, and slide the LoRA scale live from `-2.0×` (anti-LoRA) to `+3.0×`.
+- **On-the-fly quantization (`Quantize` tab, `tokenshark/quant.py`).** Round block weight matrices on the fly to `8`, `6`, `4`, `3`, `2`, or `1` bit (per-row symmetric RTN), measure per-block rounding error `‖W − round(W)‖ / ‖W‖`, and compare generated text, top-1 agreement, and KL divergence against full precision token-for-token.
+- **Train models from scratch or adapt the loaded LLM (`Train` tab, `tokenshark/train.py`, `tokenshark/adapt.py`, `tokenshark/train_image.py`):**
   1. **Tiny language model from scratch:** Train a custom Llama-architecture transformer + BPE tokenizer on synthetic facts/counting corpora or your own text in seconds, then load it into the flow editor.
   2. **6 adaptation methods on the loaded LLM:** Compare `lora`, `full` (chosen matrices), `ia3` (per-row scaling), `norms` (RMSNorm weights), `adapter` (bottleneck layer after chosen blocks), and `new_block` (insert a whole new block initialized as `duplicate`, `average`, `identity`, or `random`).
   3. **Tiny flow-matching image model:** Train a 16×16 flow-matching denoiser on colored shapes with a held-out combination (`yellow triangle`) to watch compositional generalization and CFG emerge live.
@@ -84,7 +84,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 ![Quantization Error & Precision Comparison](docs/quantization.png)
 
 ### Image Generation: Stable Diffusion UNets & Qwen-Image 2.1 Single-Stream DiT
-- **Stable Diffusion UNet (`analyser/sd.py`) & Qwen-Image 2.1 DiT (`analyser/qimage.py`).** Full support for both multi-scale UNet models (`sd-turbo`, `tiny-sd`, `sd-1.5`) and `qwen-image-2.1` (32-block 7B single-stream DiT + 36-block Qwen3-VL 8B text encoder + 64-channel 16× Wan VAE).
+- **Stable Diffusion UNet (`tokenshark/sd.py`) & Qwen-Image 2.1 DiT (`tokenshark/qimage.py`).** Full support for both multi-scale UNet models (`sd-turbo`, `tiny-sd`, `sd-1.5`) and `qwen-image-2.1` (32-block 7B single-stream DiT + 36-block Qwen3-VL 8B text encoder + 64-channel 16× Wan VAE).
 - **Interactive diffusion step debugger & between-step image editing (`debug_image`).** Step through Qwen-Image block by block or step by step, paint edits onto the model's current guess `x̂₀` between steps (preserving the noise `ε̂`), adjust the between-step noise level `σ ∈ [0.02, 1.0]`, or extend the schedule with extra refinement steps.
 - **Image lens ("Decode through last k blocks", `ilens` tab).** Project any intermediate DiT block's image tokens into pixel space (via fast fitted linear preview or exact VAE decode), either directly or after jumping through the last `k` blocks.
 - **Block contributions (`contrib` tab).** See *where* each stage writes (residual update heatmap), *what* it encodes (3-component PCA RGB map), and *how much it matters* (ablation diff and ranking), plus a two-row per-step strip showing the noisy input `x_t` and predicted `x̂₀` at every step.
@@ -92,17 +92,17 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 ![Image Diffusion Flow, Cross-Attention Heatmap & Step Strip](docs/image-diffusion.png)
 
 ### Guided Courses (`📖 Learn` Tab) & MCP Tutor Server
-- **Built-in interactive courses (`analyser/web/tabs/learn.js`).** Step-by-step guided lessons for both **Language Models** (*Tokens*, *One token at a time*, *Where the answer forms*, *Break it on purpose*, *Find where a fact lives*, *Steer and hunt neurons*, *A prompt only some layers can read*, *The model is a short program*, *Smaller, and your own*) and **Image Models** (*How an image model is built*, *From noise to picture*, *Steps and the noise schedule*, *How the picture reads the prompt*, *Guidance and the negative prompt*, *A different prompt for different blocks*, *Which blocks matter?*, *What each block thinks the picture is*, *Start from a picture*, *Step in and paint mid-way*, *Train your own image model*).
-- **MCP Tutor Server (`analyser/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m analyser.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive Tokenshark as an interactive tutor. Every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
+- **Built-in interactive courses (`tokenshark/web/tabs/learn.js`).** Step-by-step guided lessons for both **Language Models** (*Tokens*, *One token at a time*, *Where the answer forms*, *Break it on purpose*, *Find where a fact lives*, *Steer and hunt neurons*, *A prompt only some layers can read*, *The model is a short program*, *Smaller, and your own*) and **Image Models** (*How an image model is built*, *From noise to picture*, *Steps and the noise schedule*, *How the picture reads the prompt*, *Guidance and the negative prompt*, *A different prompt for different blocks*, *Which blocks matter?*, *What each block thinks the picture is*, *Start from a picture*, *Step in and paint mid-way*, *Train your own image model*).
+- **MCP Tutor Server (`tokenshark/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m tokenshark.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive Tokenshark as an interactive tutor. Every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
 
 ---
 
 ## For Educators / Coursework
 
-- **Readable, wrapper-free forward passes:** Every transformer and diffusion operation (`analyser/llm.py`, `analyser/sd.py`, `analyser/qimage.py`) is written in explicit, single-file PyTorch without `transformers` or `diffusers` at runtime, and any block opens in the browser as ~15 lines of editable Python.
+- **Readable, wrapper-free forward passes:** Every transformer and diffusion operation (`tokenshark/llm.py`, `tokenshark/sd.py`, `tokenshark/qimage.py`) is written in explicit, single-file PyTorch without `transformers` or `diffusers` at runtime, and any block opens in the browser as ~15 lines of editable Python.
 - **Turnkey classroom & self-paced labs (`📖 Learn` tab):** Includes 19 guided, interactive lessons covering tokenization, attention, logit lens, causal tracing (activation patching), steering vectors, neuron clamping, quantization, LoRA/adaptation, and flow-matching diffusion.
 - **Runs on standard student laptops:** Pure Python with zero Node.js/build steps (`run.bat` / `./run.sh`); 0.5B–1.7B models and from-scratch training run on CPU in seconds, while layer streaming (`disk` policy) lets students inspect 27B–70B models without a cluster.
-- **Reproducible homework & grading:** Students can save flows (`.json`), export any browser experiment, including patches, steering vectors, and custom block code into a standalone Python script (`analyser.api`), or pair with an AI teaching assistant via the built-in MCP tutor server.
+- **Reproducible homework & grading:** Students can save flows (`.json`), export any browser experiment, including patches, steering vectors, and custom block code into a standalone Python script (`tokenshark.api`), or pair with an AI teaching assistant via the built-in MCP tutor server.
 - **Adopt or cite in your syllabus:** Free for university courses, workshops, and training bootcamps. See [`CITATION.cff`](CITATION.cff) to cite Tokenshark in lecture notes, lab handouts, or academic publications.
 
 ---
@@ -113,11 +113,11 @@ Windows: double-click `run.bat`. macOS / Linux: `./run.sh`. The first run create
 
 ```bash
 python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -r requirements.txt                  # NVIDIA GPU: install the CUDA build of torch from pytorch.org first
-python -m analyser                               # --port 8000 --device auto|cuda|mps|cpu --dtype auto|fp32|fp16|bf16
+pip install -e .                                 # or: pip install -r requirements.txt
+tokenshark                                       # or: python -m tokenshark (--port 8000 --device auto|cuda|mps|cpu --dtype auto|fp32|fp16|bf16)
 ```
 
-Choose a model, choose where its weights live, and click **Load**. On first use the model downloads from Hugging Face into **`models/<id>/`** next to the app (change with `--models-dir D:\models` or the `ANALYSER_MODELS` variable). Only configs, the tokenizer, and one copy of the weights are fetched (fp16 for the image models). They're plain files with no hidden cache: copy, move, or delete them like any folder. A `✓` in the model list means it is on disk, and `🗑` deletes it. Any model folder you drop into `models/` (with `config.json`, Meta `params.json`, or `model_index.json`) appears in the list automatically. Then edit the flow and click **Run**.
+Choose a model, choose where its weights live, and click **Load**. On first use the model downloads from Hugging Face into **`models/<id>/`** next to the app (change with `--models-dir D:\models` or the `TOKENSHARK_MODELS` variable). Only configs, the tokenizer, and one copy of the weights are fetched (fp16 for the image models). They're plain files with no hidden cache: copy, move, or delete them like any folder. A `✓` in the model list means it is on disk, and `🗑` deletes it. Any model folder you drop into `models/` (with `config.json`, Meta `params.json`, or `model_index.json`) appears in the list automatically. Then edit the flow and click **Run**.
 
 | Weights setting | What happens | Use when |
 |---|---|---|
@@ -132,7 +132,7 @@ Choose a model, choose where its weights live, and click **Load**. On first use 
 
 ## Models
 
-Built-in catalog (`analyser/models.json` & `analyser/plugins/*.py`):
+Built-in catalog (`tokenshark/models.json` & `tokenshark/plugins/*.py`):
 
 | Id | Plugin / Family | Size | Notes |
 |---|---|---|---|
@@ -172,10 +172,10 @@ Click **+** next to the model picker to add any Hugging Face repo or local folde
 
 ## Python API & MCP Tutor Server
 
-Use the exact same raw engine from Python scripts or Jupyter notebooks (`analyser/api.py`):
+Use the exact same raw engine from Python scripts or Jupyter notebooks (`tokenshark/api.py`):
 
 ```python
-from analyser.api import Lab
+from tokenshark.api import Lab
 
 lab = Lab("qwen2.5-0.5b-instruct")
 run = lab.run("The capital of France is", max_new_tokens=6)
@@ -201,7 +201,7 @@ To connect Claude Desktop, Claude Code, or Cursor to a running Tokenshark instan
   "mcpServers": {
     "tokenshark": {
       "command": "python",
-      "args": ["-m", "analyser.mcp_server", "--url", "http://127.0.0.1:8000"]
+      "args": ["-m", "tokenshark.mcp_server", "--url", "http://127.0.0.1:8000"]
     }
   }
 }
@@ -212,7 +212,7 @@ To connect Claude Desktop, Claude Code, or Cursor to a running Tokenshark instan
 ## Project Layout
 
 ```text
-analyser/
+tokenshark/
   weights.py       WeightStore: safetensors/.bin/.pth, offload policies, per-layer streaming, LoRA/quant hooks
   llm.py           raw decoder-only LLM: RMSNorm, RoPE (incl. llama3 scaling), GQA, SwiGLU, QK-norm, Gated DeltaNet
   kvcache.py       pre-RoPE KV cache & hybrid linear memory: append, prepend (shift/negative/offset/overwrite), edit

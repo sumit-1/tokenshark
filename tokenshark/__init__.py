@@ -11,3 +11,11 @@ def code_stamp() -> str:
 
 
 STARTED_WITH = code_stamp()
+
+
+def __getattr__(name: str):
+    if name in ("Lab", "RunResult", "FlowBuilder"):
+        from . import api
+        return getattr(api, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

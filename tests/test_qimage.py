@@ -9,8 +9,8 @@ diffusers = pytest.importorskip("diffusers")
 if not hasattr(diffusers, "QwenImage21Pipeline"):
     pytest.skip("diffusers without Qwen-Image 2.1", allow_module_level=True)
 
-from analyser.flow import Plan, compile_flow, default_t2i_flow
-from analyser.qimage import QwenImageAdapter, flow_sigmas
+from tokenshark.flow import Plan, compile_flow, default_t2i_flow
+from tokenshark.qimage import QwenImageAdapter, flow_sigmas
 
 from .make_tiny import make_qwen_image
 
@@ -187,7 +187,7 @@ def test_start_image_and_region_lock(qi):
 
 @torch.no_grad()
 def test_region_interventions(qi):
-    from analyser.flow import Intervention
+    from tokenshark.flow import Intervention
     root, pipe, ad = qi
     base = ad.run(_plan(ad))["captures"]["final_latent"]
     iv = lambda region: Intervention(node_id="iv", pos=1, hook="out", op="zero", region=region)  # noqa: E731
@@ -264,7 +264,7 @@ def test_image_lens_through_last_blocks(qi):
 @torch.no_grad()
 def test_image_stepper_and_editing_the_guess(qi):
     """Stepping block by block = a run; editing the guess keeps the model's noise; unchanged pixels change nothing."""
-    from analyser.qimage import ImageStepper
+    from tokenshark.qimage import ImageStepper
     root, pipe, ad = qi
     base = ad.run(_plan(ad))["captures"]["final_latent"]
     st = ad.image_stepper(_plan(ad))

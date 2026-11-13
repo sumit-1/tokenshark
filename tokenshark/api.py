@@ -1,6 +1,6 @@
 """Python API: the engine behind the app, for scripts and notebooks.
 
-    from analyser.api import Lab
+    from tokenshark.api import Lab
 
     lab = Lab("qwen2.5-0.5b-instruct")                       # same loader, same raw engine as the app
     run = lab.run("The capital of France is", max_new_tokens=6)
@@ -128,9 +128,9 @@ class Lab:
         from .registry import get_spec
         from .weights import resolve_model_dir
         if device != "auto":
-            os.environ["ANALYSER_DEVICE"] = device
+            os.environ["TOKENSHARK_DEVICE"] = device
         if dtype != "auto":
-            os.environ["ANALYSER_DTYPE"] = dtype
+            os.environ["TOKENSHARK_DTYPE"] = dtype
         self.device = pick_device()
         self.dtype = pick_dtype(self.device)
         p = Path(model).expanduser()

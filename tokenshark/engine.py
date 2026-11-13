@@ -16,7 +16,7 @@ class Cancelled(RuntimeError):
 
 
 def pick_device() -> str:
-    want = os.environ.get("ANALYSER_DEVICE", "auto").lower()
+    want = os.environ.get("TOKENSHARK_DEVICE", "auto").lower()
     if want != "auto":
         return want
     if torch.cuda.is_available():
@@ -27,7 +27,7 @@ def pick_device() -> str:
 
 
 def pick_dtype(device: str) -> torch.dtype:
-    want = os.environ.get("ANALYSER_DTYPE", "auto").lower()
+    want = os.environ.get("TOKENSHARK_DTYPE", "auto").lower()
     table = {"fp32": torch.float32, "float32": torch.float32, "fp16": torch.float16, "float16": torch.float16,
              "bf16": torch.bfloat16, "bfloat16": torch.bfloat16}
     if want in table:
