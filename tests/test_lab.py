@@ -488,3 +488,57 @@ def test_lab_api_attaches_an_added_block(lab, tmp_path):
     assert not torch.allclose(_logits(lab.run(A, max_new_tokens=1)), _logits(base), atol=1e-6)
     lab.lora(None)
     assert lab.info["n_layers"] == n and torch.allclose(_logits(lab.run(A, max_new_tokens=1)), _logits(base))
+
+
+def test_per_block_interceptors_kv_quant_qkv_and_project_out(lab):
+    """Per-block interceptors: quantize a single block's weights or KV cache, intercept Q/K/V, and project_out."""
+    base = lab.run(A, max_new_tokens=2)
+
+    # 1. Per-block weight quantization via interceptor (hook="weights", op="quantize") vs global per-layer quant
+    f_iv = lab.flow(A, max_new_tokens=1)
+    f_iv.quantize_block(1, bits=2, hook="weights")
+    r_iv = lab.run(f_iv)
+    assert not torch.allclose(_logits(r_iv), _logits(base))
+
+    lab.quantize(2, layers="1")
+    r_ov = lab.run(A, max_new_tokens=1)
+    lab.quantize(None)
+    assert torch.allclose(_logits(r_iv), _logits(r_ov), atol=1e-4)
+
+    # 2. Per-block KV cache interception (kv_k / kv_v)
+    f_kv = lab.flow(A, max_new_tokens=2)
+    f_kv.quantize_block(1, bits=2, hook="kv_k")
+    r_kv = lab.run(f_kv)
+    assert not torch.allclose(_logits(r_kv), _logits(base))
+
+    f_kv_zero = lab.flow(A, max_new_tokens=2)
+    f_kv_zero.intercept(1, hook="kv_v", op="zero", heads="0")
+    r_kvz = lab.run(f_kv_zero)
+    assert float(r_kvz.captures["cache"].v[1][0].abs().max()) == 0.0
+    assert float(r_kvz.captures["cache"].v[1][1].abs().max()) > 0.0
+    assert float(r_kvz.captures["cache"].v[0].abs().max()) > 0.0
+
+    # 3. Per-block Q / K / V head hooks and patching
+    clean = lab.run(A, max_new_tokens=1)
+    f_q = lab.flow(B, max_new_tokens=1)
+    f_q.patch(1, clean, hook="q", positions="last")
+    r_q = lab.run(f_q)
+    assert not torch.allclose(_logits(r_q), _logits(lab.run(B, max_new_tokens=1)))
+
+    # 4. Orthogonal projection (op="project_out"): removes component along v
+    v = lab.vector_from_word("France")
+    vec = lab.load_vector(v)
+    v_unit = vec / vec.norm()
+    f_proj = lab.flow(A, max_new_tokens=1)
+    f_proj.project_out(1, v, value=1.0)
+    r_proj = lab.run(f_proj)
+    dots = r_proj.resid(1).float() @ v_unit.float()
+    assert float(dots.abs().max()) < 1e-4
+
+    # 5. Saved KVCache per-slot editing (edit_slots)
+    c = base.captures["cache"]
+    c_zero = c.edit_slots("zero", [1], 0, len(c), 0.0, part="k")
+    assert float(c_zero.k[1].abs().max()) == 0.0
+    assert float(c_zero.k[0].abs().max()) > 0.0
+    assert float(c_zero.v[1].abs().max()) > 0.0
+

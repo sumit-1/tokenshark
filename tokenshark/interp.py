@@ -21,7 +21,7 @@ from .kvcache import KVCache
 from .runs import DATA
 
 VEC_DIR = DATA / "vectors"
-PARTS = ("resid_pre", "attn_out", "mlp_out", "resid_post")
+PARTS = ("resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "mlp_out", "resid_post")
 
 
 # ======================================================================================
@@ -32,9 +32,18 @@ def activation(cap: dict, hook: str, pos: int) -> torch.Tensor:
     """[tokens, d] — what the run had at `hook` of the block at schedule position `pos`."""
     if hook not in PARTS:
         raise ValueError(f"No stored activation for hook '{hook}' (stored: {', '.join(PARTS)}).")
+    if hook in ("kv_k", "kv_v"):
+        cache: KVCache | None = cap.get("cache")
+        if cache is None or pos >= len(cache.k):
+            raise ValueError(f"That run has no KV cache at schedule position {pos}.")
+        kv = cache.k[pos] if hook == "kv_k" else cache.v[pos]
+        if kv is None:
+            raise ValueError(f"Block #{pos} is a linear-attention block (no per-token KV cache).")
+        # kv is [n_kv, T, hd] -> transpose to [T, n_kv, hd] so token_dim = 0 matches the block hook
+        return kv.transpose(0, 1).float().cpu()
     t = (cap.get(hook) or {}).get(pos)
     if t is None:
-        if hook in ("attn_out", "mlp_out") and not cap.get(hook):
+        if hook in ("attn_out", "mlp_out", "q", "k", "v") and not cap.get(hook):
             raise ValueError(f"That run did not keep {hook} (too long for the capture budget). Patch resid_pre or "
                              f"resid_post instead, or use a shorter prompt.")
         raise ValueError(f"That run has no block at schedule position {pos}.")
@@ -133,16 +142,16 @@ def vector_from_word(adapter, word: str, minus: str = "") -> tuple[torch.Tensor,
 # ======================================================================================
 
 def resolve_sources(plan, get_caps) -> dict:
-    """{intervention box id: source}. get_caps(run_id) returns that run's captures (KeyError if unknown)."""
+    """{interceptor box id: source}. get_caps(run_id) returns that run's captures (KeyError if unknown)."""
     out = {}
     for iv in plan.interventions:
-        if iv.op not in ("patch", "steer", "clamp") or not iv.ref:
+        if iv.op not in ("patch", "steer", "project_out", "clamp") or not iv.ref:
             continue
-        if iv.op == "steer":
+        if iv.op in ("steer", "project_out"):
             try:
                 out[iv.node_id] = VECTORS.load(iv.ref)[0]
             except KeyError:
-                raise ValueError("A steering box points at a vector that no longer exists.") from None
+                raise ValueError("An interceptor box points at a vector that no longer exists.") from None
             continue
         try:
             cap = get_caps(iv.ref)
@@ -152,7 +161,12 @@ def resolve_sources(plan, get_caps) -> dict:
         if cap is None:
             raise ValueError(f"Run '{iv.ref}' has no captures left in memory. Run it again.")
         if iv.op == "patch":
-            out[iv.node_id] = activation(cap, iv.hook, iv.pos)
+            a = activation(cap, iv.hook, iv.pos)
+            if iv.hook in ("q", "k", "v") and a.ndim == 2:
+                # Reshape [T, heads * hd] -> [T, heads, hd] to match _head_hook slice
+                hd = cap["cache"].fingerprint.get("head_dim") or 64
+                a = a.view(a.shape[0], -1, hd)
+            out[iv.node_id] = a
         else:
             rng = (cap.get("unit_range") or {}).get((iv.pos, iv.hook))
             if rng is None and iv.hook in PARTS:
@@ -391,6 +405,9 @@ def iter_patch_sweep(adapter, plan, cap_src: dict, hook: str = "resid_post", tok
     done, total = 0, S * len(toks)
     for p in range(S):
         src = activation(cap_src, hook, p)
+        if hook in ("q", "k", "v") and src.ndim == 2:
+            hd = cap_src["cache"].fingerprint.get("head_dim") or adapter.cfg.head_dim
+            src = src.view(src.shape[0], -1, hd)
         for j, t in enumerate(toks):
             iv = Intervention(node_id="sweep", pos=p, hook=hook, op="patch", positions=str(t))
             pr = float(torch.softmax(last_logits([iv], src)[0], -1)[answer])

@@ -53,14 +53,21 @@ export async function renderSteer(p) {
     tr.innerHTML = `<td>${esc(v.name)}</td><td>${v.source === 'runs' ? `runs ${esc(v.run_a || '')} − ${esc(v.run_b || '')} · ${esc(v.hook)} @ #${v.pos} · token ${esc(v.token)}` : v.source === 'word' ? 'word' : esc(v.source || '')}</td>
       <td>${v.norm}</td><td>${esc(v.model_id || '?')}${ok ? '' : ' <span class="bad">≠ loaded</span>'}</td>`
     const td = el('td')
-    td.append(btn('Steer a block with it', () => {
+    const pickTarget = () => {
       const selN = S.selected?.type === 'node' ? flow.node(S.selected.id) : null
       const pos = v.pos ?? Math.floor(nL / 2)
-      const target = selN?.data.kind === 'block' ? selN.id : (flow.nodes.find(n => n.data.kind === 'block' && n.data.layer === pos)?.id)
+      return selN?.data.kind === 'block' ? selN.id : (flow.nodes.find(n => n.data.kind === 'block' && n.data.layer === pos)?.id)
+    }
+    td.append(btn('Steer a block', () => {
+      const target = pickTarget()
       const resid = S.run?.outputs?.block_stats?.[target]?.resid_norm
       const value = v.source === 'word' ? +(resid ? resid * 0.3 : 8).toFixed(1) : 2      // a nudge; raise it to see the text break
       const n = addBox(target, { label: `steer: ${v.name}`.slice(0, 40), hook: v.hook && v.hook !== 'resid_pre' ? v.hook : 'resid_post', op: 'steer', ref: v.id, value })
       if (n) toast(`Wired into ${flow.node(target).data.label} with value ${value}. Change the value in the box, then ▶ Run.`)
+    }, 'mini'), btn('Erase direction (project_out)', () => {
+      const target = pickTarget()
+      const n = addBox(target, { label: `erase: ${v.name}`.slice(0, 40), hook: v.hook && v.hook !== 'resid_pre' ? v.hook : 'resid_post', op: 'project_out', ref: v.id, value: 1.0 })
+      if (n) toast(`Wired orthogonal projection (project_out) into ${flow.node(target).data.label}. Press ▶ Run.`)
     }, 'mini'), btn('Delete', async () => { if (confirm(`Delete ${v.name}?`)) { await api('DELETE', `/api/vectors/${v.id}`); renderTab() } }, 'mini'))
     tr.appendChild(td); t.appendChild(tr)
   }

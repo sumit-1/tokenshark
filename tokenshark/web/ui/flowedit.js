@@ -26,7 +26,7 @@ export async function validate() {
     S.planNodes = p.schedule_nodes
     flow.setErrors([])
     $('#plan').innerHTML = `<span class="ok-dot"></span> ${p.schedule.length} blocks: [${p.schedule.join(', ')}]` +
-      (p.interventions.length ? ` · ${p.interventions.length} intervention(s)` : '') +
+      (p.interventions.length ? ` · ${p.interventions.length} interceptor(s)` : '') +
       (p.params.prefixes?.length ? ` · ${p.params.prefixes.length} KV prefix${p.params.prefixes.length > 1 ? 'es' : ''} (${p.params.prefixes.map(x => `blocks ${x.layers}`).join(' / ')})` : '') +
       (p.params.code ? ` · ✎ edited code in ${Object.keys(p.params.code).length} box${Object.keys(p.params.code).length > 1 ? 'es' : ''}` : '')
     return true
@@ -46,7 +46,7 @@ export function schedPos(b) { const i = (S.planNodes || []).indexOf(b.id); retur
 export function addIntervention(target, world) {
   const at = target ? { x: target.position.x + 10, y: target.position.y - 105 } : (world || flow.center())
   const n = flow.addNode({ id: newId('iv'), type: 'box', position: at, data: {
-    kind: 'intervention', label: 'Intervention', hook: schema().default_hook || S.info?.hooks?.[0] || 'out', op: 'zero', value: 0,
+    kind: 'intervention', label: 'Interceptor', hook: schema().default_hook || S.info?.hooks?.[0] || 'out', op: 'zero', value: 0,
     positions: 'all', steps: 'all', heads: 'all', enabled: true } })
   if (target) flow.addEdge({ source: n.id, sourceHandle: 'out', target: target.id, targetHandle: 'mod' })
   flow.select({ type: 'node', id: n.id })

@@ -223,7 +223,9 @@ def token_neighbors(token_id: int, k: int = 12):
 
 # ---------------------------------------------------------------- quantization
 class QuantReq(BaseModel):
-    bits: int
+    bits: int = 4
+    layers: str = "all"
+    layer_bits: dict[int, int] | None = None
 
 
 class QuantCompareReq(BaseModel):
@@ -241,7 +243,7 @@ def get_quant():
 def set_quant(req: QuantReq):
     """Round the block weights to `bits` bits on the fly (see quant.py). Every later run uses the rounded weights."""
     _require_model()
-    return _guard(LOADED.set_quant, req.bits)
+    return _guard(LOADED.set_quant, req.bits, True, req.layers, req.layer_bits)
 
 
 @app.delete("/api/quant")

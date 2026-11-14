@@ -135,12 +135,15 @@ class LoRAOverlay:
          or which extra weights were added.
     """
 
-    def __init__(self, path: str | Path, scale: float = 1.0, name: str = ""):
+    def __init__(self, path: str | Path, scale: float = 1.0, name: str = "", layers: str = "all"):
         self.path = Path(path).expanduser()
         if not self.path.exists():
             raise FileNotFoundError(f"LoRA / checkpoint path does not exist: {self.path}")
         self.scale = float(scale)
         self.name = name or self.path.stem
+        self.layers_spec = str(layers or "all").strip()
+        self._allowed: set[int] | None = None
+        self.set_layers(self.layers_spec)
         cfg_dir = self.path if self.path.is_dir() else self.path.parent
         self.cfg = read_json(cfg_dir / "adapter_config.json")
         self.raw_tensors = _load_safetensors_dict(self.path)
@@ -163,6 +166,14 @@ class LoRAOverlay:
         self.added_keys: list[dict] = []
         self.module_stats: list[dict] = []
         self.layer_stats: dict[int, dict] = {}
+
+    def set_layers(self, layers: str):
+        self.layers_spec = str(layers or "all").strip()
+        if self.layers_spec.lower() in ("all", "*", ""):
+            self._allowed = None
+        else:
+            from .flow import parse_index_spec
+            self._allowed = set(parse_index_spec(self.layers_spec, 10_000))
 
     def bind(self, stores: dict[str, " object "]) -> dict:
         """Bind this LoRA / fine-tune to the active model's `WeightStore`s and compute layer diffs."""
@@ -287,6 +298,10 @@ class LoRAOverlay:
         """Apply `W + scale * ΔW` on the fly when `WeightStore(name)` is called."""
         if self.scale == 0.0:
             return base_weight
+        if self._allowed is not None:
+            m = _LAYER_RE.search(name)
+            if m and int(m.group(1)) not in self._allowed:
+                return base_weight
         if name in self.mapped_lora:
             A, B, scaling = self.mapped_lora[name]
             dev, dt = base_weight.device, base_weight.dtype
@@ -328,6 +343,7 @@ class LoRAOverlay:
             "path": str(self.path),
             "kind": self.kind,
             "scale": self.scale,
+            "layers_spec": self.layers_spec,
             "n_adapted_weights": len(self.mapped_lora) + len(self.mapped_full),
             "n_added_weights": len(self.added_keys),
             "added_weights": self.added_keys[:50],

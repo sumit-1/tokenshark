@@ -141,6 +141,10 @@ def _op(part, iv, ctx, token_dim, idx, nsel, x):
     if iv.op == "mean":
         dim = token_dim if token_dim is not None else tuple(range(1, x.ndim))
         return part.mean(dim=dim, keepdim=True).expand_as(part)
+    if iv.op == "quantize":
+        from .quant import quantize
+        bits = max(1, min(16, int(round(iv.value or 4))))
+        return quantize(part, bits)
     src = ctx.sources.get(iv.node_id)
     if iv.op == "patch":
         # Activation patching: overwrite this run's activation with the one another run had at the same place.
@@ -177,6 +181,20 @@ def _op(part, iv, ctx, token_dim, idx, nsel, x):
         if v.shape[-1] != part.shape[-1]:
             raise ValueError(f"The steering vector has {v.shape[-1]} dimensions but this activation has {part.shape[-1]}.")
         return part + iv.value * v
+    if iv.op == "project_out":
+        # Orthogonal projection / directional ablation: remove (value=1) or scale the component along direction v.
+        if src is None:
+            return None
+        v = src.to(part.device, torch.float32)
+        if nsel is not None:
+            v = v[nsel]
+        if v.shape[-1] != part.shape[-1]:
+            raise ValueError(f"The vector has {v.shape[-1]} dimensions but this activation has {part.shape[-1]}.")
+        v_unit = v / v.norm().clamp(min=1e-8)
+        pf = part.float()
+        proj = (pf @ v_unit).unsqueeze(-1) * v_unit
+        strength = iv.value if iv.value is not None else 1.0
+        return (pf - strength * proj).to(part.dtype)
     if iv.op == "clamp":
         # Pin units to a fixed output. max / min = the largest / smallest value each unit took in the reference run
         # (or so far in this run). A value other than 0 or 1 multiplies it ("5 × its maximum").

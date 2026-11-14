@@ -11,7 +11,7 @@ The flow is the user-editable view of the model's canonical graph:
                 scheduler ─────────────────────────┘          (loop edge: denoiser_out -> denoiser_in, x steps)
 
 Editing the chain of block boxes (deleting, duplicating, re-wiring arrows) edits the layer schedule.
-Intervention boxes wired into a block's top "mod" handle become interventions at that schedule position.
+Interceptor boxes wired into a block's top "mod" handle become interceptors at that schedule position.
 """
 from __future__ import annotations
 
@@ -23,16 +23,18 @@ from typing import Any
 # Plan data model (serialisable — stored in every run manifest)
 # --------------------------------------------------------------------------------------
 
-LLM_HOOKS = ["resid_pre", "attn_heads", "attn_out", "mlp_neurons", "mlp_out", "resid_post"]
+LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out", "mlp_neurons", "mlp_out", "resid_post", "weights"]
 UNET_HOOKS = ["out", "skip", "both", "word"]
 DIT_HOOKS = ["out"]
-OPS = ["scale", "zero", "add_noise", "mean"]
-# Language-model ops that need something from outside the run:
-#   patch  — copy this activation from another run (activation patching; `ref` = that run's id)
-#   steer  — add `value` × a saved direction to the activation (`ref` = steering-vector id)
-#   clamp  — pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
-LLM_OPS = OPS + ["patch", "steer", "clamp"]
-PATCH_HOOKS = ["resid_pre", "attn_out", "mlp_out", "resid_post"]
+OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
+# Language-model ops that need something from outside the run (or project along a vector):
+#   patch       — copy this activation from another run (activation patching; `ref` = that run's id)
+#   steer       — add `value` × a saved direction to the activation (`ref` = steering-vector id)
+#   project_out — remove (value=1) or scale the component along a saved direction (`ref` = vector id)
+#   clamp       — pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
+#   quantize    — round this tensor / block's weights / KV cache to `value` bits (1..16)
+LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp"]
+PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "mlp_out", "resid_post"]
 CODE_KINDS = ["embed", "block", "final_norm", "lm_head", "sampler"]     # boxes whose Python can be edited
 PREFIX_MODES = ["shift", "negative", "offset", "overwrite"]
 
@@ -410,7 +412,7 @@ def compile_flow(flow: dict, info: dict) -> Plan:
     if not chain:
         err(f"No active blocks between '{start_k}' and '{end_k}'" + (" (all bypassed)." if walked else "."))
 
-    # Interventions: intervention boxes wired into a block's "mod" handle.
+    # Interceptors: interceptor boxes wired into a block's "mod" handle.
     pos_of_node = {nid: i for i, nid in enumerate(chain)}
     ivs: list[Intervention] = []
     valid_hooks = info.get("hooks") or shape.hooks
@@ -419,14 +421,14 @@ def compile_flow(flow: dict, info: dict) -> Plan:
             continue
         src = nodes[e["source"]]["data"]
         if src.get("kind") != "intervention":
-            err("Only intervention boxes can connect to a block's top handle.", e["source"])
+            err("Only interceptor boxes can connect to a block's top handle.", e["source"])
             continue
         if src.get("enabled") is False:
             continue
         if e["target"] in bypassed:
             continue
         if e["target"] not in pos_of_node:
-            err(f"Intervention '{src.get('label')}' points at a block that isn't on the active path.", e["source"])
+            err(f"Interceptor '{src.get('label')}' points at a block that isn't on the active path.", e["source"])
             continue
         hook = src.get("hook") or valid_hooks[0]
         if hook not in valid_hooks:
@@ -436,28 +438,35 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if op not in shape.ops:
             err(f"Unknown op '{op}'.", e["source"])
             continue
+        if hook == "weights" and op not in ("quantize", "scale", "zero", "add_noise"):
+            err("Hook 'weights' supports quantize, scale, zero or add_noise.", e["source"])
+            continue
+        if op == "quantize" and not 1 <= _num(src.get("value"), 4, int) <= 16:
+            err("Quantize bits (value) must be between 1 and 16.", e["source"])
+            continue
         if op == "patch" and hook not in PATCH_HOOKS:
             err(f"Patching copies a whole activation: use one of {', '.join(PATCH_HOOKS)}.", e["source"])
             continue
         if op == "patch" and not src.get("ref"):
             err("Choose the run to copy the activation from (the 'clean' run).", e["source"])
             continue
-        if op == "steer" and not src.get("ref"):
+        if op in ("steer", "project_out") and not src.get("ref"):
             err("Choose a steering vector (make one in the Steering tab).", e["source"])
             continue
-        if op == "steer" and hook in ("attn_heads", "mlp_neurons"):
+        if op in ("steer", "project_out") and hook in ("attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v"):
             err("A steering vector lives in the residual stream: use resid_pre, attn_out, mlp_out or resid_post.",
                 e["source"])
             continue
         if op == "clamp" and str(src.get("clamp") or "max") not in ("max", "min", "value"):
             err("Clamp to max, min or value.", e["source"])
             continue
-        if (nodes[e["target"]]["data"].get("code") or "").strip() and hook not in ("resid_pre", "resid_post"):
-            err(f"'{nodes[e['target']]['data'].get('label')}' runs edited code, so only resid_pre and resid_post "
-                f"interventions reach it. Change the code itself for anything in between.", e["source"])
+        if (nodes[e["target"]]["data"].get("code") or "").strip() and hook not in ("resid_pre", "resid_post", "weights"):
+            err(f"'{nodes[e['target']]['data'].get('label')}' runs edited code, so only resid_pre, resid_post and weights "
+                f"interceptors reach it. Change the code itself for anything in between.", e["source"])
             continue
         ivs.append(Intervention(node_id=e["source"], pos=pos_of_node[e["target"]], hook=hook, op=op,
-                                value=_num(src.get("value"), 1.0), positions=str(src.get("positions") or "all"),
+                                value=_num(src.get("value"), 4.0 if op == "quantize" else 1.0),
+                                positions=str(src.get("positions") or "all"),
                                 steps=str(src.get("steps") or "all"), seed=_num(src.get("seed"), 0, int),
                                 heads=str(src.get("heads") or "all"),
                                 region=str(src.get("region") or "") if shape.regions else "",

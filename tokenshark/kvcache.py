@@ -104,7 +104,7 @@ class KVCache:
     def _empty_like(self):
         return KVCache(dict(self.fingerprint), self.n_slots, device=self.device)
 
-    def select(self, idx: list[int], _prefix_states: bool = False) -> "KVCache":
+    def select(self, idx: list[int], _prefix_states: bool = False, slots: set[int] | None = None) -> "KVCache":
         whole = list(idx) == list(range(len(self)))
         if self.states and not whole and not _prefix_states:
             raise ValueError("This cache comes from a hybrid model: its linear-attention (Gated DeltaNet) blocks keep "
@@ -116,8 +116,12 @@ class KVCache:
         it = torch.tensor(idx, dtype=torch.long)
         for s in range(self.n_slots):
             if self.k[s] is not None:
-                out.k[s] = self.k[s][:, it.to(self.k[s].device)]
-                out.v[s] = self.v[s][:, it.to(self.v[s].device)]
+                if slots is None or s in slots:
+                    out.k[s] = self.k[s][:, it.to(self.k[s].device)]
+                    out.v[s] = self.v[s][:, it.to(self.v[s].device)]
+                else:
+                    out.k[s] = self.k[s].clone()
+                    out.v[s] = self.v[s].clone()
         out.tokens = [self.tokens[i] for i in idx]
         out.pos = self.pos[it] if idx else torch.zeros(0)
         # rebuild segments from per-token origins
@@ -153,6 +157,31 @@ class KVCache:
     def shift(self, start: int, end: int, delta: float) -> "KVCache":
         out = self.select(list(range(len(self))))
         out.pos[start:end] += delta
+        return out
+
+    def edit_slots(self, op: str, slots: list[int], start: int = 0, end: int = 0, value: float = 0.0,
+                   part: str = "both") -> "KVCache":
+        """Modify K and/or V tensors at specific block slots and token range [start:end] (zero, scale, quantize)."""
+        from .quant import quantize
+        out = self.select(list(range(len(self))))
+        s_set = set(slots)
+        for s in range(self.n_slots):
+            if s not in s_set or out.k[s] is None:
+                continue
+            for name, arr in (("k", out.k), ("v", out.v)):
+                if part not in ("both", name):
+                    continue
+                t = arr[s].clone()
+                sub = t[:, start:end]
+                if op == "zero":
+                    sub = torch.zeros_like(sub)
+                elif op == "scale":
+                    sub = sub * float(value)
+                elif op == "quantize":
+                    bits = max(1, min(16, int(round(value or 4))))
+                    sub = quantize(sub.reshape(-1, sub.shape[-1]), bits).reshape(sub.shape)
+                t[:, start:end] = sub
+                arr[s] = t
         return out
 
     def relabel(self, origin: str, label: str) -> "KVCache":

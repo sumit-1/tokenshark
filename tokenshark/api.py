@@ -225,7 +225,7 @@ class Lab:
         return interp.VECTORS.load(vector["id"] if isinstance(vector, dict) else vector)[0]
 
     # ---------------------------------------------------------------- weights: LoRA and quantization
-    def lora(self, path: str | None, scale: float = 1.0) -> dict | None:
+    def lora(self, path: str | None, scale: float = 1.0, layers: str = "all") -> dict | None:
         """Attach a LoRA / fine-tuned checkpoint (None = detach)."""
         stores = self.plugin.weight_stores(self.adapter)
         for st in stores.values():
@@ -235,22 +235,23 @@ class Lab:
         self._lora = None
         clear_extras(self.adapter)
         if path is not None:
-            self._lora = LoRAOverlay(path, scale)
+            self._lora = LoRAOverlay(path, scale, layers=layers)
             out = self._lora.bind(stores)
             out["adaptation"] = apply_extras(self.adapter, self._lora)       # new blocks / adapter layers, if any
         self.info = {**self.adapter.info(), "model_id": self.model_id}
         return out if path is not None else None
 
-    def quantize(self, bits: int | None, measure: bool = False) -> dict | None:
+    def quantize(self, bits: int | None, measure: bool = False, layers: str = "all",
+                 layer_bits: dict[int, int] | None = None) -> dict | None:
         """Round the block weights to `bits` bits (None = back to the stored weights)."""
         stores = self.plugin.weight_stores(self.adapter)
         for st in stores.values():
             if st is not None:
                 st._quant = None
         self._quant = None
-        if not bits:
+        if not bits and not layer_bits:
             return None
-        self._quant = QuantOverlay(bits)
+        self._quant = QuantOverlay(bits or 4, layers=layers, layer_bits=layer_bits)
         if measure:
             return self._quant.bind(stores)
         for st in stores.values():

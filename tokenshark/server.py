@@ -58,11 +58,13 @@ class SaveCacheReq(BaseModel):
 
 
 class EditCacheReq(BaseModel):
-    op: str                          # truncate | drop | shift | keep
+    op: str                          # truncate | drop | shift | keep | zero_slots | scale_slots | quantize_slots
     start: int = 0
     end: int = 0
     delta: float = 0.0
     name: str = ""
+    layers: str = "all"
+    part: str = "both"               # both | k | v
 
 
 def _require_model():
@@ -132,10 +134,12 @@ class LoRAReq(BaseModel):
     path: str
     scale: float = 1.0
     name: str = ""
+    layers: str = "all"
 
 
 class LoRAScaleReq(BaseModel):
     scale: float
+    layers: str | None = None
 
 
 @app.get("/api/lora")
@@ -152,7 +156,7 @@ def load_lora(req: LoRAReq):
     if not req.path.strip():
         raise HTTPException(400, "Provide a path to a LoRA (.safetensors / folder) or fine-tuned checkpoint.")
     try:
-        return LOADED.attach_lora(req.path.strip(), req.scale, req.name.strip())
+        return LOADED.attach_lora(req.path.strip(), req.scale, req.name.strip(), req.layers)
     except Exception as e:
         raise HTTPException(400, f"Could not load LoRA / fine-tune: {e}")
 
@@ -180,7 +184,7 @@ async def upload_lora(request: Request, name: str = "uploaded-lora", scale: floa
 def set_lora_scale(req: LoRAScaleReq):
     _require_model()
     try:
-        return LOADED.set_lora_scale(req.scale)
+        return LOADED.set_lora_scale(req.scale, req.layers)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -688,13 +692,14 @@ async def upload_cache(request: Request, name: str = ""):
 
 @app.post("/api/caches/{cid}/edit")
 def edit_cache(cid: str, req: EditCacheReq):
+    from .flow import parse_index_spec
     try:
         c, extra = LIBRARY.load(cid)
     except KeyError:
         raise HTTPException(404, "Unknown cache.")
     n = len(c)
     s, e = max(0, req.start), min(n, req.end if req.end > 0 else n)
-    if c.states and req.op != "shift":
+    if c.states and req.op not in ("shift", "zero_slots", "scale_slots", "quantize_slots"):
         raise HTTPException(400, "This cache is from a hybrid model (Gated DeltaNet blocks keep one running memory of "
                                  "the whole sequence), so spans can't be cut or dropped. Rebuild it from shorter text.")
     if req.op == "truncate":
@@ -709,8 +714,16 @@ def edit_cache(cid: str, req: EditCacheReq):
     elif req.op == "shift":
         out = c.shift(s, e, req.delta)
         what = f"{s}–{e} shifted {req.delta:+g}"
+    elif req.op in ("zero_slots", "scale_slots", "quantize_slots"):
+        try:
+            slots = parse_index_spec(req.layers, c.n_slots)
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        short_op = req.op.split("_")[0]
+        out = c.edit_slots(short_op, slots, s, e, req.delta, req.part if req.part in ("both", "k", "v") else "both")
+        what = f"blocks {req.layers} {req.part} {short_op} ({s}–{e})"
     else:
-        raise HTTPException(400, "op must be truncate | keep | drop | shift")
+        raise HTTPException(400, "op must be truncate | keep | drop | shift | zero_slots | scale_slots | quantize_slots")
     return LIBRARY.save(out, req.name or f"{extra.get('name', cid)} ({what})",
                         {"model_id": extra.get("model_id"), "source": "edit", "parent_cache": cid,
                          "schedule": extra.get("schedule")})

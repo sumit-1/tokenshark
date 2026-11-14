@@ -29,21 +29,41 @@ def quantize(w: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 class QuantOverlay:
-    def __init__(self, bits: int):
-        if not 1 <= int(bits) <= 16:
+    def __init__(self, bits: int = 4, layers: str = "all", layer_bits: dict[int, int] | None = None):
+        if bits is not None and not 1 <= int(bits) <= 16:
             raise ValueError("bits must be between 1 and 16.")
-        self.bits = int(bits)
+        self.bits = int(bits) if bits is not None else 4
+        self.layers_spec = str(layers or "all").strip()
+        self.layer_bits: dict[int, int] = {int(k): int(v) for k, v in (layer_bits or {}).items() if v and 1 <= int(v) <= 16}
+        self._allowed: set[int] | None = None
+        if self.layers_spec.lower() not in ("all", "*", ""):
+            from .flow import parse_index_spec
+            self._allowed = set(parse_index_spec(self.layers_spec, 10_000))
         self.layers: list[dict] = []
         self.n_weights = 0
         self.n_params = 0
         self.measured = False
+
+    def bits_for_layer(self, layer: int | None) -> int | None:
+        if layer is None:
+            return None
+        if layer in self.layer_bits:
+            return self.layer_bits[layer]
+        if self._allowed is not None:
+            return self.bits if layer in self._allowed else None
+        return self.bits
 
     @staticmethod
     def wants(name: str, ndim: int) -> bool:
         return ndim == 2 and name.endswith(".weight") and "norm" not in name and bool(_LAYER_RE.search(name))
 
     def apply(self, name: str, w: torch.Tensor) -> torch.Tensor:
-        return quantize(w, self.bits) if self.wants(name, w.ndim) else w
+        if not self.wants(name, w.ndim):
+            return w
+        m = _LAYER_RE.search(name)
+        layer = int(m.group(1)) if m else None
+        b = self.bits_for_layer(layer)
+        return quantize(w, b) if b is not None else w
 
     def bind(self, stores: dict) -> dict:
         """Attach to the model's weight stores and (for models that fit) measure the rounding error per block."""
@@ -59,23 +79,28 @@ class QuantOverlay:
                 shape = store.shape(name)
                 if not shape or not self.wants(name, len(shape)):
                     continue
+                layer = store._layer_of(name)
+                b = self.bits_for_layer(layer)
+                if b is None:
+                    continue
                 self.n_weights += 1
                 self.n_params += shape[0] * shape[1]
                 if self.measured:
                     w = store.compact(name).float()
-                    d = per_layer.setdefault(store._layer_of(name), [0.0, 0.0])
-                    d[0] += float((quantize(w, self.bits) - w).pow(2).sum())
+                    d = per_layer.setdefault(layer, [0.0, 0.0, b])
+                    d[0] += float((quantize(w, b) - w).pow(2).sum())
                     d[1] += float(w.pow(2).sum())
         for layer in sorted(k for k in per_layer if k is not None):
-            e, b = per_layer[layer]
-            self.layers.append({"layer": layer, "relative_error": round((e / max(b, 1e-12)) ** 0.5, 5)})
+            e, b, lbits = per_layer[layer]
+            self.layers.append({"layer": layer, "bits": lbits, "relative_error": round((e / max(b, 1e-12)) ** 0.5, 5)})
         mx = max((x["relative_error"] for x in self.layers), default=0.0) or 1.0
         for x in self.layers:
             x["heat"] = round(x["relative_error"] / mx, 4)
         return self.summary()
 
     def summary(self) -> dict:
-        return {"active": True, "bits": self.bits, "n_weights": self.n_weights, "n_params": self.n_params,
+        return {"active": True, "bits": self.bits, "layers_spec": self.layers_spec,
+                "layer_bits": self.layer_bits, "n_weights": self.n_weights, "n_params": self.n_params,
                 "size_mb_16bit": round(self.n_params * 16 / 8 / 2**20, 1),
                 "size_mb": round(self.n_params * self.bits / 8 / 2**20, 1),
                 "measured": self.measured, "layers": self.layers,

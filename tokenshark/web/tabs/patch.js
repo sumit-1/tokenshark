@@ -14,8 +14,17 @@ export async function renderPatch(p) {
   if (!runs.length) { p.appendChild(el('div', { className: 'empty', textContent: 'No finished run in memory yet. Run the clean prompt first.' })); return }
   if (!runs.find(r => r.id === st.source)) st.source = (runs.find(r => r.id !== S.run?.id) || runs[0]).id
   const src = selectOf(runs.map(r => [r.id, runLabel(r)]), st.source); src.onchange = () => { st.source = src.value }
-  const hook = selectOf([['resid_post', 'resid_post — the stream after the block'], ['resid_pre', 'resid_pre — the stream before the block'],
-    ['attn_out', 'attn_out — what attention wrote'], ['mlp_out', 'mlp_out — what the MLP wrote']], st.hook); hook.onchange = () => { st.hook = hook.value }
+  const hook = selectOf([
+    ['resid_post', 'resid_post — the stream after the block'],
+    ['resid_pre', 'resid_pre — the stream before the block'],
+    ['attn_out', 'attn_out — what attention wrote'],
+    ['mlp_out', 'mlp_out — what the MLP wrote'],
+    ['q', 'q — query heads'],
+    ['k', 'k — new key heads'],
+    ['v', 'v — new value heads'],
+    ['kv_k', 'kv_k — cached keys in KV cache'],
+    ['kv_v', 'kv_v — cached values in KV cache'],
+  ], st.hook); hook.onchange = () => { st.hook = hook.value }
   const toks = selectOf([['all', 'every token'], ['last', 'last token only (fast)']], st.tokens); toks.onchange = () => { st.tokens = toks.value }
   const out = el('div')
   const go = btn('Sweep the current prompt', async () => {

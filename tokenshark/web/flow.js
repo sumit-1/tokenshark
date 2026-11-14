@@ -318,12 +318,14 @@ function curve(a, b) {
 
 export function ivSummary(d) {
   const v = d.op === 'scale' || d.op === 'add_noise' ? ` ${d.value ?? 1}`
+    : d.op === 'quantize' ? ` ${d.value ?? 4}-bit`
     : d.op === 'patch' ? ` ← run ${d.ref || '?'}` : d.op === 'steer' ? ` ×${d.value ?? 1}`
+    : d.op === 'project_out' ? ` ⊥ ×${d.value ?? 1}`
     : d.op === 'clamp' ? ` → ${d.clamp === 'value' ? d.value : `${d.value && d.value !== 1 ? d.value + '× ' : ''}${d.clamp || 'max'}`}` : ''
   const units = d.neurons && d.neurons !== 'all' ? ` ${d.hook === 'mlp_neurons' ? 'neuron' : 'dim'} ${d.neurons}` : ''
-  const where = (d.hook === 'attn_heads' ? ` heads ${d.heads || 'all'}` : '') + units
+  const where = (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(d.hook) && d.heads && d.heads !== 'all' ? ` heads ${d.heads}` : '') + units
   const steps = d.steps && d.steps !== 'all' ? ` · steps ${d.steps}` : ''
-  const pos = d.positions && d.positions !== 'all' ? ` · tok ${d.positions}` : ''
+  const pos = d.hook !== 'weights' && d.positions && d.positions !== 'all' ? ` · tok ${d.positions}` : ''
   const region = d.region ? ' · region' : ''
   return `${d.op || 'scale'}${v} @ ${d.hook || 'out'}${where}${pos}${steps}${region}`
 }

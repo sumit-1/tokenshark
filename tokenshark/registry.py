@@ -147,13 +147,13 @@ class Loaded:
                 self.progress = None
         return self.info
 
-    def attach_lora(self, path: str | Path, scale: float = 1.0, name: str = "") -> dict:
+    def attach_lora(self, path: str | Path, scale: float = 1.0, name: str = "", layers: str = "all") -> dict:
         """Load a LoRA or fine-tuned checkpoint and attach it to all WeightStores of the active model."""
         if self.adapter is None or self.plugin is None:
             raise RuntimeError("Load a base model first before attaching a LoRA or fine-tuned checkpoint.")
         with self.lock:
             self.detach_lora()
-            overlay = LoRAOverlay(path, scale=scale, name=name)
+            overlay = LoRAOverlay(path, scale=scale, name=name, layers=layers)
             stores = self.plugin.weight_stores(self.adapter)
             summary = overlay.bind(stores)
             try:
@@ -171,11 +171,13 @@ class Loaded:
                 self.info["lora"] = summary
             return summary
 
-    def set_lora_scale(self, scale: float) -> dict:
+    def set_lora_scale(self, scale: float, layers: str | None = None) -> dict:
         if self.lora is None:
             raise RuntimeError("No LoRA or fine-tune is currently loaded.")
         with self.lock:
             self.lora.scale = float(scale)
+            if layers is not None:
+                self.lora.set_layers(layers)
             if hasattr(self.adapter, "__dict__"):
                 self.adapter.__dict__.pop("_text_memo", None)
                 self.adapter.__dict__.pop("_memo", None)
@@ -190,7 +192,8 @@ class Loaded:
             self.adapter.__dict__.pop("_text_memo", None)
             self.adapter.__dict__.pop("_memo", None)
 
-    def set_quant(self, bits: int | None, measure: bool = True) -> dict:
+    def set_quant(self, bits: int | None, measure: bool = True, layers: str = "all",
+                  layer_bits: dict[int, int] | None = None) -> dict:
         """Round the block weights to `bits` bits on the fly (None = back to the stored weights)."""
         from .quant import QuantOverlay
         if self.adapter is None or self.plugin is None:
@@ -200,8 +203,8 @@ class Loaded:
             if st is not None:
                 st._quant = None
         self.quant = None
-        if bits:
-            q = QuantOverlay(bits)
+        if bits or layer_bits:
+            q = QuantOverlay(bits or 4, layers=layers, layer_bits=layer_bits)
             if measure:
                 q.bind(stores)
             else:
@@ -219,9 +222,14 @@ class Loaded:
         """What sits on top of the stored weights right now (recorded with every run so it can be reproduced)."""
         out = {}
         if self.lora is not None:
-            out["lora"] = {"path": str(self.lora.path), "scale": self.lora.scale, "name": self.lora.name}
+            out["lora"] = {"path": str(self.lora.path), "scale": self.lora.scale, "name": self.lora.name,
+                           "layers": getattr(self.lora, "layers_spec", "all")}
         if self.quant is not None:
-            out["quant"] = self.quant.bits
+            if getattr(self.quant, "layers_spec", "all") not in ("all", "", "*") or getattr(self.quant, "layer_bits", None):
+                out["quant"] = {"bits": self.quant.bits, "layers": self.quant.layers_spec,
+                                "layer_bits": self.quant.layer_bits}
+            else:
+                out["quant"] = self.quant.bits
         return out
 
     def _install_extras(self, overlay) -> dict | None:

@@ -131,11 +131,11 @@ class FlowBuilder:
                                for a, b in zip(path, path[1:])]
         return self
 
-    # ---------------------------------------------------------------- interventions
-    def intervene(self, block, hook: str = "mlp_out", op: str = "zero", value: float = 0.0, positions: str = "all",
+    # ---------------------------------------------------------------- interceptors
+    def intercept(self, block, hook: str = "mlp_out", op: str = "zero", value: float = 0.0, positions: str = "all",
                   heads: str = "all", neurons: str = "all", ref: str = "", src_positions: str = "", clamp: str = "max",
                   seed: int = 0, steps: str = "all", label: str = "") -> str:
-        """Wire an intervention box into a block. Returns the new box's id."""
+        """Wire an interceptor box into a block. Returns the new box's id."""
         ref = getattr(ref, "id", ref)             # a RunResult or a vector dict/id
         if isinstance(ref, dict):
             ref = ref["id"]
@@ -144,19 +144,32 @@ class FlowBuilder:
             "positions": str(positions), "heads": str(heads), "neurons": str(neurons), "ref": ref or "",
             "src_positions": str(src_positions), "clamp": clamp, "seed": seed, "steps": steps, "enabled": True})
 
+    intervene = intercept
+
     def patch(self, block, source_run, hook: str = "resid_post", positions: str = "all", src_positions: str = "") -> str:
         """Activation patching: at `block`, overwrite this run's activation with the one `source_run` had there."""
-        return self.intervene(block, hook=hook, op="patch", ref=source_run, positions=positions,
+        return self.intercept(block, hook=hook, op="patch", ref=source_run, positions=positions,
                               src_positions=src_positions, label="patch")
 
     def steer(self, block, vector, value: float = 4.0, hook: str = "resid_post", positions: str = "all") -> str:
         """Add value × a steering vector to the residual stream at `block`."""
-        return self.intervene(block, hook=hook, op="steer", ref=vector, value=value, positions=positions, label="steer")
+        return self.intercept(block, hook=hook, op="steer", ref=vector, value=value, positions=positions, label="steer")
+
+    def project_out(self, block, vector, value: float = 1.0, hook: str = "resid_post", positions: str = "all") -> str:
+        """Remove (value=1) or scale the component along `vector` in the residual stream at `block`."""
+        return self.intercept(block, hook=hook, op="project_out", ref=vector, value=value, positions=positions,
+                              label="project_out")
+
+    def quantize_block(self, block, bits: int = 4, hook: str = "weights", positions: str = "all",
+                       heads: str = "all") -> str:
+        """Quantize a block's weights (hook='weights'), KV cache (hook='kv_k'|'kv_v'), or activation to `bits` bits."""
+        return self.intercept(block, hook=hook, op="quantize", value=float(bits), positions=positions, heads=heads,
+                              label=f"quantize {bits}-bit @ {hook}")
 
     def clamp(self, block, neurons, to: str = "max", value: float = 1.0, ref: str = "", positions: str = "all",
               hook: str = "mlp_neurons") -> str:
         """Pin MLP neurons of `block` to their max / min (× value) or to a fixed value (to='value')."""
-        return self.intervene(block, hook=hook, op="clamp", neurons=str(neurons), clamp=to, value=value, ref=ref,
+        return self.intercept(block, hook=hook, op="clamp", neurons=str(neurons), clamp=to, value=value, ref=ref,
                               positions=positions, label=f"neuron {neurons} → {to}")
 
     # ---------------------------------------------------------------- KV prefixes

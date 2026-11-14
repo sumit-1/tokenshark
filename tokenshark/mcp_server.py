@@ -149,12 +149,16 @@ def build_flow(prompt=None, system=None, prefill=None, chat=None, max_new_tokens
                 fb.bypass(blk)
             elif do == "schedule":
                 fb.schedule(list(e["order"]))
-            elif do == "intervene":
-                fb.intervene(blk, **e)
+            elif do in ("intervene", "intercept"):
+                fb.intercept(blk, **e)
             elif do == "patch":
                 fb.patch(blk, e.pop("source_run"), **e)
             elif do == "steer":
                 fb.steer(blk, e.pop("vector"), **e)
+            elif do == "project_out":
+                fb.project_out(blk, e.pop("vector"), **e)
+            elif do == "quantize":
+                fb.quantize_block(blk, **e)
             elif do == "clamp":
                 fb.clamp(blk, e.pop("neurons"), **e)
             elif do == "layer_prompt":

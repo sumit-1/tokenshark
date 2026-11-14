@@ -24,14 +24,16 @@ export async function renderLoRA(p) {
   const pathIn = el('input', { placeholder: 'Path to .safetensors file or adapter / fine-tuned folder…', value: S.loraPath || '', style: 'width:340px' })
   pathIn.oninput = () => { S.loraPath = pathIn.value }
   const scaleIn = el('input', { type: 'number', step: 0.1, value: lora?.scale ?? 1.0, style: 'width:70px', title: 'LoRA scale (1 = normal, 0 = off, 2 = 2× stronger, -1 = negated)' })
+  const layersIn = el('input', { value: lora?.layers_spec || S.loraLayers || 'all', style: 'width:90px', title: 'Which blocks get the LoRA: all | 0:12 | 5,10' })
+  layersIn.oninput = () => { S.loraLayers = layersIn.value }
   const loadBtn = btn('Attach path', async () => {
     if (!pathIn.value.trim()) return toast('Enter a file or folder path first.', 'error')
     try {
-      const r = await POST('/api/lora/load', { path: pathIn.value.trim(), scale: +scaleIn.value })
+      const r = await POST('/api/lora/load', { path: pathIn.value.trim(), scale: +scaleIn.value, layers: layersIn.value || 'all' })
       S.info.lora = r
       applyRunBadges()
       renderTab()
-      toast(`Attached ${r.kind === 'lora' ? 'LoRA' : 'fine-tune'} “${r.name}” (${r.n_adapted_weights} weights adapted).`)
+      toast(`Attached ${r.kind === 'lora' ? 'LoRA' : 'fine-tune'} “${r.name}” (${r.n_adapted_weights} weights adapted, blocks: ${r.layers_spec || 'all'}).`)
     } catch (e) { toast(e.message, 'error') }
   }, 'primary')
 
@@ -46,7 +48,7 @@ export async function renderLoRA(p) {
       toast(`Uploaded & attached “${r.name}” (${r.n_adapted_weights} weights adapted).`)
     } catch (e) { toast(e.message, 'error') }
   }
-  row.append(pathIn, el('span', { className: 'small', textContent: 'scale' }), scaleIn, loadBtn, btn('📂 Upload .safetensors…', () => up.click()), up)
+  row.append(pathIn, el('span', { className: 'small', textContent: 'scale' }), scaleIn, el('span', { className: 'small', textContent: 'blocks' }), layersIn, loadBtn, btn('📂 Upload .safetensors…', () => up.click()), up)
   box.appendChild(row)
   p.appendChild(box)
 
@@ -60,15 +62,18 @@ export async function renderLoRA(p) {
   const ctl = el('div', { className: 'row' })
   const sl = el('input', { type: 'range', min: -2, max: 3, step: 0.1, value: lora.scale, style: 'width:200px' })
   const slLbl = el('span', { className: 'small', innerHTML: `<b>Scale: ${Number(lora.scale).toFixed(2)}×</b>` })
+  const actLayers = el('input', { value: lora.layers_spec || 'all', style: 'width:90px', title: 'Active blocks: all | 0:12 | 5,10' })
   sl.oninput = () => { slLbl.innerHTML = `<b>Scale: ${(+sl.value).toFixed(2)}×</b>` }
-  sl.onchange = async () => {
+  const updateLora = async () => {
     try {
-      const r = await POST('/api/lora/scale', { scale: +sl.value })
+      const r = await POST('/api/lora/scale', { scale: +sl.value, layers: actLayers.value || 'all' })
       S.info.lora = r
-      toast(`LoRA scale set to ${r.scale}× (0 = base model, 1 = normal, <0 = anti-LoRA).`)
+      toast(`LoRA scale=${r.scale}× on blocks ${r.layers_spec || 'all'}.`)
       renderTab()
     } catch (e) { toast(e.message, 'error') }
   }
+  sl.onchange = updateLora
+  actLayers.onchange = updateLora
   const detachBtn = btn('✕ Detach (restore base model)', async () => {
     await api('DELETE', '/api/lora')
     S.info.lora = null
@@ -79,7 +84,7 @@ export async function renderLoRA(p) {
   ctl.append(
     el('span', { className: 'chip', textContent: `${lora.kind.toUpperCase()}: ${lora.name}` }),
     el('span', { className: 'small', textContent: `${lora.adaptation?.method ? `method: ${lora.adaptation.method} · ` : ''}${lora.n_adapted_weights} adapted weights · ${lora.n_added_weights} added${lora.adaptation?.extra_blocks?.length ? ` · new block ${lora.adaptation.extra_blocks[0].layer} after block ${lora.adaptation.extra_blocks[0].after} (starts as ${lora.adaptation.extra_blocks[0].init})` : ''}${lora.adaptation?.adapters?.length ? ` · thin layer (width ${lora.adaptation.width}) after blocks ${lora.adaptation.adapters.join(', ')}` : ''}` }),
-    slLbl, sl, detachBtn
+    slLbl, sl, el('span', { className: 'small', textContent: 'Blocks:' }), actLayers, detachBtn
   )
   activeBox.appendChild(ctl)
   p.appendChild(activeBox)

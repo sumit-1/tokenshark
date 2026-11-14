@@ -271,12 +271,43 @@ class RawLLM:
             out[:, i:i + 32768] = h @ W[i:i + 32768].to(h.device, h.dtype).T
         return out.float()
 
-    def _lin(self, x, pre):
-        w = self.W(pre + ".weight")
+    def _lin(self, x, pre, ctx=None):
+        w = self._w(pre + ".weight", ctx)
         y = x @ w.T
         if self.has_bias and self.W.has(pre + ".bias"):
             y = y + self.W(pre + ".bias")
         return y
+
+    def _w(self, name: str, ctx: RunContext | None = None) -> torch.Tensor:
+        w = self.W(name)
+        if ctx is not None:
+            for iv in ctx.active("weights"):
+                w = apply_op(w, iv, ctx, None)
+        return w
+
+    def _head_hook(self, p: int, hook: str, t: torch.Tensor, ctx: RunContext, idx_of, cap: bool,
+                   token_dim: int = 1) -> torch.Tensor:
+        """Apply interceptors on a [heads, tokens, head_dim] tensor (q, k, v, kv_k, kv_v) and optionally capture."""
+        n_heads = t.shape[0]
+        # Transpose so tokens are axis 0: [tokens, heads, head_dim]
+        tt = t.transpose(0, 1) if token_dim == 1 else t
+        if cap:
+            self.note_units(p, hook, tt.reshape(tt.shape[0], -1), ctx)
+        for iv in ctx.active(hook):
+            heads = parse_index_spec(iv.heads, n_heads)
+            if not heads:
+                continue
+            sub = tt[:, heads]
+            # For cache-wide hooks (kv_k, kv_v), allow positions spec across the full cache length
+            loc_idx = None if hook in ("kv_k", "kv_v") else idx_of(iv)
+            sub = apply_op(sub, iv, ctx, 0, loc_idx)
+            tt = tt.clone()
+            tt[:, heads] = sub
+        out = tt.transpose(0, 1) if token_dim == 1 else tt
+        if cap and ctx.store.get("want_parts", False) and hook in ("q", "k", "v", "kv_k", "kv_v"):
+            if hook in ("q", "k", "v"):
+                ctx.store.setdefault(hook, {}).setdefault(p, []).append(tt.reshape(tt.shape[0], -1).detach().float().cpu())
+        return out
 
     def block(self, p: int, l: int, x: torch.Tensor, cache: KVCache, ctx: RunContext, idx_of) -> torch.Tensor:
         """x: [n, d] new tokens. Writes k/v for these tokens into cache slot p."""
@@ -334,7 +365,7 @@ class RawLLM:
         cfg, W = self.cfg, self.W
         n = h.shape[0]
         cap = ctx.capture
-        q_all = self._lin(h, pre + "self_attn.q_proj")
+        q_all = self._lin(h, pre + "self_attn.q_proj", ctx)
         gate = None
         if self.attn_gate:
             q_all = q_all.view(n, cfg.n_heads, 2 * cfg.head_dim)
@@ -342,13 +373,20 @@ class RawLLM:
             q = q.transpose(0, 1)
         else:
             q = q_all.view(n, cfg.n_heads, cfg.head_dim).transpose(0, 1)
-        k = self._lin(h, pre + "self_attn.k_proj").view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
-        v = self._lin(h, pre + "self_attn.v_proj").view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
+        k = self._lin(h, pre + "self_attn.k_proj", ctx).view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
+        v = self._lin(h, pre + "self_attn.v_proj", ctx).view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
         if self.qk_norm:
             q = rms_norm(q, self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
             k = rms_norm(k, self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
+        q = self._head_hook(p, "q", q, ctx, idx_of, cap)
+        k = self._head_hook(p, "k", k, ctx, idx_of, cap)
+        v = self._head_hook(p, "v", v, ctx, idx_of, cap)
         x = h
         cache.append(p, k, v)
+        if ctx.active("kv_k"):
+            cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(x.device), ctx, idx_of, False).to(cache.device)
+        if ctx.active("kv_v"):
+            cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(x.device), ctx, idx_of, False).to(cache.device)
         K = cache.k[p].to(x.device)
         V = cache.v[p].to(x.device)
         T = K.shape[1]
@@ -377,7 +415,7 @@ class RawLLM:
         zf = z.transpose(0, 1).reshape(n, cfg.n_heads * cfg.head_dim)
         if gate is not None:
             zf = zf * torch.sigmoid(gate.reshape(n, -1))
-        return zf @ W(pre + "self_attn.o_proj.weight").T
+        return zf @ self._w(pre + "self_attn.o_proj.weight", ctx).T
 
     def _linear_attn(self, p, pre, h, cache, ctx, idx_of):
         """Gated DeltaNet (Qwen3.5/3.6 'linear attention'). Instead of keeping every key and value it keeps one
@@ -390,10 +428,10 @@ class RawLLM:
         L = cfg.lin
         n = h.shape[0]
         a_ = pre + "linear_attn."
-        mixed = h @ W(a_ + "in_proj_qkv.weight").T                                # [n, conv_dim]
-        z = (h @ W(a_ + "in_proj_z.weight").T).view(n, L["hv"], L["dv"])
-        b = h @ W(a_ + "in_proj_b.weight").T
-        a = h @ W(a_ + "in_proj_a.weight").T
+        mixed = h @ self._w(a_ + "in_proj_qkv.weight", ctx).T                     # [n, conv_dim]
+        z = (h @ self._w(a_ + "in_proj_z.weight", ctx).T).view(n, L["hv"], L["dv"])
+        b = h @ self._w(a_ + "in_proj_b.weight", ctx).T
+        a = h @ self._w(a_ + "in_proj_a.weight", ctx).T
         st = cache.lin_state(p, mixed.shape[1], L, h.device)
         # causal depthwise conv over [previous K-1 inputs | new inputs]
         K = L["conv"]
@@ -434,22 +472,22 @@ class RawLLM:
             ctx.store.setdefault("lin_mem", {}).setdefault(p, []).append(S.norm(dim=(1, 2)).cpu())
         o = o * torch.rsqrt(o.pow(2).mean(-1, keepdim=True) + cfg.eps)
         o = o * W(a_ + "norm.weight").float() * F.silu(z.float())
-        return o.reshape(n, vd).to(h.dtype) @ W(a_ + "out_proj.weight").T
+        return o.reshape(n, vd).to(h.dtype) @ self._w(a_ + "out_proj.weight", ctx).T
 
     def _mlp_and_finish(self, p, pre, x, attn_out, ctx, idx_of, cap):
         cfg, W = self.cfg, self.W
         h2 = rms_norm(x, self.norm_w(pre + "post_attention_layernorm.weight"), cfg.eps)
-        gate = h2 @ W(pre + "mlp.gate_proj.weight").T
-        up = h2 @ W(pre + "mlp.up_proj.weight").T
+        gate = h2 @ self._w(pre + "mlp.gate_proj.weight", ctx).T
+        up = h2 @ self._w(pre + "mlp.up_proj.weight", ctx).T
         neurons = self.act(gate) * up                     # [n, d_ff]: one number per MLP neuron per token
         neurons = self.neuron_hook(p, neurons, ctx, idx_of, cap)
-        mlp_out = neurons @ W(pre + "mlp.down_proj.weight").T
+        mlp_out = neurons @ self._w(pre + "mlp.down_proj.weight", ctx).T
         for iv in ctx.active("mlp_out"):
             mlp_out = apply_op(mlp_out, iv, ctx, 0, idx_of(iv))
         x = x + mlp_out
         if W.has(pre + "adapter.down.weight"):
             # A bottleneck adapter added by training (adapt.py): squeeze to a few dimensions, expand back, add.
-            x = x + self.act(x @ W(pre + "adapter.down.weight").T) @ W(pre + "adapter.up.weight").T
+            x = x + self.act(x @ self._w(pre + "adapter.down.weight", ctx).T) @ self._w(pre + "adapter.up.weight", ctx).T
         return self._finish(p, x, attn_out, mlp_out, ctx, idx_of, cap)
 
     def neuron_hook(self, p, neurons, ctx, idx_of, cap):
@@ -533,7 +571,7 @@ class LLMAdapter:
             "weights": self.model.W.describe(),
             "capabilities": {"repeat_blocks": True, "reorder_blocks": True, "remove_blocks": True,
                              "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": False},
-            "hooks": ["resid_pre", "attn_heads", "attn_out", "mlp_neurons", "mlp_out", "resid_post"],
+            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out", "mlp_neurons", "mlp_out", "resid_post", "weights"],
         }
 
     def fingerprint(self):
@@ -636,6 +674,7 @@ class LLMAdapter:
             attn[pp] = full
         return {"resid_post": cat(ctx.store.get("resid_post", {})), "resid_pre": cat(ctx.store.get("resid_pre", {})),
                 "attn_out": cat(ctx.store.get("attn_out", {})), "mlp_out": cat(ctx.store.get("mlp_out", {})),
+                "q": cat(ctx.store.get("q", {})), "k": cat(ctx.store.get("k", {})), "v": cat(ctx.store.get("v", {})),
                 "neurons": cat(ctx.store.get("neurons", {})),
                 "unit_range": dict(ctx.store.get("unit_range", {})), "code": dict(ctx.store.get("code", {})),
                 "attn": attn, "ids": seq, "n_prefix": n_prefix}

@@ -13,11 +13,11 @@ export function contextMenu(target, x, y, world) {
   if (n) {
     const k = n.data.kind
     if (k === 'block') items.push(['Repeat block', () => duplicateBlock(n)], [n.data.bypass ? 'Restore (un-bypass)' : 'Bypass', () => bypassBlock(n)],
-      ['+ Intervention on this block', () => addIntervention(n)], ['Debug: run to here', () => debugRunTo(n)])
+      ['+ Interceptor on this block', () => addIntervention(n)], ['Debug: run to here', () => debugRunTo(n)])
     if (k === 'block' && can('kv_prefill')) items.push(['+ KV prefill only this block reads', () => addLayerPrompt(schedPos(n))])
     if (can('code') && hasCode(k)) items.push([(n.data.code || '').trim() ? 'Edit code… (edited)' : 'View / edit code…', () => editCode(n)])
     if (k === 'unet_block' && canRewire(n)) items.push(['Repeat block', () => duplicateBlock(n)], [n.data.bypass ? 'Restore (un-bypass)' : 'Bypass', () => bypassBlock(n)])
-    if (k === 'unet_block') items.push([`+ Intervention on this ${term}`, () => addIntervention(n)])
+    if (k === 'unet_block') items.push([`+ Interceptor on this ${term}`, () => addIntervention(n)])
     if (k === 'intervention' || k === 'prompt_kv') items.push([n.data.enabled === false ? 'Enable' : 'Disable', () => { flow.updateNodeData(n.id, { enabled: n.data.enabled === false }); renderInspector() }])
     if (k === 'embed' && can('kv_prefix')) items.push(['+ KV-cache prefix', () => addKV()])
     if (k === 'embed' && can('kv_prefill')) items.push(['+ Layer KV prefill (text → KV)', () => addLayerPrompt()])
@@ -29,7 +29,7 @@ export function contextMenu(target, x, y, world) {
     items.push(['Delete arrow', () => { flow.removeEdge(target.id); flow.select(null) }])
   } else {
     if (!S.info) return
-    items.push(['+ Intervention here', () => addIntervention(null, world)])
+    items.push(['+ Interceptor here', () => addIntervention(null, world)])
     if (can('kv_prefix')) items.push(['+ KV-cache prefix', () => addKV()])
     if (schema().step_debugger) items.push(['Debug: start stepping', () => debugStart()])
     if (can('init_image')) items.push(['+ Start image / region lock', () => addInitImage()])

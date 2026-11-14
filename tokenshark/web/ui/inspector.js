@@ -9,9 +9,20 @@ import { saveRunCache } from '../tabs/kv.js'
 import { stepStrip } from '../tabs/output_image.js'
 import { renderTokens } from '../tabs/output_text.js'
 
-export const LLM_HOOK_LABELS = [['resid_pre', 'resid_pre — the stream entering the block'], ['attn_heads', 'attn_heads — each attention head’s output'],
-  ['attn_out', 'attn_out — what attention writes to the stream'], ['mlp_neurons', 'mlp_neurons — the MLP’s hidden neurons'],
-  ['mlp_out', 'mlp_out — what the MLP writes to the stream'], ['resid_post', 'resid_post — the stream leaving the block']]
+export const LLM_HOOK_LABELS = [
+  ['resid_pre', 'resid_pre — the stream entering the block'],
+  ['q', 'q — query heads (where tokens look)'],
+  ['k', 'k — new key heads (written to KV cache)'],
+  ['v', 'v — new value heads (written to KV cache)'],
+  ['kv_k', 'kv_k — all cached keys in this block’s KV cache'],
+  ['kv_v', 'kv_v — all cached values in this block’s KV cache'],
+  ['attn_heads', 'attn_heads — each attention head’s output'],
+  ['attn_out', 'attn_out — what attention writes to the stream'],
+  ['mlp_neurons', 'mlp_neurons — the MLP’s hidden neurons'],
+  ['mlp_out', 'mlp_out — what the MLP writes to the stream'],
+  ['resid_post', 'resid_post — the stream leaving the block'],
+  ['weights', 'weights — this block’s weight matrices (per-block quantize / scale)'],
+]
 
 export const PREFIX_MODES = [['shift', 'shift: prefix at 0..m−1, the prompt continues at m (like real context — use for a hidden system prompt)'],
   ['negative', 'negative: prefix at −m..−1, the prompt starts at 0 (as if fresh)'], ['offset', 'offset: prefix starts at the offset below'],
@@ -32,27 +43,28 @@ export const FIELDS = {
   block: () => [['layer', 'Weights of layer', 'number'], ['label', 'Label', 'text']],
   intervention: (modality, n) => {
     if (modality === 'image') return [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'],
-      ['hook', 'Hook', 'select', S.info?.hooks || []], ['op', 'Operation', 'select', ['zero', 'scale', 'add_noise', 'mean']],
-      ['value', 'Value (scale factor / noise σ)', 'number'], ['steps', 'Steps (all | 0:4 | 2,5)', 'text'],
+      ['hook', 'Hook', 'select', S.info?.hooks || []], ['op', 'Operation', 'select', ['zero', 'scale', 'add_noise', 'mean', 'quantize']],
+      ['value', 'Value (scale factor / noise σ / bits)', 'number'], ['steps', 'Steps (all | 0:4 | 2,5)', 'text'],
       ['positions', 'Prompt tokens for hook “word” (token #, see the Tokenizer box: 1 | 2:4)', 'text'], ['seed', 'Noise seed', 'number']]
     const op = n?.data.op || 'zero', hook = n?.data.hook
     const runs = S.runs.filter(r => r.has_captures && r.model_id === S.info?.model_id).map(r => [r.id, `${r.id}${r.label ? ' · ' + r.label : ''} — ${(r.preview || '').slice(0, 30)}`])
     const keepRef = (list, v) => v && !list.find(x => x[0] === v) ? [[v, `${v} (no longer in memory)`], ...list] : list
     const f = [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'], ['hook', 'Where (hook)', 'select', LLM_HOOK_LABELS.filter(h => (S.info?.hooks || []).includes(h[0]))],
       ['op', 'Operation', 'select', [['zero', 'zero — remove it'], ['scale', 'scale — multiply by the value'], ['add_noise', 'add_noise — add random noise'],
-        ['mean', 'mean — replace by the average over tokens'], ['patch', 'patch — copy it from another run'], ['steer', 'steer — add a steering vector'],
-        ['clamp', 'clamp — pin units to a fixed value']]]]
+        ['mean', 'mean — replace by the average over tokens'], ['quantize', 'quantize — round to N bits (1..16)'],
+        ['patch', 'patch — copy it from another run'], ['steer', 'steer — add a steering vector'],
+        ['project_out', 'project_out — erase / project out a direction'], ['clamp', 'clamp — pin units to a fixed value']]]]
     if (op === 'patch') f.push(['ref', 'Copy from run (the “clean” run)', 'select', [['', '— choose a run —'], ...keepRef(runs, n.data.ref)]],
       ['src_positions', 'Take the source run’s token (empty = same token index; or last, or a number)', 'text'])
-    if (op === 'steer') f.push(['ref', 'Steering vector', 'select', [['', '— choose a vector —'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
-      ['value', 'Strength (multiplies the vector; negative pushes the other way)', 'number'])
+    if (op === 'steer' || op === 'project_out') f.push(['ref', 'Vector direction', 'select', [['', '— choose a vector —'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
+      ['value', op === 'project_out' ? 'Projection strength (1 = erase completely, 2 = reflect)' : 'Strength (multiplies the vector; negative pushes the other way)', 'number'])
     if (op === 'clamp') f.push(['clamp', 'Pin to', 'select', [['max', 'max — the largest value it reached'], ['min', 'min — the smallest value it reached'], ['value', 'value — the number below']]],
       ['value', n.data.clamp === 'value' ? 'Value' : 'Multiplier (1 = exactly its max / min, 5 = five times that)', 'number'],
       ['ref', 'Max / min measured in run (empty = this run so far)', 'select', [['', '— this run so far —'], ...keepRef(runs, n.data.ref)]])
-    if (op === 'scale' || op === 'add_noise') f.push(['value', op === 'scale' ? 'Scale factor' : 'Noise size σ (× the activation’s spread)', 'number'])
-    f.push(['positions', 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
-    if (hook === 'attn_heads') f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
-    f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : hook === 'attn_heads' ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
+    if (op === 'scale' || op === 'add_noise' || op === 'quantize') f.push(['value', op === 'scale' ? 'Scale factor' : op === 'quantize' ? 'Bit width (1..16 bits)' : 'Noise size σ (× the activation’s spread)', 'number'])
+    if (hook !== 'weights') f.push(['positions', 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
+    if (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook)) f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
+    if (hook !== 'weights') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
     if (op === 'add_noise') f.push(['seed', 'Noise seed', 'number'])
     return f
   },
@@ -79,7 +91,7 @@ export const KIND_HELP = {
   input_prompt: 'Text that goes into the model. Prefill tokens are forced: the model continues from them.',
   tokenizer: 'Splits text into token ids.',
   embed: 'Looks up one vector per token: the start of the residual stream. The KV input on top prepends another conversation\'s cache.',
-  block: 'One transformer block: RMSNorm → attention (q·kᵀ with RoPE) → add → RMSNorm → SwiGLU MLP → add. Rewire arrows to remove, repeat or reorder blocks. Wire an intervention into the top port.',
+  block: 'One transformer block: RMSNorm → attention (q·kᵀ with RoPE) → add → RMSNorm → SwiGLU MLP → add. Rewire arrows to remove, repeat or reorder blocks. Wire an interceptor into the top port.',
   final_norm: 'RMSNorm before unembedding.', lm_head: 'Projects the residual stream onto the vocabulary → logits.',
   sampler: 'Turns logits into the next token; the loop arrow feeds it back in.',
   output_text: 'Generated text. Click a token to see the alternatives the model considered and fork from there.',
@@ -87,10 +99,10 @@ export const KIND_HELP = {
   noise: 'The starting latent: Gaussian noise from the seed (or a noised start image).',
   scheduler: 'Euler sampler: sets the noise level σ at each step (high σ = rough layout, low σ = fine detail). Guidance > 1 runs the UNet twice (with and without the prompt) and pushes the result away from the negative prompt.',
   denoiser_in: 'Each step the UNet predicts the noise in the current latent.',
-  unet_block: 'UNet stage. Down stages shrink the image and pass skip features (dotted) to the matching up stage. Order is fixed. Wire an intervention: hook out/skip scales or zeroes this stage\'s features for chosen steps; hook word changes how strongly this stage reads chosen prompt words (0 = ignore the word, 2 = emphasise it).',
+  unet_block: 'UNet stage. Down stages shrink the image and pass skip features (dotted) to the matching up stage. Order is fixed. Wire an interceptor: hook out/skip scales or zeroes this stage\'s features for chosen steps; hook word changes how strongly this stage reads chosen prompt words (0 = ignore the word, 2 = emphasise it).',
   denoiser_out: 'Noise prediction → Euler step → next latent. Loops for every step.',
   vae_decode: 'Turns the 4-channel latent back into pixels.',
-  intervention: 'Changes an activation while the model runs. Wire it into the top port of one or more blocks. Beyond zero / scale / noise it can copy the activation from another run (patch), push it along a saved direction (steer) or pin single neurons (clamp).',
+  intervention: 'Intercepts and modifies a block’s activations, KV cache, or weights while the model runs. Wire it into the top port of one or more blocks. Supports zero, scale, noise, quantize (per-block weight or KV-cache bits), patch, steer, project_out, and clamp.',
   kv_text: 'A per-layer KV prefill: text that only the blocks you choose can read. It is pushed through the whole model once and its keys and values are kept; the chosen blocks then attend to them as a prefix, the other blocks never see it. Try an instruction for a few middle blocks. Mode overwrite hides the real prompt from those blocks, so they read this text instead.',
   kv_import: 'Prepends a saved KV cache: the new prompt attends to it without recomputing it. Keys are stored before RoPE, so positions can be moved freely. Add several boxes (each wired into Embed’s KV port) to give different blocks different prefixes; each box’s “Blocks that can see it” decides which blocks read it. With the chat template on, the Prompt box’s System field is ignored — the prefix plays that role.',
   prompt_kv: 'A second prompt for chosen blocks. Qwen-Image pushes the prompt through the blocks once and keeps its keys/values — a KV cache — so each block can read a different one. replace: those blocks see this prompt instead (e.g. layout blocks “a cat”, detail blocks “a dog”). prepend: a hidden prompt the main prompt and the image both attend to in those blocks, like the hidden system prompt of the language models.',
@@ -154,15 +166,17 @@ export function renderInspector() {
   const actions = el('div', { className: 'row' })
   if (k === 'block') {
     actions.append(btn('Repeat block', () => duplicateBlock(n)), btn(n.data.bypass ? 'Restore' : 'Bypass', () => bypassBlock(n)),
-      btn('+ Intervention', () => addIntervention(n)), btn('Debug: run to here', () => debugRunTo(n)))
+      btn('+ Interceptor', () => addIntervention(n)), btn('Debug: run to here', () => debugRunTo(n)))
   }
-  if (k === 'intervention') {                // shortcuts to the tab that goes with this kind of intervention, if the model has it
+  if (k === 'intervention') {                // shortcuts to the tab that goes with this kind of interceptor, if the model has it
     if (n.data.op === 'patch' && tabAvailable('patch')) actions.append(btn('Find where to patch (sweep)', () => setTab('patch')))
-    if (n.data.op === 'steer' && tabAvailable('steer')) actions.append(btn('Make a steering vector', () => setTab('steer')))
+    if ((n.data.op === 'steer' || n.data.op === 'project_out') && tabAvailable('steer')) actions.append(btn('Make a steering vector', () => setTab('steer')))
     if (n.data.hook === 'mlp_neurons' && tabAvailable('neurons')) actions.append(btn('Find neurons', () => setTab('neurons')))
+    if ((n.data.op === 'quantize' || n.data.hook === 'weights') && tabAvailable('quant')) actions.append(btn('Open Quantize tab', () => setTab('quant')))
+    if ((n.data.hook === 'kv_k' || n.data.hook === 'kv_v') && tabAvailable('kv')) actions.append(btn('Open KV caches tab', () => setTab('kv')))
   }
   if (k === 'unet_block' && canRewire(n)) actions.append(btn('Repeat block', () => duplicateBlock(n)), btn(n.data.bypass ? 'Restore' : 'Bypass', () => bypassBlock(n)))
-  if (k === 'unet_block') actions.append(btn('+ Intervention', () => addIntervention(n)))
+  if (k === 'unet_block') actions.append(btn('+ Interceptor', () => addIntervention(n)))
   if (k === 'kv_import' || k === 'kv_text') actions.append(btn(k === 'kv_text' ? 'Edit all prefills (KV tab)' : 'Open KV caches', () => setTab('kv')))
   if (k === 'intervention' && S.info?.capabilities?.regions) box.appendChild(regionEditor(n))
   if (actions.children.length) box.appendChild(actions)

@@ -100,6 +100,12 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
             elif op == "steer":
                 extra = _diff(d, {"hook": "resid_post", "positions": "all"}, {"value": "value", "hook": "hook", "positions": "positions"})
                 out.append(f"{var}.steer({tgt}, {src_ref}{', ' + _kw(extra) if extra else ''})")
+            elif op == "project_out":
+                extra = _diff(d, {"hook": "resid_post", "positions": "all", "value": 1.0}, {"value": "value", "hook": "hook", "positions": "positions"})
+                out.append(f"{var}.project_out({tgt}, {src_ref}{', ' + _kw(extra) if extra else ''})")
+            elif op == "quantize":
+                extra = _diff(d, {"hook": "weights", "positions": "all", "heads": "all"}, {"hook": "hook", "positions": "positions", "heads": "heads"})
+                out.append(f"{var}.quantize_block({tgt}, {int(d.get('value') or 4)}{', ' + _kw(extra) if extra else ''})")
             elif op == "clamp":
                 extra = _diff(d, {"hook": "mlp_neurons", "positions": "all", "ref": ""},
                               {"clamp": "to", "value": "value", "positions": "positions", "hook": "hook"})
@@ -139,7 +145,7 @@ def run_script(run, default_flow_for, get_run, vectors: dict | None = None) -> s
         for iv in r.plan.interventions:
             if iv.ref in done:
                 refs[iv.ref] = done[iv.ref]
-            elif iv.op == "steer" and iv.ref in vectors:
+            elif iv.op in ("steer", "project_out") and iv.ref in vectors:
                 body.append(f"# steering vector {iv.ref!r}: {vectors[iv.ref].get('name', '')} "
                             f"(saved in data/vectors/ on this machine)")
         ov = r.plan.params.get("overlays") or {}
@@ -147,7 +153,12 @@ def run_script(run, default_flow_for, get_run, vectors: dict | None = None) -> s
         if "lora" in ov:
             body.append(f"lab.lora({ov['lora']['path']!r}, scale={ov['lora']['scale']})")
         if "quant" in ov:
-            body.append(f"lab.quantize({ov['quant']})")
+            qv = ov["quant"]
+            if isinstance(qv, dict):
+                lb = f", layer_bits={qv['layer_bits']!r}" if qv.get("layer_bits") else ""
+                body.append(f"lab.quantize({qv.get('bits', 4)}, layers={qv.get('layers', 'all')!r}{lb})")
+            else:
+                body.append(f"lab.quantize({qv})")
         body.append("flow = lab.flow()")
         body.extend(flow_lines(r.flow, default_flow_for(r), "flow", refs))
         body.append(f"{var} = lab.run(flow)")

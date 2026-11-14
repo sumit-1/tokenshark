@@ -69,7 +69,7 @@ export async function renderKV(p) {
 
 export async function inspectCache(cid) {
   const c = await GET(`/api/caches/${cid}`)
-  const box = el('div', { className: 'kvbox' }, `<h4>${esc(c.name)} — ${c.n_tokens} tokens · positions are RoPE positions (editable)</h4>`)
+  const box = el('div', { className: 'kvbox' }, `<h4>${esc(c.name)} — ${c.n_tokens} tokens · ${c.n_slots} block slots · positions are RoPE positions (editable)</h4>`)
   const toks = el('div', { className: 'tokens' })
   const segOf = i => c.segments.find(s => i >= s.start && i < s.end)?.origin || 'prompt'
   let a = null, b = null
@@ -78,19 +78,34 @@ export async function inspectCache(cid) {
     s.onclick = () => { if (a === null || b !== null) { a = i; b = null } else { b = i } mark() }
     toks.appendChild(s)
   })
-  const mark = () => { toks.querySelectorAll('.tok').forEach((s, i) => s.classList.toggle('on', a !== null && i >= a && i <= (b ?? a))); range.textContent = a === null ? 'Click two tokens to select a span.' : `span ${a}–${b ?? a}` }
+  const mark = () => { toks.querySelectorAll('.tok').forEach((s, i) => s.classList.toggle('on', a !== null && i >= a && i <= (b ?? a))); range.textContent = a === null ? 'Click two tokens to select a span (or leave unselected for all tokens).' : `span ${a}–${b ?? a}` }
   const range = el('span', { className: 'small' })
   const delta = el('input', { type: 'number', value: -10, style: 'width:70px' })
   const ops = el('div', { className: 'row' })
-  const doEdit = async (op) => {
-    if (a === null) return toast('Select a span first.', 'error')
-    const s = a, e = (b ?? a) + 1
-    try { const r = await POST(`/api/caches/${cid}/edit`, { op, start: op === 'truncate' ? s : s, end: e, delta: +delta.value }); toast(`Saved new cache “${r.name}”`); await refreshCaches(); inspectCache(r.id) }
+  const doEdit = async (op, extra = {}) => {
+    if (a === null && ['keep', 'drop', 'truncate', 'shift'].includes(op)) return toast('Select a span first.', 'error')
+    const s = a ?? 0, e = a === null ? c.n_tokens : (b ?? a) + 1
+    try { const r = await POST(`/api/caches/${cid}/edit`, { op, start: s, end: e, delta: +delta.value, ...extra }); toast(`Saved new cache “${r.name}”`); await refreshCaches(); inspectCache(r.id) }
     catch (err) { toast(err.message, 'error') }
   }
   ops.append(range, btn('Keep span', () => doEdit('keep'), 'mini'), btn('Drop span', () => doEdit('drop'), 'mini'),
     btn('Truncate before span', () => doEdit('truncate'), 'mini'), el('span', { textContent: 'Δ pos' }), delta, btn('Shift span positions', () => doEdit('shift'), 'mini'))
-  box.append(ops, toks)
+
+  // Per-block KV cache surgery (zero / scale / quantize K or V at chosen block slots)
+  const slotRow = el('div', { className: 'row' })
+  const layIn = el('input', { value: 'all', style: 'width:90px', title: `Block slots (0…${c.n_slots - 1}): all | 0:12 | 5,10` })
+  const partSel = selectOf([['both', 'K & V'], ['k', 'Keys (K) only'], ['v', 'Values (V) only']], 'both')
+  const valIn = el('input', { type: 'number', value: 4, step: 'any', style: 'width:65px', title: 'Scale factor or bit-width (1..16)' })
+  slotRow.append(
+    el('b', { className: 'small', textContent: 'Per-block KV edit:' }),
+    labelled('Blocks', layIn),
+    labelled('Target', partSel),
+    labelled('Value / bits', valIn),
+    btn('Zero blocks', () => doEdit('zero_slots', { layers: layIn.value, part: partSel.value, delta: 0 }), 'mini'),
+    btn('Scale blocks', () => doEdit('scale_slots', { layers: layIn.value, part: partSel.value, delta: +valIn.value }), 'mini'),
+    btn('Quantize blocks (bits)', () => doEdit('quantize_slots', { layers: layIn.value, part: partSel.value, delta: +valIn.value }), 'mini'),
+  )
+  box.append(ops, slotRow, toks)
   mark()
   S.kvInspect = box
   setTab('kv')

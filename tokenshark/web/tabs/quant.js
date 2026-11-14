@@ -1,37 +1,60 @@
 import { GET, POST, S, api, btn, el, flow, hasFeature, registerTab, spinner, toast } from '../core.js'
 import { esc } from '../flow.js'
-import { aliveIn, followTask, labelled, selectOf } from '../ui/labkit.js'
+import { addBox, aliveIn, followTask, labelled, selectOf } from '../ui/labkit.js'
 import { renderTab } from '../ui/tabs.js'
 
-S.qt = { bits: 4, cmp: [8, 4, 2], result: null }
+S.qt = { bits: 4, layers: 'all', cmp: [8, 4, 2], result: null }
 
 export async function renderQuant(p) {
   if (!S.info) { p.innerHTML = '<div class="empty">Load a model first.</div>'; return }
   const st = S.qt
   let q = null
   try { const r = await GET('/api/quant'); q = r.active ? r : null; S.info.quant = q } catch { }
-  p.appendChild(el('div', { className: 'small' }, `<b>Quantization.</b> Weights are usually stored as 16-bit numbers. Rounding them to 8, 4 or fewer bits makes a model 2–8× smaller —
-    this is how large models fit on a laptop. Here every weight matrix inside the blocks is rounded on the fly (round-to-nearest, one scale per row), so you can see what it costs. Nothing on disk changes.
-    This is the simplest possible scheme: the 4-bit files people download use smarter rounding (per-block scales, calibration data) and lose far less than you will see here — which is exactly why those schemes exist.`))
+  if (q?.layers_spec) st.layers = q.layers_spec
+  p.appendChild(el('div', { className: 'small' }, `<b>Quantization (Global or Per-Block).</b> Weights are usually stored as 16-bit numbers. Rounding them to 8, 4 or fewer bits makes a model 2–8× smaller.
+    Round all blocks or only chosen blocks (e.g. <code>0:12</code> or <code>5,10</code>) below, or click <b>+ Interceptor</b> on any row to wire a per-block weight / KV-cache quantizer box directly onto the flow canvas.`))
   const row = el('div', { className: 'row' })
   const bits = selectOf([[8, '8-bit'], [6, '6-bit'], [4, '4-bit'], [3, '3-bit'], [2, '2-bit'], [1, '1-bit (sign only)']], st.bits); bits.onchange = () => { st.bits = +bits.value }
-  row.append(labelled('Round block weights to', bits), btn(q ? 'Change' : 'Apply', async () => {
+  const layIn = el('input', { value: st.layers, style: 'width:110px', title: 'Which blocks to quantize: all | 0:12 | 5,10 | 20:24' })
+  layIn.oninput = () => { st.layers = layIn.value }
+  row.append(labelled('Round block weights to', bits), labelled('Blocks', layIn), btn(q ? 'Change' : 'Apply', async () => {
     row.appendChild(el('span', {}, spinner('measuring the rounding error of every matrix…')))
-    try { const r = await POST('/api/quant', { bits: st.bits }); toast(`Block weights are now rounded to ${r.bits} bits. Every run from here uses them.`); renderTab() }
+    try { const r = await POST('/api/quant', { bits: st.bits, layers: st.layers || 'all' }); toast(`Block weights (${r.layers_spec || 'all'}) are now rounded to ${r.bits} bits.`); renderTab() }
     catch (e) { toast(e.message, 'error'); renderTab() }
   }, 'primary'))
   if (q) row.append(btn('✕ Back to full precision', async () => { await api('DELETE', '/api/quant'); toast('Full-precision weights restored.'); renderTab() }, 'ghost'))
   p.appendChild(row)
   if (q) {
     const s = el('div', { className: 'sec' })
-    s.innerHTML = `<div class="row"><span class="chip coded">${q.bits}-bit active</span><span class="small">${q.n_weights} matrices · ${(q.n_params / 1e6).toFixed(1)} M weights ·
+    s.innerHTML = `<div class="row"><span class="chip coded">${q.bits}-bit active (blocks: ${esc(q.layers_spec || 'all')})</span><span class="small">${q.n_weights} matrices · ${(q.n_params / 1e6).toFixed(1)} M weights ·
       ${q.size_mb_16bit} MB at 16-bit → <b>${q.size_mb} MB</b> at ${q.bits}-bit (${(16 / q.bits).toFixed(1)}× smaller)${q.measured ? ` · mean rounding error <b>${(q.mean_error * 100).toFixed(2)}%</b>` : ' · error not measured (model too large to scan)'}</span></div>`
     if (q.layers?.length) {
       const t = el('table', { className: 'grid' })
-      t.innerHTML = '<tr><th>Block</th><th>Rounding error ‖W − round(W)‖ / ‖W‖</th></tr>'
+      t.innerHTML = '<tr><th>Block</th><th>Bits</th><th>Rounding error ‖W − round(W)‖ / ‖W‖</th><th>Per-block interceptor</th></tr>'
       q.layers.forEach(l => {
         const tr = el('tr', { style: 'cursor:pointer' })
-        tr.innerHTML = `<td>Block ${l.layer}</td><td><span class="pbar"><i style="width:${(l.heat * 100).toFixed(0)}%;background:var(--warn)"></i></span> ${(l.relative_error * 100).toFixed(2)}%</td>`
+        tr.innerHTML = `<td>Block ${l.layer}</td><td><span class="chip">${l.bits ?? q.bits}-bit</span></td>
+          <td><span class="pbar"><i style="width:${(l.heat * 100).toFixed(0)}%;background:var(--warn)"></i></span> ${(l.relative_error * 100).toFixed(2)}%</td>`
+        const td = el('td')
+        td.append(
+          btn('+ Weight quantize box', ev => {
+            ev.stopPropagation()
+            const target = flow.nodes.find(x => x.data?.layer === l.layer)?.id
+            if (target) {
+              addBox(target, { label: `quantize ${l.bits ?? q.bits}-bit @ weights`, hook: 'weights', op: 'quantize', value: l.bits ?? q.bits })
+              toast(`Added ${l.bits ?? q.bits}-bit weight interceptor on Block ${l.layer}.`)
+            }
+          }, 'mini'),
+          btn('+ KV-cache quantize box', ev => {
+            ev.stopPropagation()
+            const target = flow.nodes.find(x => x.data?.layer === l.layer)?.id
+            if (target) {
+              addBox(target, { label: `quantize ${l.bits ?? q.bits}-bit @ kv_k`, hook: 'kv_k', op: 'quantize', value: l.bits ?? q.bits })
+              toast(`Added ${l.bits ?? q.bits}-bit KV-key interceptor on Block ${l.layer}.`)
+            }
+          }, 'mini')
+        )
+        tr.appendChild(td)
         tr.onclick = () => { const n = flow.nodes.find(x => x.data?.layer === l.layer); if (n) flow.select({ type: 'node', id: n.id }) }
         t.appendChild(tr)
       })
