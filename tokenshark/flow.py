@@ -36,7 +36,8 @@ OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
 #   clamp       — pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
 #   quantize    — round this tensor / block's weights / KV cache to `value` bits (1..16)
 #   ban / only  — mixture-of-experts router: these experts can never be chosen / are the only ones that can
-LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "ban", "only"]
+#   route       — mixture-of-experts router: use exactly these experts and weights ("3=0.6, 17=0.4")
+LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "ban", "only", "route"]
 PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "router", "mlp_out", "resid_post"]
 CODE_KINDS = ["embed", "block", "final_norm", "lm_head", "sampler"]     # boxes whose Python can be edited
 PREFIX_MODES = ["shift", "negative", "offset", "overwrite"]
@@ -266,8 +267,8 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
     for nid in chain:
         d = nodes[nid]["data"]
         k, temp = _num(d.get("moe_k"), 0, int), _num(d.get("moe_temp"), 0.0)
-        if k > 0 or temp > 0:
-            moe[nid] = {"k": max(0, k), "temp": max(0.0, temp)}
+        if k > 0 or temp > 0 or d.get("moe_shared") is False:
+            moe[nid] = {"k": max(0, k), "temp": max(0.0, temp), "shared": d.get("moe_shared") is not False}
     if moe:
         params["moe"] = moe
     return params
@@ -469,12 +470,19 @@ def compile_flow(flow: dict, info: dict) -> Plan:
             continue
         moe_layers = (info.get("moe") or {}).get("layers") or []
         on_moe = int(nodes[e["target"]]["data"].get("layer", -1)) in moe_layers
-        if (hook in MOE_HOOKS or op in ("ban", "only")) and not on_moe:
+        if (hook in MOE_HOOKS or op in ("ban", "only", "route")) and not on_moe:
             err(f"'{nodes[e['target']]['data'].get('label')}' is not a mixture-of-experts block: it has no router "
                 f"or experts to intercept.", e["source"])
             continue
-        if op in ("ban", "only") and hook != "router":
-            err("ban / only act on the router: set the hook to 'router'.", e["source"])
+        if op in ("ban", "only", "route") and hook != "router":
+            err("ban / only / route act on the router: set the hook to 'router'.", e["source"])
+            continue
+        if op == "route" and str(src.get("experts") or "all").strip().lower() in ("all", "*", ""):
+            err("A custom route needs its experts, e.g. 3=0.6, 17=0.4 (or 3, 17 to keep the router's own weights).",
+                e["source"])
+            continue
+        if op == "route" and re.search(r":|shared|all", str(src.get("experts")).lower()):
+            err("A custom route lists single experts: 3=0.6, 17=0.4.", e["source"])
             continue
         if hook == "expert_out" and op in ("patch", "clamp", "quantize"):
             err("expert_out supports zero, scale, add_noise, mean, steer and project_out.", e["source"])
@@ -532,8 +540,14 @@ def compile_flow(flow: dict, info: dict) -> Plan:
 
 def _expert_spec(spec: str):
     """Check an experts spec (all | 3 | 0:8 | 1,5 | shared) without knowing the number of experts."""
-    rest = ",".join(x.strip() for x in spec.lower().split(",") if x.strip() and x.strip() != "shared")
-    parse_index_spec(rest or "all", 1_000_000)
+    names = [x.strip().split("=") for x in spec.lower().split(",") if x.strip() and x.strip() != "shared"]
+    for n in names:
+        if len(n) == 2:
+            try:
+                float(n[1])
+            except ValueError:
+                raise ValueError(f"Can't read the weight in '{'='.join(n)}'. Write expert=weight, e.g. 3=0.6.") from None
+    parse_index_spec(",".join(n[0].strip() for n in names) or "all", 1_000_000)
 
 
 def _round8(v: int) -> int:

@@ -44,7 +44,8 @@ export const FIELDS = {
   scheduler: () => [['steps', 'Steps', 'number'], ['guidance_scale', 'Guidance (CFG, ≤1 = off)', 'number']],
   block: (m, n) => [['layer', 'Weights of layer', 'number'], ['label', 'Label', 'text'],
     ...(n?.data.moe ? [['moe_k', `Experts per token (empty = the model’s own ${S.info?.moe?.top_k ?? ''}; 1 … ${n.data.moe})`, 'number'],
-      ['moe_temp', 'Router temperature (empty = 1; higher = flatter choice, lower = sharper)', 'number']] : [])],
+      ['moe_temp', 'Router temperature (empty = 1; higher = flatter choice, lower = sharper)', 'number'],
+      ...(S.info?.moe?.shared ? [['moe_shared', 'Use the shared expert (the one every token goes through)', 'checkbox']] : [])] : [])],
   intervention: (modality, n) => {
     if (modality === 'image') return [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'],
       ['hook', 'Hook', 'select', S.info?.hooks || []], ['op', 'Operation', 'select', ['zero', 'scale', 'add_noise', 'mean', 'quantize']],
@@ -58,8 +59,11 @@ export const FIELDS = {
         ['mean', 'mean — replace by the average over tokens'], ['quantize', 'quantize — round to N bits (1..16)'],
         ['patch', 'patch — copy it from another run'], ['steer', 'steer — add a steering vector'],
         ['project_out', 'project_out — erase / project out a direction'], ['clamp', 'clamp — pin units to a fixed value'],
-        ...(S.info?.moe ? [['ban', 'ban — MoE router: these experts can never be chosen'], ['only', 'only — MoE router: only these experts can be chosen']] : [])]]]
-    if (['router', 'expert_out', 'mlp_neurons'].includes(hook) && S.info?.moe) f.push(['experts', `Experts (all | 3 | 0:8 | 1,5${S.info.moe.shared ? ' | shared' : ''})`, 'text'])
+        ...(S.info?.moe ? [['ban', 'ban — MoE router: these experts can never be chosen'], ['only', 'only — MoE router: only these experts can be chosen'],
+          ['route', 'route — MoE router: use exactly the experts and weights you write']] : [])]]]
+    if (['router', 'expert_out', 'mlp_neurons'].includes(hook) && S.info?.moe) f.push(['experts', op === 'route'
+      ? 'Experts and their weights (3=0.6, 17=0.4 — a name without a weight keeps the router’s own score)'
+      : `Experts (all | 3 | 0:8 | 1,5${S.info.moe.shared ? ' | shared' : ''})`, 'text'])
     if (op === 'patch') f.push(['ref', 'Copy from run (the “clean” run)', 'select', [['', '— choose a run —'], ...keepRef(runs, n.data.ref)]],
       ['src_positions', 'Take the source run’s token (empty = same token index; or last, or a number)', 'text'])
     if (op === 'steer' || op === 'project_out') f.push(['ref', 'Vector direction', 'select', [['', '— choose a vector —'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
@@ -142,7 +146,7 @@ export function field(n, [key, label, type, options]) {
     if (key === 'cache_id') input.appendChild(el('option', { value: '', textContent: '— choose —' }))
     for (const o of options) { const [v, t] = Array.isArray(o) ? o : [o, o]; input.appendChild(el('option', { value: v, textContent: t })) }
     input.value = n.data[key] ?? ''
-  } else if (type === 'checkbox') input = el('input', { type: 'checkbox', checked: n.data[key] !== false && !!(n.data[key] ?? (key === 'add_bos' || key === 'enabled')) })
+  } else if (type === 'checkbox') input = el('input', { type: 'checkbox', checked: n.data[key] !== false && !!(n.data[key] ?? (key === 'add_bos' || key === 'enabled' || key === 'moe_shared')) })
   else input = el('input', { type, value: n.data[key] ?? '', step: 'any' })
   input.addEventListener(type === 'select' || type === 'checkbox' ? 'change' : 'input', () => {
     let v = type === 'checkbox' ? input.checked : input.value
@@ -151,6 +155,7 @@ export function field(n, [key, label, type, options]) {
     // these choices decide which other fields the box has
     if (n.data.kind === 'intervention' && ['op', 'hook', 'clamp'].includes(key)) renderInspector()
     if (n.data.kind === 'intervention' && ['op', 'hook', 'experts', 'enabled'].includes(key)) hooks.refreshBadges?.()
+    if (key === 'moe_shared') hooks.refreshBadges?.()
   })
   wrap.append(el('span', { textContent: label }), input)
   return wrap

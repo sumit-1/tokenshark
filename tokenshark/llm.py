@@ -671,10 +671,25 @@ class RawLLM:
         spec = (spec or "all").strip().lower()
         if spec in ("all", "*", ""):
             return list(range(E))
-        parts = [x.strip() for x in spec.split(",") if x.strip()]
+        parts = [x.strip().split("=")[0].strip() for x in spec.split(",") if x.strip()]     # "3=0.6" names expert 3
         out = [E] if "shared" in parts and lay["shared"] else []
         rest = ",".join(x for x in parts if x != "shared")
         return sorted(set(out + (parse_index_spec(rest, E) if rest else [])))
+
+    @staticmethod
+    def route_spec(spec: str, E: int) -> list[tuple[int, float | None]]:
+        """A hand-written routing: "3=0.6, 17=0.4" → [(3, 0.6), (17, 0.4)]. A weight left out ("3, 17") means
+        "the router's own score for that expert"."""
+        out = []
+        for part in (spec or "").split(","):
+            if not part.strip():
+                continue
+            e, _, wt = part.partition("=")
+            e = int(e.strip())
+            if not 0 <= e < E:
+                raise ValueError(f"This block has experts 0…{E - 1}; a custom route names expert {e}.")
+            out.append((e, float(wt) if wt.strip() else None))
+        return out
 
     def _moe_mlp(self, p: int, lay: dict, h2: torch.Tensor, ctx: RunContext, idx_of, cap: bool) -> torch.Tensor:
         """The MLP of a mixture-of-experts block. A dense block has one wide MLP that every token uses. Here
@@ -688,6 +703,8 @@ class RawLLM:
         E = lay["n"]
         logits = (h2 @ self._w(lay["router"], ctx).T).float()                 # [n, E] one score per expert
         for iv in ctx.active("router"):
+            if iv.op == "route":                    # a hand-written routing: applied after the router has chosen
+                continue
             ex = [e for e in self.expert_ids(iv.experts, lay) if e < E]
             idx = idx_of(iv)
             if not ex or not idx:
@@ -719,6 +736,32 @@ class RawLLM:
             w = w / w.sum(-1, keepdim=True)
         if m.get("scale", 1.0) != 1.0:
             w = w * m["scale"]
+        for iv in ctx.active("router"):
+            # Custom route: for the chosen tokens the router's decision is replaced by the experts and weights
+            # written in the box. The weights are used exactly as given (they need not sum to 1, and may be
+            # negative: an expert's write is then subtracted); an expert named without a weight keeps the
+            # router's own score for it.
+            if iv.op != "route":
+                continue
+            pairs, idx = self.route_spec(iv.experts, E), idx_of(iv)
+            if not pairs or not idx:
+                continue
+            if len(pairs) > sel.shape[1]:
+                pad = len(pairs) - sel.shape[1]
+                sel = torch.cat([sel, sel.new_zeros(n, pad)], 1)
+                w = torch.cat([w, w.new_zeros(n, pad)], 1)
+            rows = torch.tensor(idx, device=sel.device)
+            es = torch.tensor([e for e, _ in pairs], device=sel.device)
+            own = probs[rows][:, es]
+            if all(wt is None for _, wt in pairs) and m["norm_topk"]:
+                own = own / own.sum(-1, keepdim=True).clamp(min=1e-12)
+            given = torch.tensor([float("nan") if wt is None else wt for _, wt in pairs], device=sel.device)
+            wr = torch.where(torch.isnan(given)[None, :], own.float(), given[None, :].expand_as(own).float())
+            new_sel, new_w = sel[rows] * 0, w[rows] * 0
+            new_sel[:, :len(pairs)], new_w[:, :len(pairs)] = es, wr.to(w.dtype)
+            sel, w = sel.clone(), w.clone()
+            sel[rows], w[rows] = new_sel, new_w
+        k = sel.shape[1]
         keep = cap and ctx.store.get("want_experts", False)
         parts = torch.zeros(n, k, d, dtype=torch.float16) if keep else None
         out = torch.zeros_like(h2)
@@ -737,7 +780,7 @@ class RawLLM:
             return t
 
         for e in sel.unique().tolist():
-            rows, slot = torch.where((sel == e) & (w > 0))                    # the tokens routed here
+            rows, slot = torch.where((sel == e) & (w != 0))                   # the tokens routed here
             if not rows.numel():                    # only "chosen" to fill a slot after its score was banned
                 continue
             he = h2[rows]
@@ -749,7 +792,7 @@ class RawLLM:
             if parts is not None:
                 parts[rows.cpu(), slot.cpu()] = oe.detach().to(torch.float16).cpu()
         shared = None
-        if lay["shared"]:                           # an expert every token uses, next to the routed ones
+        if lay["shared"] and p not in (ctx.store.get("moe_noshared") or ()):   # an expert every token uses
             g, u, dn = self.expert_weights(lay, "shared", ctx)
             shared = (self.act(h2 @ g.T) * (h2 @ u.T)) @ dn.T
             if lay["shared_gate"]:
@@ -980,6 +1023,11 @@ class LLMAdapter:
                 "moe_w": cat(ctx.store.get("moe_w", {})), "moe_parts": cat(ctx.store.get("moe_parts", {})),
                 "moe_shared": cat(ctx.store.get("moe_shared", {})),
                 "moe_k": dict(ctx.store.get("moe_k") or {}), "moe_temp": dict(ctx.store.get("moe_temp") or {}),
+                "moe_noshared": set(ctx.store.get("moe_noshared") or ()),
+                # what the run was edited with, so that analyses which run blocks again (decode through the last
+                # k blocks) run them the way the run did
+                "interventions": list(plan.interventions), "sources": dict(ctx.sources),
+                "token_ranges": dict(ctx.token_ranges),
                 "unit_range": dict(ctx.store.get("unit_range", {})), "code": dict(ctx.store.get("code", {})),
                 "attn": attn, "ids": seq, "n_prefix": n_prefix}
 
@@ -1023,11 +1071,25 @@ class LLMAdapter:
             n_pre = cap["n_prefix"]
             tmp = full.prefix_view(n_pre)                    # imported prefix (+ linear memory right after it)
             tmp.add_tokens(cap["ids"][:T], full.pos[n_pre:n_pre + T].tolist(), "prompt")
-            ctx = RunContext(interventions=[])
-            ctx.store["code"] = cap.get("code", {})          # edited blocks stay edited when decoding through them
+            # The blocks we pass through behave as they did in the run: same interceptors (banned experts, steering,
+            # patches, clamps …), same edited code, same routing settings.
+            ctx = RunContext(interventions=list(cap.get("interventions") or []))
+            ctx.sources = cap.get("sources") or {}
+            ctx.token_ranges = rng = cap.get("token_ranges") or {}
+            ctx.store["code"] = cap.get("code", {})
+            ctx.store["unit_range"] = dict(cap.get("unit_range") or {})
             ctx.store["moe_k"], ctx.store["moe_temp"] = cap.get("moe_k") or {}, cap.get("moe_temp") or {}
+            ctx.store["moe_noshared"] = cap.get("moe_noshared") or ()
+            planned = max([T] + [r.stop for r in rng.values()])
+
+            def idx_of(iv):
+                if iv.positions.strip().lower() == "last":       # in the run: the last token of every chunk
+                    ends = [r.stop - 1 for k, r in rng.items() if k in ("prompt", "prefill") and len(r)]
+                    return sorted({i for i in ends + list(rng.get("generated", [])) if i < T}) or [T - 1]
+                return [g for g in parse_index_spec(iv.positions, planned, rng) if g < T]
+
             for q in range(start, S):
-                x = self.model.block(q, schedule[q], x, tmp, ctx, lambda iv: [])
+                x = self.model.block(q, schedule[q], x, tmp, ctx, idx_of)
         return self.model.final(x, w_out if w_out is not None else self.model.unembed_weight())
 
     @torch.no_grad()
@@ -1325,6 +1387,8 @@ class Stepper:
             for key in ("k", "temp"):
                 ctx.store["moe_" + key] = {pos: per[nid][key] for pos, nid in enumerate(plan.schedule_nodes)
                                            if nid in per and per[nid].get(key)}
+            ctx.store["moe_noshared"] = {pos for pos, nid in enumerate(plan.schedule_nodes)
+                                         if per.get(nid, {}).get("shared") is False}
         from .blockcode import compile_code
         self.code = {nid: compile_code(c["source"], c["kind"], nid) for nid, c in (p.get("code") or {}).items()}
         ctx.store["code"] = {pos: self.code[nid] for pos, nid in enumerate(plan.schedule_nodes) if nid in self.code}
@@ -1566,7 +1630,7 @@ class Stepper:
             sel = caps["moe_sel"].get(pp)
             if sel is not None and len(sel):      # mixture of experts: how often each expert was chosen in this run
                 E = self.model.moe_layers[plan.schedule[pp]]["n"]
-                cnt = torch.bincount(sel[caps["moe_w"][pp] > 0].long(), minlength=E).float() / sel.shape[0]
+                cnt = torch.bincount(sel[caps["moe_w"][pp] != 0].long(), minlength=E).float() / sel.shape[0]
                 block_stats[plan.schedule_nodes[pp]]["moe"] = {
                     "usage": [round(float(c), 3) for c in cnt], "k": int(sel.shape[1]),
                     "last": [[int(e), round(float(w), 3)] for e, w in zip(sel[-1], caps["moe_w"][pp][-1])]}

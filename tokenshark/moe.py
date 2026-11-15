@@ -89,7 +89,7 @@ def overview(adapter, cap: dict, schedule: list[int], nodes: list[str]) -> dict:
         sel, w = _need(cap, pos)
         T, k = sel.shape
         E = _n_experts(adapter, schedule[pos])
-        live = w > 0
+        live = w != 0
         cnt = torch.zeros(E).index_add_(0, sel[live], torch.ones(int(live.sum())))
         wsum = torch.zeros(E).index_add_(0, sel[live], w[live])
         pr = _probs(cap, pos)
@@ -125,7 +125,7 @@ def block_detail(adapter, cap: dict, schedule: list[int], pos: int, token: int =
     pr = _probs(cap, pos)
     parts = (cap.get("moe_parts") or {}).get(pos)                # [T, k, d] each chosen expert's weighted write
     shared = (cap.get("moe_shared") or {}).get(pos)
-    live = w > 0
+    live = w != 0
     dirn = _answer_direction(adapter, cap, schedule, t) if parts is not None else None
 
     experts = []
@@ -175,6 +175,7 @@ def block_detail(adapter, cap: dict, schedule: list[int], pos: int, token: int =
            "sel": sel.tolist(), "w": [[round(float(v), 3) for v in r] for r in w],
            "probs": [[round(float(v), 3) for v in r] for r in pr] if pr is not None else None,
            "experts": experts, "here": here, "shared_here": shared_here, "has_shared": bool(lay["shared"]),
+           "shared_off": pos in (cap.get("moe_noshared") or ()),
            "parts": parts is not None,
            "answer": dirn[1] if dirn else None, "versus": dirn[2] if dirn else None,
            "native_k": adapter.cfg.moe["k"], "norm_topk": adapter.cfg.moe["norm_topk"]}
@@ -212,11 +213,11 @@ def expert_detail(adapter, cap: dict, schedule: list[int], pos: int, index: int)
     E = _n_experts(adapter, layer)
     if not 0 <= index < E:
         raise ValueError(f"This block has experts 0…{E - 1}.")
-    live = (sel == index) & (w > 0)
+    live = (sel == index) & (w != 0)
     weight = (w * live).sum(-1)                                                    # [T], 0 where not chosen
     pr = _probs(cap, pos)
     rows = torch.where(live.any(-1))[0]
-    co = Counter(int(e) for r in rows for e, ok in zip(sel[r], w[r] > 0) if ok and int(e) != index)
+    co = Counter(int(e) for r in rows for e, ok in zip(sel[r], w[r] != 0) if ok and int(e) != index)
     out = {"pos": pos, "layer": layer, "index": index, "n_experts": E,
            "tokens": [adapter.tok.piece(i) for i in cap["ids"][:T]],
            "weight": [round(float(v), 3) for v in weight],
@@ -261,6 +262,7 @@ def iter_ablation(adapter, plan, pos: int = -1, prefix=None, mode: str = "ban"):
     def last(ivs):
         plan.interventions = base_ivs + ivs
         st = Stepper(adapter, plan, prefix=prefix)
+        st.ctx.sources = dict(getattr(plan, "sources", None) or {})      # the flow's own patches / vectors still apply
         while st.step_token():
             pass
         return st.logits_rows[-1][-1].float().cpu(), st
@@ -279,7 +281,7 @@ def iter_ablation(adapter, plan, pos: int = -1, prefix=None, mode: str = "ban"):
         sel = torch.cat(st0.ctx.store["moe_sel"][p]).long()
         w = torch.cat(st0.ctx.store["moe_w"][p])
         E = adapter.model.moe_layers[plan.schedule[p]]["n"]
-        cnt = torch.zeros(E).index_add_(0, sel[w > 0], torch.ones(int((w > 0).sum())))
+        cnt = torch.zeros(E).index_add_(0, sel[w != 0], torch.ones(int((w != 0).sum())))
         last_tok = {int(e): round(float(x), 3) for e, x in zip(sel[-1], w[-1]) if x > 0}
         for e in torch.where(cnt > 0)[0].tolist():
             jobs.append((p, e, round(float(cnt[e]) / sel.shape[0], 3), last_tok.get(e, 0.0)))

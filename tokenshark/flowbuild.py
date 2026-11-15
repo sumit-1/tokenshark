@@ -199,6 +199,24 @@ class FlowBuilder:
         return self.intercept(block, hook="expert_out", op="scale" if value else "zero", value=value, experts=experts,
                               positions=positions, label=f"expert {experts} x {value:g}")
 
+    def route(self, block, experts, positions: str = "all") -> str:
+        """Write the routing of `block` by hand. experts: {3: 0.6, 17: 0.4} (expert → weight), or [3, 17] to keep
+        the router's own scores for those experts. The router's choice is replaced for the chosen tokens."""
+        if isinstance(experts, dict):
+            spec = ", ".join(f"{e}={w:g}" for e, w in experts.items())
+        else:
+            spec = ", ".join(str(e) for e in experts) if not isinstance(experts, str) else experts
+        return self.intercept(block, hook="router", op="route", experts=spec, positions=positions, label=f"route {spec}"[:40])
+
+    def shared_expert(self, block, on: bool = True):
+        """Switch a block's shared expert (the one every token uses) off or back on."""
+        d = self.node(block)["data"]
+        if on:
+            d.pop("moe_shared", None)
+        else:
+            d["moe_shared"] = False
+        return self
+
     def routing(self, block, k: int | None = None, temperature: float | None = None):
         """Change how a block routes: experts per token (k) and the router's softmax temperature (None = model's own)."""
         d = self.node(block)["data"]

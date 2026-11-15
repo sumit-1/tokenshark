@@ -351,3 +351,4 @@ table.meter th.gen { text-decoration: underline; color: var(--ok); }
 .turn b { color: var(--muted); font-weight: 600; margin-right: 6px; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
 .turn textarea { width: 100%; margin-top: 4px; } .turn .row { margin: 0; gap: 4px; }
 .kvbox > textarea { width: 100%; max-width: 760px; display: block; margin-top: 6px; }
+.xstrip b.routed { outline: 1px solid var(--ok); } .routerow { gap: 6px; align-items: center; margin: 3px 0; flex-wrap: nowrap; }

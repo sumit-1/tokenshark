@@ -233,6 +233,7 @@ class Lab:
         else:
             prefix = interp.load_prefixes(plan, self.adapter, self._state()) if plan.params.get("prefix_cache") else None
             sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+            plan.sources = sources                       # kept with the plan for analyses that run the flow again
             st = self.adapter.run_stepper(plan, prefix)
             st.ctx.sources = sources
             while st.step_token():
@@ -304,7 +305,9 @@ class Lab:
         from . import moe
         fb = flow_or_prompt if isinstance(flow_or_prompt, (FlowBuilder, dict)) else self.flow(flow_or_prompt, **kw)
         out = None
-        for out in moe.iter_ablation(self.adapter, self.plan(fb), block, None, mode):
+        plan = self.plan(fb)
+        plan.sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+        for out in moe.iter_ablation(self.adapter, plan, block, None, mode):
             pass
         return out
 

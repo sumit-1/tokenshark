@@ -115,6 +115,7 @@ def patch_sweep(req: SweepReq):
     if req.hook not in interp.PARTS:
         raise HTTPException(400, f"hook must be one of {', '.join(interp.PARTS)}")
     plan = _compile(req.flow, info)
+    plan.sources = _sources(plan)
     prefix = _load_prefixes(plan, adapter) if plan.params.get("prefix_cache") else None
     return _task("analysis", f"patching sweep ({req.hook})", "sweep",
                  lambda: interp.iter_patch_sweep(adapter, plan, cap, req.hook, req.tokens, prefix),
@@ -490,6 +491,7 @@ def experts_sweep(req: ExpertSweepReq):
     if req.mode not in ("ban", "zero"):
         raise HTTPException(400, "mode must be ban or zero")
     plan = _compile(req.flow, info)
+    plan.sources = _sources(plan)
     prefix = _load_prefixes(plan, adapter) if plan.params.get("prefix_cache") else None
     return _task("analysis", f"expert ablation ({req.mode})", "expert_sweep",
                  lambda: moe.iter_ablation(adapter, plan, req.pos, prefix, req.mode), weights=adapter.model.W)
@@ -521,6 +523,7 @@ def introspect_inject(req: InjectReq):
     if len(req.blocks) * len(req.strengths) * max(1, len(concepts)) > 600:
         raise HTTPException(400, "That is more than 600 trials; choose fewer blocks, strengths or concepts.")
     plan = _compile(req.flow, info)
+    plan.sources = _sources(plan)
     return _task("analysis", f"concept injection ({len(concepts)} concept(s))", "inject",
                  lambda: it.iter_injection(adapter, plan, concepts, req.blocks, req.strengths,
                                            max(1, min(req.max_new_tokens, 120)), req.positions),
@@ -542,6 +545,7 @@ def introspect_vector(req: ConceptVecReq):
     plan = _compile(req.flow, info)
     if not req.word.strip() or not 0 <= req.pos < len(plan.schedule):
         raise HTTPException(400, "Give a word and a block of the current flow.")
+    plan.sources = _sources(plan)
     cv = _guard(it.concept_vectors, adapter, plan, [req.word.strip()])
     v = cv["vectors"][req.word.strip()][req.pos]
     return interp.VECTORS.save(v, req.name or f"concept: {req.word.strip()} @#{req.pos}",
@@ -579,6 +583,7 @@ def nla_roundtrip(req: RoundTripReq):
     from . import introspect as it
     adapter, _ = _llm()
     r, cap = _llm_run(req.run_id)
+    r.plan.sources = getattr(r, "sources", None) or {}
     tpl = req.template.strip() or it.EXPLAIN_TEMPLATE
     if "{x}" not in tpl:
         raise HTTPException(400, "The template needs a {x} placeholder.")
@@ -603,5 +608,6 @@ def nla_score(req: ScoreTextReq):
     """Score an explanation typed by the user: can the activation be rebuilt from it?"""
     from . import introspect as it
     r, cap = _llm_run(req.run_id)
+    r.plan.sources = getattr(r, "sources", None) or {}
     return _guard(it.score_text, LOADED.adapter, r.plan, cap, req.pos, req.token, req.text,
                   "mean" if req.how == "mean" else "last")

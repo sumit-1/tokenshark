@@ -58,7 +58,12 @@ def reference_mean(adapter, plan) -> dict[int, torch.Tensor]:
     if key not in _REF:
         if len(_REF) > 8:
             _REF.clear()
-        r = resid_of(adapter, plan, REFERENCE_TEXT, chat=False)
+        # The yardstick is the model without interceptors: if the flow steers a block, the reference must not be
+        # steered too, or the edit would cancel out of every measurement made against it.
+        clean = copy.deepcopy(plan)
+        clean.interventions, clean.base_ivs = [], []
+        clean.params.pop("moe", None)
+        r = resid_of(adapter, clean, REFERENCE_TEXT, chat=False)
         _REF[key] = {pos: t[1:].float().mean(0) for pos, t in r.items()}
     return _REF[key]
 
@@ -68,9 +73,11 @@ def reference_mean(adapter, plan) -> dict[int, torch.Tensor]:
 # ======================================================================================
 
 def _clean_plan(plan, **params):
-    """A copy of the plan without interceptors or KV prefixes, with some run parameters replaced."""
+    """A copy of the plan without KV prefixes, with some run parameters replaced. The flow's interceptors stay:
+    every experiment here is about the model as it is currently edited (an expert banned, a block steered …)."""
     p = copy.deepcopy(plan)
-    p.interventions = []
+    p.base_ivs = list(getattr(plan, "base_ivs", plan.interventions))
+    p.interventions = list(p.base_ivs)
     for k in ("prefixes", "prefix_cache", "prefix_system"):
         p.params.pop(k, None)
     p.params.update(params)
@@ -79,9 +86,9 @@ def _clean_plan(plan, **params):
 
 def _forward(adapter, plan, ivs=None, sources=None, store=None):
     from .llm import Stepper
-    plan.interventions = list(ivs or [])
+    plan.interventions = list(getattr(plan, "base_ivs", [])) + list(ivs or [])
     st = Stepper(adapter, plan)
-    st.ctx.sources = dict(sources or {})
+    st.ctx.sources = {**(getattr(plan, "sources", None) or {}), **(sources or {})}
     st.ctx.store.update(store or {})
     while st.step_token():
         pass

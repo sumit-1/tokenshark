@@ -253,3 +253,85 @@ def test_activation_to_words_round_trip(lab):
     assert set(mine) == {"text", "cosine", "centred", "fve"}
     with pytest.raises(ValueError):
         r.verbalize(1, token=0)                                                    # the attention-sink token
+
+
+# ---------------------------------------------------------------------------------- custom routing
+def test_custom_route_and_shared_switch(lab):
+    base = _run(lab)
+    T = len(base.tokens)
+    # exactly these experts with exactly these weights, for every token
+    r = _run(lab, lambda fb: fb.route(0, {1: 0.75, 4: 0.25}))
+    sel, w, _ = r.routing(0)
+    assert sel.tolist() == [[1, 4]] * T and torch.allclose(w, torch.tensor([[0.75, 0.25]] * T))
+    # the block's write is then exactly 0.75·expert1 + 0.25·expert4 + shared: check against a by-hand computation
+    m, lay = lab.adapter.model, lab.adapter.model.moe_layers[0]
+    one = _run(lab, lambda fb: fb.route(0, {1: 1.0}))
+    four = _run(lab, lambda fb: fb.route(0, {4: 1.0}))
+    e1 = one.captures["moe_parts"][0][0, 0].float()
+    e4 = four.captures["moe_parts"][0][0, 0].float()
+    got = r.captures["moe_parts"][0][0].float()                       # token 0 has the same input in all three runs
+    assert torch.allclose(got[0], 0.75 * e1, atol=2e-2) and torch.allclose(got[1], 0.25 * e4, atol=2e-2)
+    # no weight written = the router's own score for that expert; more experts than k is allowed
+    r = _run(lab, lambda fb: fb.route(0, [0, 2, 5]))
+    sel, w, scores = r.routing(0)
+    assert sel.shape == (T, 3) and torch.allclose(w, torch.softmax(scores, -1)[:, [0, 2, 5]], atol=1e-5)
+    # only some tokens; negative weights subtract an expert's write
+    r = _run(lab, lambda fb: fb.route(0, {3: -1.0}, positions="1"))
+    sel, w, _ = r.routing(0)
+    assert sel[1].tolist()[0] == 3 and float(w[1, 0]) == -1.0 and torch.equal(sel[0], base.routing(0)[0][0])
+    assert r.outputs["block_stats"]["block_0"]["moe"]["usage"][3] > 0
+    # the shared expert can be switched off per block
+    r = _run(lab, lambda fb: fb.shared_expert(0, False))
+    assert 0 not in r.captures["moe_shared"] and 2 in r.captures["moe_shared"]
+    assert torch.allclose(r.part(0, "mlp_out"), r.captures["moe_parts"][0].float().sum(1), atol=2e-2)
+    assert r.experts(0)["shared_off"] and not r.experts(2)["shared_off"]
+    for bad in (lambda fb: fb.intercept(0, hook="router", op="route"),                     # no experts named
+                lambda fb: fb.intercept(0, hook="router", op="route", experts="0:3"),
+                lambda fb: fb.intercept(0, hook="router", op="route", experts="2=x")):
+        fb = lab.flow(PROMPT, chat=False)
+        bad(fb)
+        with pytest.raises(FlowError):
+            lab.plan(fb)
+    fb = lab.flow(PROMPT, chat=False)
+    fb.route(0, {9: 1.0})                                                               # the block has experts 0…5
+    with pytest.raises(ValueError):
+        lab.run(fb)
+
+
+def test_analyses_see_the_edited_model(lab):
+    """Edits made in the flow are part of every later calculation, not just of the run itself."""
+    S = len(lab.plan(lab.flow(PROMPT, chat=False)).schedule)
+    v = lab.concept_vector("France", S - 1, flow=lab.flow(PROMPT, chat=False))
+
+    def edit(fb):
+        fb.ban_experts(S - 1, "0,1,2")
+        fb.route(S - 1, {4: 2.0}, positions="2")
+        fb.shared_expert(S - 1, False)
+        fb.steer(S - 1, v, value=2.0, hook="resid_post")
+    r, base = _run(lab, edit), _run(lab)
+    ad, cap = lab.adapter, r.captures
+    final = torch.stack([r.logits(i) for i in range(len(r.tokens))])
+    # decoding the stream before the last block *through* that block must give the run's own logits …
+    through = ad.decode_layer(cap, r.plan.schedule, S - 2, through=1)
+    assert torch.allclose(through, final, atol=1e-3), float((through - final).abs().max())
+    # … which it would not if the block were run with the model's default routing
+    plain = dict(cap, interventions=[], moe_noshared=set())
+    assert not torch.allclose(ad.decode_layer(plain, r.plan.schedule, S - 2, through=1), final, atol=1e-2)
+    assert not torch.allclose(final[: len(base.tokens)][:4], torch.stack([base.logits(i) for i in range(4)]), atol=1e-2)
+    # lens / word cloud / word tracking are built on it
+    lens = r.lens(k=3, through=1)
+    assert lens["cells"][-2][3]["top"][0][0] == lens["cells"][-1][3]["top"][0][0]
+    # sweeps keep the flow's edits switched on
+    fb = lab.flow(PROMPT, chat=False)
+    edit(fb)
+    s = lab.expert_sweep(fb, block=S - 1)
+    assert not {0, 1, 2} & {x["index"] for x in s["rows"]}                           # banned experts are not in play
+    plan = lab.plan(fb)
+    plan.sources = interp.resolve_sources(plan, lambda rid: None)
+    out = None
+    for out in interp.iter_patch_sweep(ad, plan, base.captures, "resid_post", "last"):
+        pass
+    plan0 = lab.plan(lab.flow(PROMPT, chat=False))
+    for ref in interp.iter_patch_sweep(ad, plan0, base.captures, "resid_post", "last"):
+        pass
+    assert out["p_corrupt"] != ref["p_corrupt"]

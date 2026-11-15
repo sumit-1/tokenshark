@@ -379,13 +379,15 @@ def iter_patch_sweep(adapter, plan, cap_src: dict, hook: str = "resid_post", tok
 
     plan = copy.deepcopy(plan)
     plan.params["max_new_tokens"] = 0
-    plan.interventions = []
+    # Interceptors already in the flow (a banned expert, a steering vector …) stay on for every run of the
+    # sweep: the question asked is "what does this patch change in the model as I have edited it?"
+    base_ivs, base_src = list(plan.interventions), dict(getattr(plan, "sources", None) or {})
     S = len(plan.schedule)
 
     def last_logits(ivs, src=None):
-        plan.interventions = ivs
+        plan.interventions = base_ivs + ivs
         st = Stepper(adapter, plan, prefix=prefix)
-        st.ctx.sources = {"sweep": src} if src is not None else {}
+        st.ctx.sources = {**base_src, **({"sweep": src} if src is not None else {})}
         while st.step_token():
             pass
         return st.logits_rows[-1][-1].float(), st

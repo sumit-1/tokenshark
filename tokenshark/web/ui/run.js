@@ -143,11 +143,25 @@ export function routerEdits(node) {
   return banned
 }
 
+// The custom-route box wired into a block (hook router, op route), and its experts as [index, weight | null].
+export function routeOf(node) {
+  for (const e of flow.edges) {
+    if (e.target !== node.id || e.targetHandle !== 'mod') continue
+    const b = flow.node(e.source)
+    if (b?.data.kind === 'intervention' && b.data.hook === 'router' && b.data.op === 'route' && b.data.enabled !== false) {
+      const pairs = String(b.data.experts || '').split(',').map(x => x.trim()).filter(Boolean).map(x => { const [i, w] = x.split('='); return [+i, w == null || w.trim() === '' ? null : +w] }).filter(p => Number.isInteger(p[0]))
+      return { box: b, pairs }
+    }
+  }
+  return { box: null, pairs: [] }
+}
+
 export function parseSpec(spec, n) {
   spec = String(spec ?? 'all').trim().toLowerCase()
   if (!spec || spec === 'all' || spec === '*') return [...Array(n).keys()]
   const out = new Set()
-  for (const part of spec.split(',')) {
+  for (let part of spec.split(',')) {
+    part = part.split('=')[0]                      // a custom route writes expert=weight
     const m = part.trim().match(/^(-?\d*)\s*:\s*(-?\d*)$/)
     if (m) { const a = m[1] === '' ? 0 : +m[1], z = m[2] === '' ? n : +m[2]; for (let i = Math.max(0, a); i < Math.min(n, z); i++) out.add(i) }
     else if (/^\d+$/.test(part.trim())) { const i = +part.trim(); if (i < n) out.add(i) }
@@ -159,13 +173,14 @@ export const expertHue = i => (i * 47) % 360          // a stable colour per exp
 
 export function expertStrip(node, moe) {
   const E = node.data.moe, per = E <= 16 ? E : E <= 64 ? 16 : 32, banned = routerEdits(node)
+  const routed = new Set(routeOf(node).pairs.map(p => p[0]))
   const mx = Math.max(...(moe?.usage || [0]), 1e-9)
   const last = new Map((moe?.last || []).map(([e, w]) => [e, w]))
   let h = `<div class="xstrip" style="grid-template-columns:repeat(${per},1fr)" title="The ${E} experts of this block. Brighter = used by more tokens of the last run; gold outline = used by the newest token; red = banned by an interceptor. Click one.">`
   for (let i = 0; i < E; i++) {
     const u = moe ? moe.usage[i] / mx : 0
     const sel = S.moe?.node === node.id && S.moe?.expert === i
-    h += `<b data-pick="expert" data-expert="${i}" class="${last.has(i) ? 'now' : ''}${banned.has(i) ? ' ban' : ''}${sel ? ' sel' : ''}" title="expert ${i}${moe ? ` · used by ${(moe.usage[i] * 100).toFixed(0)}% of tokens` : ''}${last.has(i) ? ` · weight ${last.get(i)} at the newest token` : ''}${banned.has(i) ? ' · banned' : ''}" style="background:${moe ? `hsla(${expertHue(i)},70%,${14 + 46 * u}%,${0.35 + 0.65 * u})` : 'var(--line)'}"></b>`
+    h += `<b data-pick="expert" data-expert="${i}" class="${last.has(i) ? 'now' : ''}${banned.has(i) ? ' ban' : ''}${sel ? ' sel' : ''}${routed.has(i) ? ' routed' : ''}" title="expert ${i}${moe ? ` · used by ${(moe.usage[i] * 100).toFixed(0)}% of tokens` : ''}${last.has(i) ? ` · weight ${last.get(i)} at the newest token` : ''}${banned.has(i) ? ' · banned' : ''}" style="background:${moe ? `hsla(${expertHue(i)},70%,${14 + 46 * u}%,${0.35 + 0.65 * u})` : 'var(--line)'}"></b>`
   }
   return h + '</div>'
 }

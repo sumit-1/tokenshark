@@ -4,7 +4,7 @@
 import { GET, POST, S, btn, el, flow, hooks, registerTab, spinner, toast } from '../core.js'
 import { esc } from '../flow.js'
 import { addBox, aliveIn, blockNode, followTask, labelled, needRun, recColor, selectOf } from '../ui/labkit.js'
-import { applyRunBadges, expertHue, routerEdits } from '../ui/run.js'
+import { applyRunBadges, expertHue, routeOf, routerEdits } from '../ui/run.js'
 import { renderTab, setTab, tabAvailable } from '../ui/tabs.js'
 
 S.moe = { node: null, expert: null, pos: null, token: -1, sweep: null, mode: 'ban', view: 'usage' }
@@ -24,9 +24,58 @@ export const expertActions = (nodeId, e) => [
     () => wire(nodeId, { label: `only expert ${e}`, hook: 'router', op: 'only', experts: String(e), value: 0 }, `Only expert ${e} may be chosen.`)],
   ['Silence', 'It is still chosen (so nothing replaces it) but writes nothing.',
     () => wire(nodeId, { label: `silence expert ${e}`, hook: 'expert_out', op: 'zero', experts: String(e), value: 0 }, `Expert ${e} is silenced.`)],
+  ['+ Route', 'Add it to this block’s custom route: you then set which experts run and with what weight.', () => addToRoute(nodeId, e)],
   ['Amplify ×3', 'What it writes is multiplied by 3 wherever it is chosen.',
     () => wire(nodeId, { label: `expert ${e} × 3`, hook: 'expert_out', op: 'scale', experts: String(e), value: 3 }, `Expert ${e} is amplified.`)],
 ]
+// ---------------------------------------------------------------- a custom route: your experts, your weights
+const routeText = pairs => pairs.map(([i, w]) => w == null ? `${i}` : `${i}=${w}`).join(', ')
+function setRoute(nodeId, pairs) {
+  const node = flow.node(nodeId), cur = routeOf(node)
+  if (!pairs.length) { if (cur.box) flow.removeNode(cur.box.id) }
+  else if (cur.box) flow.updateNodeData(cur.box.id, { experts: routeText(pairs), label: `route ${routeText(pairs)}`.slice(0, 40) })
+  else addBox(nodeId, { label: `route ${routeText(pairs)}`.slice(0, 40), hook: 'router', op: 'route', experts: routeText(pairs), value: 0 })
+  flow.select({ type: 'node', id: nodeId })
+  applyRunBadges(); hooks.renderInspector?.()
+}
+export function addToRoute(nodeId, e, w = null) {
+  const pairs = routeOf(flow.node(nodeId)).pairs
+  if (pairs.find(p => p[0] === e)) return toast(`Expert ${e} is already in this block’s custom route.`)
+  setRoute(nodeId, [...pairs, [e, w]])
+  toast(`Expert ${e} added to the custom route of ${flow.node(nodeId).data.label}. Set its weight in the block’s panel, then ▶ Run.`)
+}
+function routeEditor(n) {
+  const { box: rb, pairs } = routeOf(n)
+  const sec = el('div', { className: 'sec' })
+  sec.appendChild(el('h4', { textContent: 'Custom route: choose the experts and their weights yourself' }))
+  sec.appendChild(el('div', { className: 'small', textContent: pairs.length
+    ? `The router’s choice is replaced by these ${pairs.length} expert(s) for ${rb.data.positions && rb.data.positions !== 'all' ? `tokens ${rb.data.positions}` : 'every token'}. Weights are used exactly as written: they need not add up to 1, and a negative weight subtracts what that expert writes. Leave a weight empty to keep the router’s own score.`
+    : 'Off: the router decides. Pick an expert above and press “Add to custom route”, or type a list such as 3=0.6, 17=0.4.' }))
+  pairs.forEach(([i, w], k) => {
+    const row = el('div', { className: 'row routerow' })
+    const wi = el('input', { type: 'number', step: 'any', value: w ?? '', placeholder: 'own', style: 'width:58px', title: 'weight of this expert' })
+    wi.onchange = () => { const p = pairs.map(x => [...x]); p[k][1] = wi.value === '' ? null : +wi.value; setRoute(n.id, p) }
+    const rng = el('input', { type: 'range', min: -1, max: 2, step: 0.05, value: w ?? 0, style: 'flex:1;min-width:40px' })
+    rng.oninput = () => { wi.value = rng.value }
+    rng.onchange = () => { const p = pairs.map(x => [...x]); p[k][1] = +rng.value; setRoute(n.id, p) }
+    row.append(el('span', { className: 'xchip', textContent: `E${i}`, style: `border-color:${hue(i)}` }), wi, rng, btn('✕', () => setRoute(n.id, pairs.filter((_, j) => j !== k)), 'mini'))
+    sec.appendChild(row)
+  })
+  const txt = el('input', { value: routeText(pairs), placeholder: '3=0.6, 17=0.4', style: 'width:100%' })
+  const apply = () => {
+    const p = txt.value.split(',').map(x => x.trim()).filter(Boolean).map(x => { const [i, w] = x.split('='); return [+i, w == null || w.trim() === '' ? null : +w] })
+    if (p.some(x => !Number.isInteger(x[0]) || x[0] < 0 || x[0] >= n.data.moe || Number.isNaN(x[1]))) return toast(`Write experts 0…${n.data.moe - 1} as expert=weight, e.g. 3=0.6, 17=0.4.`, 'error')
+    setRoute(n.id, p)
+  }
+  txt.onkeydown = ev => { if (ev.key === 'Enter') apply() }
+  const row = el('div', { className: 'row' })
+  row.append(txt, btn('Apply', apply, 'mini'))
+  if (pairs.length) row.append(btn('Equal weights', () => setRoute(n.id, pairs.map(([i]) => [i, +(1 / pairs.length).toFixed(3)])), 'mini'),
+    btn('Remove route', () => setRoute(n.id, []), 'mini ghost'), btn('Limit to some tokens…', () => flow.select({ type: 'node', id: rb.id }), 'mini'))
+  sec.appendChild(row)
+  return sec
+}
+
 const actionRow = (nodeId, e) => { const r = el('span'); expertActions(nodeId, e).forEach(([t, tip, fn]) => { const b = btn(t, ev => { ev?.stopPropagation?.(); fn() }, 'mini'); b.title = tip; r.appendChild(b) }); return r }
 
 function pick(nodeId, expert, open) {
@@ -60,10 +109,13 @@ hooks.expertPanel = (n, box) => {
     const e = S.moe.expert
     sec.appendChild(el('div', { className: 'small', style: 'margin-top:6px' }, `<b>Expert ${e}</b> — change what it does, then run again:`))
     sec.appendChild(actionRow(n.id, e))
+    sec.appendChild(btn('Add to custom route', () => addToRoute(n.id, e, st?.last?.find(x => x[0] === e)?.[1] ?? null), 'mini'))
     if (S.run?.outputs && tabAvailable('experts')) sec.appendChild(btn('What does it do? (Experts tab)', () => pick(n.id, e, true), 'mini'))
   } else sec.appendChild(el('div', { className: 'small', textContent: 'Click an expert to ban, force, silence or amplify it.' }))
   if (banned.size) sec.appendChild(el('div', { className: 'small bad', textContent: `Banned by interceptors: ${[...banned].sort((a, b) => a - b).slice(0, 40).join(', ')}${banned.size > 40 ? ' …' : ''}` }))
+  if (n.data.moe_shared === false) sec.appendChild(el('div', { className: 'small bad', textContent: 'The shared expert of this block is switched off (tick the box above to turn it back on).' }))
   box.appendChild(sec)
+  box.appendChild(routeEditor(n))
 }
 
 // ---------------------------------------------------------------- the tab
@@ -162,10 +214,16 @@ async function renderExperts(p) {
     tr.querySelector('.xchip').onclick = () => pick(blockNode(st.pos), h.index, false)
     t.appendChild(tr)
   }
+  const sharedSwitch = on => btn(on ? 'Switch the shared expert on' : 'Switch the shared expert off', () => {
+    flow.updateNodeData(blockNode(st.pos), { moe_shared: on }); hooks.renderInspector?.(); applyRunBadges()
+    toast(`Shared expert of block #${st.pos} is ${on ? 'on' : 'off'} for the next run. Press ▶ Run.`)
+  }, 'mini')
+  if (d.has_shared && d.shared_off) det.appendChild(el('div', { className: 'small bad' }, 'The shared expert was switched off in this run: the block’s write is only what the chosen experts wrote. ')).appendChild(sharedSwitch(true))
   if (d.shared_here) {
     const tr = el('tr')
     tr.innerHTML = `<td><span class="xchip">shared</span></td><td class="small">always on</td><td>${d.shared_here.promotes.map(w => `<span class="chip">${esc(w)}</span>`).join('')}</td>
-      <td><span class="pbar${d.shared_here.push < 0 ? ' alt' : ''}"><i style="width:${(Math.abs(d.shared_here.push ?? 0) / mxPush * 100).toFixed(0)}%"></i></span> ${d.shared_here.push ?? ''}</td><td></td>`
+      <td><span class="pbar${d.shared_here.push < 0 ? ' alt' : ''}"><i style="width:${(Math.abs(d.shared_here.push ?? 0) / mxPush * 100).toFixed(0)}%"></i></span> ${d.shared_here.push ?? ''}</td>`
+    const td = el('td'); td.appendChild(sharedSwitch(false)); tr.appendChild(td)
     t.appendChild(tr)
   }
   det.appendChild(t)
