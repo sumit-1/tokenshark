@@ -41,7 +41,7 @@ export const GET = u => api('GET', u), POST = (u, b) => api('POST', u, b || {})
 
 export const S = {
   status: null, models: [], info: null, run: null, runs: [], lens: null, caches: [],
-  selected: null, resume: null, polling: null, tab: 'learn', alt: null, xtok: 1, xgroup: 'all', xstep: -1,
+  selected: null, resume: null, polling: null, tab: 'output', alt: null, xtok: 1, xgroup: 'all', xstep: -1,
   attnPos: 0, attnHead: -1,
 }
 
@@ -52,6 +52,7 @@ export const el = (tag, attrs = {}, html = '') => { const e = document.createEle
 export const flow = new FlowEditor($('#canvas'), {
   onContext: (target, x, y, world) => hooks.contextMenu?.(target, x, y, world),
   onSelect: sel => { S.selected = sel; hooks.renderInspector?.() },
+  onBadge: (id, data) => hooks.badgeClick?.(id, data),
   onChange: () => { hooks.scheduleValidate?.(); if (S.selected?.type === 'node') hooks.renderInspectorHeaderOnly?.() },
 })
 

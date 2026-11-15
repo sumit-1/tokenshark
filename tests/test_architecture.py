@@ -19,7 +19,8 @@ FEATURES = {"lora", "quant", "kv_cache", "lm_tools", "image_maps", "image_lens",
 
 
 def test_the_page_has_what_we_think_it_has():
-    assert {"learn", "output_text", "output_image", "debug_text", "debug_image", "lens", "patch", "kv", "train", "runs"} <= TAB_IDS
+    assert {"output_text", "output_image", "debug_text", "debug_image", "lens", "patch", "kv", "train", "runs"} <= TAB_IDS
+    assert "learn" not in TAB_IDS
     assert {"intervention", "kv_prefill", "code", "init_image"} <= ACTIONS
     assert TRAIN == {"tiny_text", "adapt", "tiny_image"}
 
@@ -31,7 +32,6 @@ def test_plugins_declare_only_what_exists(plugin):
     assert len(ui["tabs"]) == len(set(ui["tabs"]))
     assert set(ui.get("palette_actions", [])) <= ACTIONS, f"unknown palette actions: {set(ui['palette_actions']) - ACTIONS}"
     assert set(ui.get("train", [])) <= TRAIN
-    assert ui.get("course", "") in ("", "text", "image")
     assert set(plugin.features) <= FEATURES
     assert ui.get("modality") in ("text", "image") and ui.get("texts", "") in ("", "lm", "unet", "dit")
     from tokenshark.flow import FLOW_SHAPES

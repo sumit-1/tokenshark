@@ -41,8 +41,9 @@ function handlesFor(node) {
 const NODE_W = 172
 
 export class FlowEditor {
-  constructor(el, { onSelect, onChange, onContext } = {}) {
+  constructor(el, { onSelect, onChange, onContext, onBadge } = {}) {
     this.el = el
+    this.onBadge = onBadge || (() => {})        // a click on a [data-pick] element inside a box's badge
     this.onSelect = onSelect || (() => {})
     this.onChange = onChange || (() => {})
     this.onContext = onContext || (() => {})
@@ -128,7 +129,7 @@ export class FlowEditor {
     const d = this.nodeLayer.querySelector(`.fe-node[data-id="${CSS.escape(n.id)}"]`)
     if (!d) return
     const k = n.data.kind
-    d.className = `fe-node kind-${k}${this.selected?.type === 'node' && this.selected.id === n.id ? ' sel' : ''}${this.errors.has(n.id) ? ' err' : ''}${n.data.enabled === false ? ' off' : ''}${n.data.bypass ? ' bypassed' : ''}${(n.data.code || '').trim() ? ' coded' : ''}${this.active === n.id ? ' active' : ''}${this.doneNodes.has(n.id) ? ' ran' : ''}`
+    d.className = `fe-node kind-${k}${this.selected?.type === 'node' && this.selected.id === n.id ? ' sel' : ''}${this.errors.has(n.id) ? ' err' : ''}${n.data.enabled === false ? ' off' : ''}${n.data.bypass ? ' bypassed' : ''}${(n.data.code || '').trim() ? ' coded' : ''}${this.active === n.id ? ' active' : ''}${this.doneNodes.has(n.id) ? ' ran' : ''}${n.data.moe ? ' moe' : ''}`
     d.style.left = n.position.x + 'px'
     d.style.top = n.position.y + 'px'
     d.style.width = NODE_W + 'px'
@@ -139,6 +140,7 @@ export class FlowEditor {
       : (n.data.code || '').trim() ? `✎ edited code${n.data.sub ? ' · ' + n.data.sub : ''}`
       : k === 'init_image' ? (n.data.image ? `${n.data.guide ? 'sketch guide · ' : ''}strength ${Number(n.data.strength ?? 0.6).toFixed(2)}${n.data.mask ? ` · region ${n.data.mask_mode || 'keep'}` : ''} · click to edit` : 'no picture yet — click to add one')
       : k === 'prompt_kv' ? `${n.data.role === 'prepend' ? `hidden · ${n.data.mode || 'shift'}` : 'replaces the prompt'} · blocks ${n.data.blocks || 'all'} · “${(n.data.prompt || '').slice(0, 28)}”`
+      : k === 'input_prompt' && n.data.history?.length ? `${n.data.history.length} earlier turn${n.data.history.length > 1 ? 's' : ''} · then the prompt`
       : (n.data.sub || '')
     d.innerHTML = `<div class="fe-title">${esc(n.data.label || k)}</div><div class="fe-sub">${esc(sub)}</div>${badge ? `<div class="fe-badge">${badge}</div>` : ''}`
     const hs = handlesFor(n)
@@ -241,7 +243,10 @@ export class FlowEditor {
         const n = this.node(nodeEl.dataset.id)
         const w = this.toWorld(ev.clientX, ev.clientY)
         drag = { kind: 'node', id: n.id, ox: w.x - n.position.x, oy: w.y - n.position.y, moved: false }
-        this.select({ type: 'node', id: n.id }); return
+        const pick = ev.target.closest('[data-pick]')
+        this.select({ type: 'node', id: n.id })
+        if (pick) this.onBadge(n.id, { ...pick.dataset })      // e.g. one expert cell of a mixture-of-experts block
+        return
       }
       if (edgeEl) { this.select({ type: 'edge', id: edgeEl.dataset.id }); return }
       drag = { kind: 'pan', sx: ev.clientX, sy: ev.clientY, px: this.pan.x, py: this.pan.y, moved: false }
@@ -322,7 +327,8 @@ export function ivSummary(d) {
     : d.op === 'patch' ? ` ← run ${d.ref || '?'}` : d.op === 'steer' ? ` ×${d.value ?? 1}`
     : d.op === 'project_out' ? ` ⊥ ×${d.value ?? 1}`
     : d.op === 'clamp' ? ` → ${d.clamp === 'value' ? d.value : `${d.value && d.value !== 1 ? d.value + '× ' : ''}${d.clamp || 'max'}`}` : ''
-  const units = d.neurons && d.neurons !== 'all' ? ` ${d.hook === 'mlp_neurons' ? 'neuron' : 'dim'} ${d.neurons}` : ''
+  const units = (d.experts && d.experts !== 'all' ? ` expert ${d.experts}` : '')
+    + (d.neurons && d.neurons !== 'all' ? ` ${d.hook === 'mlp_neurons' ? 'neuron' : 'dim'} ${d.neurons}` : '')
   const where = (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(d.hook) && d.heads && d.heads !== 'all' ? ` heads ${d.heads}` : '') + units
   const steps = d.steps && d.steps !== 'all' ? ` · steps ${d.steps}` : ''
   const pos = d.hook !== 'weights' && d.positions && d.positions !== 'all' ? ` · tok ${d.positions}` : ''

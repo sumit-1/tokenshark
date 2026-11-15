@@ -76,10 +76,9 @@ class StableDiffusionPlugin(ModelPlugin):
     features = ("lora", "quant", "image_maps")
 
     ui_schema = {
-        "tabs": ["learn", "output_image", "contrib", "lora", "quant", "train", "runs"],
+        "tabs": ["output_image", "contrib", "lora", "quant", "train", "runs"],
         "palette_actions": ["intervention", "init_image"],
         "train": ["tiny_image"],
-        "course": "image",
         "modality": "image",
         "texts": "unet",
         "block_term": "stage",

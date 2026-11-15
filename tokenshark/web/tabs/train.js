@@ -5,7 +5,7 @@ import { refreshInfo, refreshModels } from '../ui/models.js'
 import { renderTab } from '../ui/tabs.js'
 import { esc } from '../flow.js'
 import { lineChart } from '../ui/labkit.js'
-S.tr = { tiny: null, lora: null, form: { name: 'my-tiny-model', corpus: 'mixed', text: '', d_model: 96, n_layers: 3, n_heads: 4, context: 64, vocab: 300, steps: 1500, batch: 32, lr: 0.003, sample_prompt: 'The capital of France is' },
+S.tr = { tiny: null, lora: null, form: { name: 'my-tiny-model', corpus: 'mixed', text: '', d_model: 96, n_layers: 3, n_heads: 4, context: 64, vocab: 300, steps: 1500, batch: 32, lr: 0.003, sample_prompt: 'The capital of France is', n_experts: 0, experts_per_token: 2 },
   image: null, iform: { steps: 1200 }, isample: { color: 'red', shape: 'circle', steps: 12, guidance: 2, seed: 0, result: null },
   lform: { name: 'my-lora', layers: 'all', method: 'lora', after: 0, init: 'duplicate', examples: 'What is the capital of France? => Arr, that be Paris, matey!\nWhat colour is the sky? => Arr, the sky be blue, matey!\nWho wrote Hamlet? => Arr, that be Shakespeare, matey!\nWhat is 2 + 2? => Arr, that be 4, matey!', rank: 8, alpha: 16, targets: ['q_proj', 'v_proj'], steps: 60, lr: 0.001, probe: 'What is the capital of Japan?' } }
 
@@ -50,6 +50,13 @@ export async function updateJobs(p) {
   if (live(st.tiny) || live(st.lora) || live(st.image)) trainTimer = setTimeout(() => updateJobs(p), 700)
 }
 
+// A mixture-of-experts model in training: how evenly each block's router is spreading tokens over its experts.
+function usageRows(j) {
+  if (!j.expert_usage?.length) return ''
+  return `<div class="small" style="margin-top:6px">Share of tokens each expert gets, per block (even = every expert is learning; one bright cell = the router collapsed onto it):</div>
+    <div class="xheat">${j.expert_usage.map((u, l) => { const mx = Math.max(...u, 1e-9); return `<div class="xrow"><span class="xlab">block ${l}</span><span class="xcells">${u.map((v, i) => `<i title="expert ${i}: ${(v * 100).toFixed(1)}%" style="background:hsla(${(i * 47) % 360},70%,${16 + 44 * v / mx}%,${0.3 + 0.7 * v / mx})"></i>`).join('')}</span></div>` }).join('')}</div>`
+}
+
 export function jobLive(j) {
   const series = [{ name: 'training loss', cls: 'l1', pts: j.losses }]
   if (j.val?.length) series.push({ name: 'loss on held-out text', cls: 'l2', pts: j.val })
@@ -60,7 +67,7 @@ export function jobLive(j) {
   }
   const samples = (j.samples || []).map(s => `<div class="sample"><span class="small">${s.label ? esc(s.label) : 'step ' + s.step}</span> ${esc(s.text)}</div>`).join('')
   return `<div class="small"><span class="chip${j.status === 'error' ? ' bad' : ''}">${esc(j.status)}</span> ${esc(j.message || '')}${j.n_params ? ` · ${j.n_params.toLocaleString()} trainable weights` : ''} · ${j.seconds}s${j.error ? ` · <span class="bad">${esc(j.error)}</span>` : ''}</div>
-    ${lineChart(series)}${samples ? `<div class="small" style="margin-top:6px">${j.kind === 'tiny' ? 'What it writes after the test prompt, as training goes on:' : 'Answer to the test prompt:'}</div>${samples}` : ''}`
+    ${lineChart(series)}${usageRows(j)}${samples ? `<div class="small" style="margin-top:6px">${j.kind === 'tiny' ? 'What it writes after the test prompt, as training goes on:' : 'Answer to the test prompt:'}</div>${samples}` : ''}`
 }
 
 export function jobView(j, action) {

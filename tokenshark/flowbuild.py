@@ -79,9 +79,19 @@ class FlowBuilder:
         return nid
 
     # ---------------------------------------------------------------- inputs and sampling
-    def prompt(self, prompt=None, system=None, prefill=None, chat=None, thinking=None, negative_prompt=None):
+    def prompt(self, prompt=None, system=None, prefill=None, chat=None, thinking=None, negative_prompt=None,
+               history=None):
+        """history: the conversation so far, [{"role": "user" | "assistant", "content": …}, …]; `prompt` is then the
+        newest user turn (leave it "" to have the model answer the last turn of the history)."""
         return self._set("input_prompt", prompt=prompt, system=system, prefill=prefill, use_chat_template=chat,
-                         thinking=thinking, negative_prompt=negative_prompt)
+                         thinking=thinking, negative_prompt=negative_prompt,
+                         history=[dict(m) for m in history] if history is not None else None)
+
+    def say(self, role: str, content: str):
+        """Append one earlier turn to the conversation: flow.say("user", "Hi").say("assistant", "Hello!")."""
+        d = self.node("input_prompt")["data"]
+        d["history"] = list(d.get("history") or []) + [{"role": role, "content": content}]
+        return self
 
     def sampler(self, max_new_tokens=None, temperature=None, top_k=None, top_p=None, seed=None):
         return self._set("sampler", max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p, seed=seed)
@@ -134,7 +144,7 @@ class FlowBuilder:
     # ---------------------------------------------------------------- interceptors
     def intercept(self, block, hook: str = "mlp_out", op: str = "zero", value: float = 0.0, positions: str = "all",
                   heads: str = "all", neurons: str = "all", ref: str = "", src_positions: str = "", clamp: str = "max",
-                  seed: int = 0, steps: str = "all", label: str = "") -> str:
+                  seed: int = 0, steps: str = "all", label: str = "", experts: str = "all") -> str:
         """Wire an interceptor box into a block. Returns the new box's id."""
         ref = getattr(ref, "id", ref)             # a RunResult or a vector dict/id
         if isinstance(ref, dict):
@@ -142,7 +152,8 @@ class FlowBuilder:
         return self._add("iv", self.node(block)["id"], "mod", {
             "kind": "intervention", "label": label or f"{op} @ {hook}", "hook": hook, "op": op, "value": value,
             "positions": str(positions), "heads": str(heads), "neurons": str(neurons), "ref": ref or "",
-            "src_positions": str(src_positions), "clamp": clamp, "seed": seed, "steps": steps, "enabled": True})
+            "src_positions": str(src_positions), "clamp": clamp, "seed": seed, "steps": steps, "enabled": True,
+            "experts": str(experts)})
 
     intervene = intercept
 
@@ -171,6 +182,32 @@ class FlowBuilder:
         """Pin MLP neurons of `block` to their max / min (× value) or to a fixed value (to='value')."""
         return self.intercept(block, hook=hook, op="clamp", neurons=str(neurons), clamp=to, value=value, ref=ref,
                               positions=positions, label=f"neuron {neurons} → {to}")
+
+    # ---------------------------------------------------------------- mixture of experts
+    def ban_experts(self, block, experts, positions: str = "all") -> str:
+        """The router of `block` may never choose these experts (all | 3 | 0:8 | 1,5): others take their place."""
+        return self.intercept(block, hook="router", op="ban", experts=experts, positions=positions,
+                              label=f"ban expert {experts}")
+
+    def only_experts(self, block, experts, positions: str = "all") -> str:
+        """The router of `block` may choose among these experts only."""
+        return self.intercept(block, hook="router", op="only", experts=experts, positions=positions,
+                              label=f"only expert {experts}")
+
+    def scale_expert(self, block, experts, value: float = 0.0, positions: str = "all") -> str:
+        """Multiply what these experts write by `value` wherever they are chosen (0 = they run but say nothing)."""
+        return self.intercept(block, hook="expert_out", op="scale" if value else "zero", value=value, experts=experts,
+                              positions=positions, label=f"expert {experts} x {value:g}")
+
+    def routing(self, block, k: int | None = None, temperature: float | None = None):
+        """Change how a block routes: experts per token (k) and the router's softmax temperature (None = model's own)."""
+        d = self.node(block)["data"]
+        for key, v in (("moe_k", k), ("moe_temp", temperature)):
+            if v:
+                d[key] = v
+            else:
+                d.pop(key, None)
+        return self
 
     # ---------------------------------------------------------------- KV prefixes
     def layer_prompt(self, text: str, layers: str = "all", mode: str = "shift", as_system: bool = False,

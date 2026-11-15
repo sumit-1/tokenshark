@@ -44,7 +44,7 @@ export function addBox(targetId, data) {
   const t = flow.node(targetId)
   if (!t) return toast('That block is not in the current flow (restore the run’s flow first).', 'error')
   const n = flow.addNode({ id: newId('iv'), type: 'box', position: { x: t.position.x + 10, y: t.position.y - 105 },
-    data: { kind: 'intervention', positions: 'all', steps: 'all', heads: 'all', neurons: 'all', value: 1, enabled: true, ...data } })
+    data: { kind: 'intervention', positions: 'all', steps: 'all', heads: 'all', neurons: 'all', experts: 'all', value: 1, enabled: true, ...data } })
   flow.addEdge({ source: n.id, sourceHandle: 'out', target: t.id, targetHandle: 'mod' })
   flow.select({ type: 'node', id: n.id })
   return n

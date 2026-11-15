@@ -30,6 +30,9 @@ itself from that:
 | `course` | guided course on the Learn tab | `COURSES` in `tabs/learn.js` |
 | `step_debugger` | whether the header's step buttons apply | — |
 
+A tab can also say when it applies: `registerTab({ ..., when: info => !!info.moe })` hides the Experts tab for
+models without experts. That is a property of the loaded model's `info`, not of its name.
+
 `tests/test_architecture.py` fails if a plugin names a tab, action or section that does not exist.
 
 Two modules may stand behind one tab name: `output_text` and `output_image` both register `alias: 'output'`,

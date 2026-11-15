@@ -65,13 +65,18 @@ Repository = "https://github.com/sumit-1/tokenshark"
 [project.scripts]
 tokenshark = "tokenshark.__main__:main"
 tokenshark-mcp = "tokenshark.mcp_server:main"
+tokenshark-course = "course.app:main"
 
 [tool.setuptools.packages.find]
-include = ["tokenshark*"]
+include = ["tokenshark*", "course*"]
 
 [tool.setuptools.package-data]
 tokenshark = [
   "models.json",
   "web/*",
   "web/**/*",
+]
+course = [
+  "templates/*",
+  "static/*",
 ]

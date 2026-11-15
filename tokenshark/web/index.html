@@ -67,7 +67,6 @@
       <div><i class="lg skip"></i>UNet skip</div>
     </div>
   </aside>
-  <aside id="lesson" class="lesson"></aside>
   <section class="center">
     <div id="canvas"></div>
     <div id="plan" class="plan"></div>
@@ -85,7 +84,7 @@
   <form method="dialog">
     <h3>Add a model</h3>
     <label class="field"><span>Id (short name)</span><input name="id" required></label>
-    <label class="field"><span>Family</span><select name="family"><option value="causal_lm">Text → text (Llama / Qwen / Mistral)</option><option value="t2i">Text → image (Stable Diffusion 1.x/2.x)</option></select></label>
+    <label class="field"><span>Family</span><select name="family"><option value="causal_lm">Text → text (Llama / Qwen / Mistral / mixture-of-experts)</option><option value="t2i">Text → image (Stable Diffusion 1.x/2.x)</option></select></label>
     <label class="field"><span>Hugging Face repo (e.g. Qwen/Qwen2.5-3B-Instruct)</span><input name="repo"></label>
     <label class="field"><span>…or a local folder (config.json + *.safetensors, or Meta params.json + consolidated.00.pth)</span><input name="path"></label>
     <label class="field"><span>Size (GB, for display)</span><input name="size_gb" type="number" step="any"></label>

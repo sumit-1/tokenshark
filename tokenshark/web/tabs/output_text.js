@@ -10,10 +10,45 @@ export function renderTextOut(p) {
   const o = S.run.outputs
   p.appendChild(el('div', { className: 'small' }, `${o.tokens.length} tokens · ${o.prefix_tokens ? `${o.prefix_tokens} imported KV tokens in front · ` : ''}read ${o.gb_read} GB of weights · click a token for the alternatives the model weighed`))
   renderTokens(p, false)
+  conversationBox(p)
   if (o.edited_code?.length) p.appendChild(el('div', { className: 'small' }, `<span class="chip coded">✎ edited code</span> ran in: ${o.edited_code.map(esc).join(', ')}`))
   if (o.prints?.length) p.appendChild(el('pre', { className: 'codehelp', textContent: o.prints.join('\n') }))
   p.appendChild(el('div', { className: 'row' })).append(btn('Save KV cache', saveRunCache), btn('Export as Python script', () => exportScript()),
     btn('Download manifest', () => window.open(`/api/runs/${S.run.id}/manifest`)))
+}
+
+// Every turn of the finished run, the model's answer included.
+export function conversationOf(run) {
+  const pr = run.plan?.params || {}, turns = (pr.history || []).map(m => ({ ...m }))
+  if (pr.prompt || !turns.length) turns.push({ role: 'user', content: pr.prompt || '' })
+  turns.push({ role: 'assistant', content: (pr.prefill || '') + (run.outputs.text || ''), answer: true })
+  return turns
+}
+
+// The conversation so far, and a box to send the next user turn: the exchange moves into the Prompt box's list
+// of earlier turns (where it can be edited) and the new message becomes the prompt.
+function conversationBox(p) {
+  if (S.run.status && !['done', 'cancelled'].includes(S.run.status)) return
+  const turns = conversationOf(S.run)
+  const box = el('div', { className: 'kvbox' }, `<h4>Conversation (${turns.length} turns)${S.run.plan?.params?.use_chat_template ? '' : ' <span class="small">— chat template is off: earlier turns are fed as plain “User: … / Assistant: …” lines</span>'}</h4>`)
+  turns.forEach(m => box.appendChild(el('div', { className: `turn ${m.role}${m.answer ? ' answer' : ''}` }, `<b>${m.role}</b> ${esc(m.content) || '<i class="small">(empty)</i>'}`)))
+  const ta = el('textarea', { rows: 2, placeholder: 'Your next message…', value: S.followup || '' })
+  ta.oninput = () => { S.followup = ta.value }
+  const push = (text, run) => {
+    const prompt = flow.nodes.find(n => n.data.kind === 'input_prompt')
+    flow.updateNodeData(prompt.id, { history: turns.map(({ role, content }) => ({ role, content })), prompt: text, prefill: '' })
+    S.followup = ''; S.alt = null
+    renderInspector()
+    if (run) startRun({ label: `turn ${turns.length + 1}` })
+    else toast('The exchange is now in the Prompt box’s list of earlier turns. Edit any turn there, then ▶ Run.')
+  }
+  ta.onkeydown = ev => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey) && ta.value.trim()) push(ta.value, true) }
+  const row = el('div', { className: 'row' })
+  row.append(btn('Send ▶', () => { if (!ta.value.trim()) return toast('Type the next message first.', 'error'); push(ta.value, true) }, 'primary'),
+    btn('Keep as earlier turns (don’t run yet)', () => push(ta.value, false)),
+    el('span', { className: 'small', textContent: 'Ctrl+Enter sends. Interceptors and edits in the flow stay in place for the next turn.' }))
+  box.append(ta, row)
+  p.appendChild(box)
 }
 
 export function renderTokens(container, compact) {

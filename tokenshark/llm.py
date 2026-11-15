@@ -12,6 +12,11 @@ No transformers. Every step is written out so students can read it and the engin
         x = x + z·Wo                         ── hook attn_out → resid_mid
         x = x + down(silu(gate(h2)) * up(h2)) where h2 = rmsnorm(x)   ── hook mlp_out
                                              ── hook resid_post
+        Mixture-of-experts blocks (Mixtral, Qwen-MoE, OLMoE …) replace that one MLP by many small ones and a
+        router that sends each token to a few of them:
+            probs = softmax(h2 · W_routerᵀ)        ── hook router (ban / force experts, patch the routing)
+            w, chosen = top-k(probs)               (k of E experts per token; w renormalised in some models)
+            x = x + Σ_e∈chosen  w_e · expert_e(h2)   ── hook expert_out (per expert), then mlp_out
     logits = rmsnorm(x) · W_unembedᵀ
 
 Weights come from a WeightStore, so layers can be streamed from disk one at a time.
@@ -43,6 +48,9 @@ class LLMConfig:
         self.norm_offset = 0.0           # Qwen3.5/3.6 store RMSNorm weights as (w - 1): scale = 1 + w
         self.rot_dim = None              # partial rotary: only the first rot_dim dims of each head rotate
         self.vision = None
+        self.moe = None                  # mixture of experts: {"n": experts, "k": per token, "norm_topk", "inter"}
+        self.mla = None                  # DeepSeek multi-head latent attention: {"nope", "rope", "v", "rank"}
+        self.clip_qkv = None
         if hf and "text_config" in hf:   # multimodal checkpoint: the language model lives in text_config
             self.vision = hf.get("vision_config")
             self.vlm_tokens = {k: hf.get(k) for k in ("image_token_id", "video_token_id", "vision_start_token_id",
@@ -54,8 +62,11 @@ class LLMConfig:
             tc["model_type"] = tc.get("model_type") or hf.get("model_type")
             hf = tc
         if hf:
+            n_exp = int(hf.get("num_experts") or hf.get("num_local_experts") or hf.get("n_routed_experts") or 0)
+            if n_exp and "intermediate_size" not in hf:
+                hf["intermediate_size"] = hf.get("moe_intermediate_size") or hf.get("shared_expert_intermediate_size")
             missing = [k for k in ("hidden_size", "num_hidden_layers", "num_attention_heads", "intermediate_size",
-                                   "vocab_size") if k not in hf]
+                                   "vocab_size") if not hf.get(k)]
             if missing:
                 raise ValueError(f"config.json in {root} is missing {', '.join(missing)} — this checkpoint layout isn't "
                                  f"supported yet. Top-level keys: {', '.join(sorted(hf)[:30])}")
@@ -80,9 +91,28 @@ class LLMConfig:
             rp = hf.get("rope_parameters") or hf.get("rope_scaling") or {}
             if rp.get("partial_rotary_factor") or hf.get("partial_rotary_factor"):
                 self.rot_dim = int(self.head_dim * float(rp.get("partial_rotary_factor") or hf["partial_rotary_factor"]))
+            self.clip_qkv = hf.get("clip_qkv")                       # OLMoE clamps q, k, v to ±clip_qkv
+            if n_exp:
+                # Mixture of experts. Every supported family routes the same way (softmax → top-k → weighted sum);
+                # they differ in whether the k chosen weights are renormalised to sum to 1, and in a shared expert.
+                mt = self.model_type
+                self.moe = {"n": n_exp, "k": int(hf.get("num_experts_per_tok") or 2),
+                            "norm_topk": True if mt == "mixtral" or mt.startswith("qwen3_5")
+                            else bool(hf.get("norm_topk_prob", False)),
+                            "inter": int(hf.get("moe_intermediate_size") or hf["intermediate_size"]),
+                            "aux_coef": hf.get("router_aux_loss_coef"),
+                            # DeepSeek: chosen weights × a constant; optionally only experts of the best groups
+                            "scale": float(hf.get("routed_scaling_factor") or 1.0),
+                            "groups": ((int(hf.get("n_group") or 1), int(hf.get("topk_group") or 1))
+                                       if hf.get("topk_method") == "group_limited_greedy" else None)}
+            if self.model_type == "deepseek_v2":
+                # Multi-head latent attention: keys and values are rebuilt from one small vector per token, and
+                # only the last qk_rope_head_dim dims of each query/key carry position (see RawLLM._mla_attn).
+                self.mla = {"nope": int(hf["qk_nope_head_dim"]), "rope": int(hf["qk_rope_head_dim"]),
+                            "v": int(hf["v_head_dim"]), "rank": int(hf["kv_lora_rank"]), "q_rank": hf.get("q_lora_rank")}
+                self.head_dim = self.mla["nope"] + self.mla["rope"]
+                self.rot_dim, self.n_kv = self.mla["rope"], self.n_heads
             if self.model_type.startswith(("qwen3_5", "qwen3_next")):
-                if "moe" in self.model_type or hf.get("num_experts"):
-                    raise ValueError("Qwen3.5/3.6 MoE checkpoints are not supported yet (dense ones are).")
                 self.norm_offset = 1.0
                 lt = hf.get("layer_types")
                 if not lt:
@@ -92,10 +122,12 @@ class LLMConfig:
                 self.lin = {"conv": hf.get("linear_conv_kernel_dim", 4), "dk": hf.get("linear_key_head_dim", 128),
                             "dv": hf.get("linear_value_head_dim", 128), "hk": hf.get("linear_num_key_heads", 16),
                             "hv": hf.get("linear_num_value_heads", 32)}
-            elif self.model_type not in ("llama", "qwen2", "qwen3", "mistral", "olmo2", "qwen3_vl", "qwen3_vl_text") \
+            elif self.model_type not in ("llama", "qwen2", "qwen3", "mistral", "olmo2", "qwen3_vl", "qwen3_vl_text",
+                                         "mixtral", "qwen2_moe", "qwen3_moe", "olmoe", "tiny_moe", "deepseek_v2") \
                     and "Llama" not in self.arch:
                 raise ValueError(f"Architecture '{self.arch}' is not supported by the raw engine yet "
-                                 f"(supported: Llama, Qwen2/2.5, Qwen3, Qwen3.5/3.6 dense, Mistral, SmolLM).")
+                                 f"(supported: Llama, Qwen2/2.5, Qwen3, Qwen3.5/3.6, Mistral, SmolLM; mixture of "
+                                 f"experts: Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, DeepSeek-V2).")
         else:
             p = read_json(root / "params.json")
             if not p:
@@ -132,7 +164,7 @@ class LLMConfig:
     def fingerprint(self) -> dict:
         return {"arch": self.arch, "hidden_size": self.hidden, "n_layers": self.n_layers, "n_heads": self.n_heads,
                 "n_kv_heads": self.n_kv, "head_dim": self.head_dim, "vocab": self.vocab,
-                "hybrid": bool(self.layer_types)}
+                "hybrid": bool(self.layer_types), "moe": self.moe["n"] if self.moe else 0}
 
 
 def meta_name_map(cfg: LLMConfig) -> dict[str, str]:
@@ -194,7 +226,30 @@ def rope_inv_freq(cfg: LLMConfig) -> torch.Tensor:
         inv = torch.where(mid, smoothed, out)
     elif kind == "linear":
         inv = inv / rs["factor"]
+    elif kind == "yarn":
+        # YaRN: slow (long-wavelength) dimensions are stretched by `factor`, fast ones are left alone, with a
+        # linear ramp between — so a model trained on short contexts keeps its local sense of position.
+        factor = rs.get("factor") or cfg.max_pos / rs["original_max_position_embeddings"]
+        old, bf, bs = rs["original_max_position_embeddings"], rs.get("beta_fast") or 32, rs.get("beta_slow") or 1
+        corr = lambda rot: (d * math.log(old / (rot * 2 * math.pi))) / (2 * math.log(cfg.theta))      # noqa: E731
+        lo, hi = max(math.floor(corr(bf)), 0), min(math.ceil(corr(bs)), d - 1)
+        if lo == hi:
+            hi += 0.001
+        ramp = ((torch.arange(d // 2, dtype=torch.float32) - lo) / (hi - lo)).clamp(0, 1)
+        inv = (inv / factor) * ramp + inv * (1 - ramp)
     return inv
+
+
+def yarn_scales(cfg: LLMConfig) -> tuple[float, float]:
+    """(multiplier on the rotated dims of q and k, multiplier on the attention scores) that YaRN adds."""
+    rs = cfg.rope_scaling or {}
+    if (rs.get("rope_type") or rs.get("type")) != "yarn":
+        return 1.0, 1.0
+    factor = rs.get("factor") or cfg.max_pos / rs["original_max_position_embeddings"]
+    ms = lambda m=1.0: 1.0 if factor <= 1 else 0.1 * m * math.log(factor) + 1.0                          # noqa: E731
+    m, mall = rs.get("mscale"), rs.get("mscale_all_dim")
+    rot = rs.get("attention_factor") or (ms(m) / ms(mall) if m and mall else ms())
+    return float(rot), float(ms(mall) ** 2) if mall else 1.0
 
 
 def apply_rope(x: torch.Tensor, pos: torch.Tensor, inv_freq: torch.Tensor) -> torch.Tensor:
@@ -231,6 +286,7 @@ class RawLLM:
             kw = {"name_map": meta_name_map(cfg), "transform": meta_transform(cfg)}
         self.W = WeightStore(self.root, device, dtype, policy, keep_layers, **kw)
         self.inv_freq = rope_inv_freq(cfg).to(device)
+        self.rope_mult, self.score_mult = yarn_scales(cfg)
         fa = next((i for i in range(cfg.n_layers) if not cfg.is_linear(i)), 0)     # a full-attention layer
         self.qk_norm = self.W.has(f"model.layers.{fa}.self_attn.q_norm.weight")
         self.has_bias = self.W.has(f"model.layers.{fa}.self_attn.q_proj.bias")
@@ -238,6 +294,48 @@ class RawLLM:
         self.attn_gate = bool(qshape) and qshape[0] == 2 * cfg.n_heads * cfg.head_dim   # Qwen3.5 gated attention
         self.tied = cfg.tied or not self.W.has("lm_head.weight")
         self.act = _act(cfg.act)
+        # OLMoE normalises the whole q / k projection at once (one weight per dimension), not per head.
+        qn = self.W.shape(f"model.layers.{fa}.self_attn.q_norm.weight") if self.qk_norm else None
+        self.qk_norm_flat = bool(qn) and qn[0] == cfg.n_heads * cfg.head_dim and cfg.n_heads > 1
+        self.moe_layers = {l: lay for l in range(cfg.n_layers) if (lay := self._moe_layout(l))} if cfg.moe else {}
+        if cfg.moe and not self.moe_layers:
+            raise ValueError("config.json describes a mixture-of-experts model but no router weights "
+                             "(…mlp.gate.weight / …block_sparse_moe.gate.weight) were found in the checkpoint.")
+
+    def _moe_layout(self, l: int) -> dict | None:
+        """Where layer l keeps its router and experts — None for a dense layer. Checkpoints name them in three
+        ways: one tensor per expert (Qwen-MoE, OLMoE: experts.7.gate_proj), Mixtral's w1/w3/w2, or all experts
+        stacked in one tensor (how recent transformers versions re-save them: experts.gate_up_proj)."""
+        W = self.W
+        for base in (f"model.layers.{l}.mlp.", f"model.layers.{l}.block_sparse_moe."):
+            if not W.has(base + "gate.weight"):
+                continue
+            shared = next((s for s in ("shared_expert", "shared_experts") if W.has(f"{base}{s}.gate_proj.weight")), None)
+            lay = {"base": base, "router": base + "gate.weight", "n": W.shape(base + "gate.weight")[0],
+                   "shared": bool(shared), "shared_name": shared,
+                   "shared_gate": W.has(base + "shared_expert_gate.weight")}
+            if W.has(base + "experts.gate_up_proj"):
+                lay["names"] = "stacked"
+            elif W.has(base + "experts.0.gate_proj.weight"):
+                lay["names"] = ("gate_proj", "up_proj", "down_proj")
+            elif W.has(base + "experts.0.w1.weight"):
+                lay["names"] = ("w1", "w3", "w2")
+            else:
+                continue
+            return lay
+        return None
+
+    def expert_weights(self, lay: dict, e, ctx: RunContext | None = None):
+        """(gate, up, down) matrices of one expert; e = "shared" for the always-on shared expert. When experts are
+        stored one tensor each, only the experts a token was routed to are ever read from disk."""
+        b = lay["base"]
+        if e == "shared":
+            return tuple(self._w(f"{b}{lay['shared_name']}.{n}.weight", ctx) for n in ("gate_proj", "up_proj", "down_proj"))
+        if lay["names"] == "stacked":
+            gu, dn = self._w(b + "experts.gate_up_proj", ctx)[e], self._w(b + "experts.down_proj", ctx)[e]
+            half = gu.shape[0] // 2
+            return gu[:half], gu[half:], dn
+        return tuple(self._w(f"{b}experts.{e}.{n}.weight", ctx) for n in lay["names"])
 
     # -------------------------------------------------------------- pieces
     def embed(self, ids: list[int]) -> torch.Tensor:
@@ -330,6 +428,8 @@ class RawLLM:
         h = rms_norm(x, self.norm_w(pre + "input_layernorm.weight"), cfg.eps)
         if cfg.is_linear(l):
             attn_out = self._linear_attn(p, pre, h, cache, ctx, idx_of)
+        elif cfg.mla:
+            attn_out = self._mla_attn(p, pre, h, cache, ctx, idx_of)
         else:
             attn_out = self._full_attn(p, pre, h, cache, ctx, idx_of)
         for iv in ctx.active("attn_out"):
@@ -375,9 +475,16 @@ class RawLLM:
             q = q_all.view(n, cfg.n_heads, cfg.head_dim).transpose(0, 1)
         k = self._lin(h, pre + "self_attn.k_proj", ctx).view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
         v = self._lin(h, pre + "self_attn.v_proj", ctx).view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
-        if self.qk_norm:
+        if self.qk_norm and self.qk_norm_flat:               # OLMoE: one norm over all heads together
+            q = rms_norm(q.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
+            k = rms_norm(k.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
+            q = q.view(n, cfg.n_heads, cfg.head_dim).transpose(0, 1)
+            k = k.view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
+        elif self.qk_norm:
             q = rms_norm(q, self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
             k = rms_norm(k, self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
+        if cfg.clip_qkv:
+            q, k, v = (t.clamp(-cfg.clip_qkv, cfg.clip_qkv) for t in (q, k, v))
         q = self._head_hook(p, "q", q, ctx, idx_of, cap)
         k = self._head_hook(p, "k", k, ctx, idx_of, cap)
         v = self._head_hook(p, "v", v, ctx, idx_of, cap)
@@ -416,6 +523,67 @@ class RawLLM:
         if gate is not None:
             zf = zf * torch.sigmoid(gate.reshape(n, -1))
         return zf @ self._w(pre + "self_attn.o_proj.weight", ctx).T
+
+    def _mla_attn(self, p, pre, h, cache, ctx, idx_of):
+        """DeepSeek-V2's multi-head latent attention. Ordinary attention stores a key and a value per head per
+        token. Here each token is first squeezed into one small latent vector (kv_lora_rank numbers) plus a short
+        positional key shared by all heads; every head's key and value are linear read-outs of that latent:
+
+            latent, k_pos = split(h · W_kv_a)                 latent: [rank]   k_pos: [rope] (one for all heads)
+            k_content, v  = split(norm(latent) · W_kv_b)      per head: [nope] and [v]
+            q_content, q_pos = split(h · W_q)                 per head
+            score = q_content·k_content + rope(q_pos)·rope(k_pos)      (only the positional part is rotated)
+
+        The production trick is to cache only the latent (far smaller). Here the expanded keys and values go into
+        the KV cache, positional part first and un-rotated, so every cache tool works as on other models."""
+        cfg, a = self.cfg, self.cfg.mla
+        n, H, cap = h.shape[0], cfg.n_heads, ctx.capture
+        s = pre + "self_attn."
+        if a["q_rank"]:
+            q = rms_norm(h @ self._w(s + "q_a_proj.weight", ctx).T, self.W(s + "q_a_layernorm.weight"), cfg.eps)
+            q = q @ self._w(s + "q_b_proj.weight", ctx).T
+        else:
+            q = h @ self._w(s + "q_proj.weight", ctx).T
+        q = q.view(n, H, a["nope"] + a["rope"])
+        ckv = h @ self._w(s + "kv_a_proj_with_mqa.weight", ctx).T
+        latent = rms_norm(ckv[:, :a["rank"]], self.W(s + "kv_a_layernorm.weight"), cfg.eps)
+        kv = (latent @ self._w(s + "kv_b_proj.weight", ctx).T).view(n, H, a["nope"] + a["v"])
+        # The checkpoint rotates neighbouring pairs (0,1),(2,3)…; reordering to [evens | odds] lets the same
+        # half-split rotation used everywhere else do it. The positional part goes first: apply_rope rotates
+        # the first dims of a head and leaves the rest alone.
+        order = torch.cat([torch.arange(0, a["rope"], 2), torch.arange(1, a["rope"], 2)]).to(h.device)
+        q = torch.cat([q[..., a["nope"]:][..., order], q[..., :a["nope"]]], -1).transpose(0, 1)          # [H, n, hd]
+        k_pos = ckv[:, a["rank"]:][:, order][:, None, :].expand(n, H, a["rope"])
+        k = torch.cat([k_pos, kv[..., :a["nope"]]], -1).transpose(0, 1)
+        v = kv[..., a["nope"]:].transpose(0, 1)                                                           # [H, n, v]
+        q = self._head_hook(p, "q", q, ctx, idx_of, cap)
+        k = self._head_hook(p, "k", k, ctx, idx_of, cap)
+        v = self._head_hook(p, "v", v, ctx, idx_of, cap)
+        cache.append(p, k, v)
+        if ctx.active("kv_k"):
+            cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(h.device), ctx, idx_of, False).to(cache.device)
+        if ctx.active("kv_v"):
+            cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(h.device), ctx, idx_of, False).to(cache.device)
+        K, V = cache.k[p].to(h.device), cache.v[p].to(h.device)
+        T = K.shape[1]
+        pos_all = cache.pos.to(self.inv_freq.device)
+        qr = apply_rope(q, pos_all[T - n:], self.inv_freq).float()
+        kr = apply_rope(K, pos_all, self.inv_freq).float()
+        if self.rope_mult != 1.0:
+            qr = torch.cat([qr[..., :a["rope"]] * self.rope_mult, qr[..., a["rope"]:]], -1)
+            kr = torch.cat([kr[..., :a["rope"]] * self.rope_mult, kr[..., a["rope"]:]], -1)
+        scores = (qr @ kr.transpose(1, 2)) * (self.score_mult / math.sqrt(cfg.head_dim))
+        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, h.device), float("-inf"))
+        probs = torch.softmax(scores, -1)
+        if cap and ctx.store.get("want_attn", True):
+            ctx.store.setdefault("attn", {}).setdefault(p, []).append(probs.detach().to(torch.float16).cpu())
+        z = probs.to(V.dtype) @ V
+        for iv in ctx.active("attn_heads"):
+            heads = parse_index_spec(iv.heads, H)
+            zt = z.transpose(0, 1).clone()
+            zt[:, heads] = apply_op(zt[:, heads], iv, ctx, 0, idx_of(iv))
+            z = zt.transpose(0, 1)
+        return z.transpose(0, 1).reshape(n, H * a["v"]) @ self._w(s + "o_proj.weight", ctx).T
 
     def _linear_attn(self, p, pre, h, cache, ctx, idx_of):
         """Gated DeltaNet (Qwen3.5/3.6 'linear attention'). Instead of keeping every key and value it keeps one
@@ -477,11 +645,15 @@ class RawLLM:
     def _mlp_and_finish(self, p, pre, x, attn_out, ctx, idx_of, cap):
         cfg, W = self.cfg, self.W
         h2 = rms_norm(x, self.norm_w(pre + "post_attention_layernorm.weight"), cfg.eps)
-        gate = h2 @ self._w(pre + "mlp.gate_proj.weight", ctx).T
-        up = h2 @ self._w(pre + "mlp.up_proj.weight", ctx).T
-        neurons = self.act(gate) * up                     # [n, d_ff]: one number per MLP neuron per token
-        neurons = self.neuron_hook(p, neurons, ctx, idx_of, cap)
-        mlp_out = neurons @ self._w(pre + "mlp.down_proj.weight", ctx).T
+        lay = self.moe_layers.get(int(pre.split(".")[2]))
+        if lay is not None:
+            mlp_out = self._moe_mlp(p, lay, h2, ctx, idx_of, cap)
+        else:
+            gate = h2 @ self._w(pre + "mlp.gate_proj.weight", ctx).T
+            up = h2 @ self._w(pre + "mlp.up_proj.weight", ctx).T
+            neurons = self.act(gate) * up                     # [n, d_ff]: one number per MLP neuron per token
+            neurons = self.neuron_hook(p, neurons, ctx, idx_of, cap)
+            mlp_out = neurons @ self._w(pre + "mlp.down_proj.weight", ctx).T
         for iv in ctx.active("mlp_out"):
             mlp_out = apply_op(mlp_out, iv, ctx, 0, idx_of(iv))
         x = x + mlp_out
@@ -489,6 +661,112 @@ class RawLLM:
             # A bottleneck adapter added by training (adapt.py): squeeze to a few dimensions, expand back, add.
             x = x + self.act(x @ self._w(pre + "adapter.down.weight", ctx).T) @ self._w(pre + "adapter.up.weight", ctx).T
         return self._finish(p, x, attn_out, mlp_out, ctx, idx_of, cap)
+
+    # -------------------------------------------------------------- mixture of experts
+    @staticmethod
+    def expert_ids(spec: str, lay: dict) -> list[int]:
+        """Experts an interceptor names: all | 3 | 0:8 | 1,5 | shared. The shared expert (if the model has one)
+        is index E; "all" means every routed expert, not the shared one."""
+        E = lay["n"]
+        spec = (spec or "all").strip().lower()
+        if spec in ("all", "*", ""):
+            return list(range(E))
+        parts = [x.strip() for x in spec.split(",") if x.strip()]
+        out = [E] if "shared" in parts and lay["shared"] else []
+        rest = ",".join(x for x in parts if x != "shared")
+        return sorted(set(out + (parse_index_spec(rest, E) if rest else [])))
+
+    def _moe_mlp(self, p: int, lay: dict, h2: torch.Tensor, ctx: RunContext, idx_of, cap: bool) -> torch.Tensor:
+        """The MLP of a mixture-of-experts block. A dense block has one wide MLP that every token uses. Here
+        there are E narrow MLPs ("experts") and a router — one row of weights per expert — that scores how well
+        each expert suits each token. Only the k best-scoring experts run for a token; their outputs are added,
+        weighted by the router's (softmax) scores. Most of the block's weights are therefore idle for any one
+        token: that is the point (many parameters, little compute), and it is what makes the routing readable."""
+        import dataclasses
+        m = self.cfg.moe
+        n, d = h2.shape
+        E = lay["n"]
+        logits = (h2 @ self._w(lay["router"], ctx).T).float()                 # [n, E] one score per expert
+        for iv in ctx.active("router"):
+            ex = [e for e in self.expert_ids(iv.experts, lay) if e < E]
+            idx = idx_of(iv)
+            if not ex or not idx:
+                continue
+            if iv.op in ("ban", "only"):
+                # ban: these experts can never be chosen · only: every other expert is banned
+                off = torch.zeros(E, dtype=torch.bool, device=logits.device)
+                off[ex] = True
+                if iv.op == "only":
+                    off = ~off
+                rows = torch.tensor(idx, device=logits.device)
+                sub = logits[rows]
+                sub[:, off] = -1e9
+                logits = logits.clone()
+                logits[rows] = sub
+            else:                                   # scale / add_noise / patch / clamp … on the chosen experts' scores
+                one = dataclasses.replace(iv, neurons=",".join(map(str, ex))) if len(ex) < E else iv
+                logits = apply_op(logits, one, ctx, 0, idx)
+        temp = (ctx.store.get("moe_temp") or {}).get(p)
+        probs = torch.softmax(logits / temp if temp else logits, -1)
+        if m.get("groups"):                         # DeepSeek "group-limited": only experts of the best groups compete
+            g, keep_g = m["groups"]
+            best = probs.view(n, g, E // g).amax(-1).topk(keep_g, -1).indices
+            ok = torch.zeros(n, g, dtype=torch.bool, device=probs.device).scatter_(1, best, True)
+            probs = probs * ok[:, :, None].expand(n, g, E // g).reshape(n, E)
+        k = max(1, min(E, int((ctx.store.get("moe_k") or {}).get(p) or m["k"])))
+        w, sel = probs.topk(k, -1)                                            # [n, k] weights and expert ids
+        if m["norm_topk"]:
+            w = w / w.sum(-1, keepdim=True)
+        if m.get("scale", 1.0) != 1.0:
+            w = w * m["scale"]
+        keep = cap and ctx.store.get("want_experts", False)
+        parts = torch.zeros(n, k, d, dtype=torch.float16) if keep else None
+        out = torch.zeros_like(h2)
+
+        def scoped(hook, e, rows, t):
+            """Interceptors of `hook` that name expert e, applied to the tokens (rows) this expert is handling."""
+            for iv in ctx.active(hook):
+                if hook == "mlp_neurons" and (iv.experts or "all").strip().lower() in ("all", "*", ""):
+                    continue                        # an expert's neurons are only touched when the box names experts
+                if e not in self.expert_ids(iv.experts, lay):
+                    continue
+                want = set(idx_of(iv))
+                loc = [j for j, r in enumerate(rows) if r in want]
+                if loc:
+                    t = apply_op(t, iv, ctx, 0, loc)
+            return t
+
+        for e in sel.unique().tolist():
+            rows, slot = torch.where((sel == e) & (w > 0))                    # the tokens routed here
+            if not rows.numel():                    # only "chosen" to fill a slot after its score was banned
+                continue
+            he = h2[rows]
+            g, u, dn = self.expert_weights(lay, e, ctx)
+            neurons = scoped("mlp_neurons", e, rows.tolist(), self.act(he @ g.T) * (he @ u.T))
+            oe = scoped("expert_out", e, rows.tolist(), neurons @ dn.T)
+            oe = oe * w[rows, slot, None].to(oe.dtype)
+            out.index_add_(0, rows, oe)
+            if parts is not None:
+                parts[rows.cpu(), slot.cpu()] = oe.detach().to(torch.float16).cpu()
+        shared = None
+        if lay["shared"]:                           # an expert every token uses, next to the routed ones
+            g, u, dn = self.expert_weights(lay, "shared", ctx)
+            shared = (self.act(h2 @ g.T) * (h2 @ u.T)) @ dn.T
+            if lay["shared_gate"]:
+                shared = shared * torch.sigmoid(h2 @ self._w(lay["base"] + "shared_expert_gate.weight", ctx).T)
+            shared = scoped("expert_out", E, list(range(n)), shared)
+            out = out + shared
+        if cap:
+            self.note_units(p, "router", logits.clamp(min=-1e4), ctx)
+            st = ctx.store
+            st.setdefault("router", {}).setdefault(p, []).append(logits.detach().clamp(min=-1e4).float().cpu())
+            st.setdefault("moe_sel", {}).setdefault(p, []).append(sel.detach().to(torch.int16).cpu())
+            st.setdefault("moe_w", {}).setdefault(p, []).append(w.detach().float().cpu())
+            if parts is not None:
+                st.setdefault("moe_parts", {}).setdefault(p, []).append(parts)
+                if shared is not None:
+                    st.setdefault("moe_shared", {}).setdefault(p, []).append(shared.detach().to(torch.float16).cpu())
+        return out
 
     def neuron_hook(self, p, neurons, ctx, idx_of, cap):
         """Hook mlp_neurons: record each neuron's range, apply interventions (clamp a neuron…), capture."""
@@ -554,24 +832,32 @@ class LLMAdapter:
 
     def info(self) -> dict:
         c = self.cfg
-        attn = "MHA" if c.n_kv == c.n_heads else f"GQA {c.n_heads}q/{c.n_kv}kv"
+        attn = ("MLA (latent attention)" if c.mla else
+                "MHA" if c.n_kv == c.n_heads else f"GQA {c.n_heads}q/{c.n_kv}kv")
         return {
             "family": self.family, "arch": c.arch, "n_layers": c.n_layers, "d_model": c.hidden,
             "n_heads": c.n_heads, "n_kv_heads": c.n_kv, "head_dim": c.head_dim, "vocab": c.vocab,
             "d_ff": c.inter, "rope_theta": c.theta,
             "tokenizer": "tiktoken" if self.tok.kind == "tiktoken" else "BPE tokenizer",
             "norm": "RMSNorm", "block_sub": f"{attn}{' · QK-norm' if self.model.qk_norm else ''} · SwiGLU",
+            "moe": ({"n_experts": c.moe["n"], "top_k": c.moe["k"], "norm_topk": c.moe["norm_topk"],
+                     "expert_d_ff": c.moe["inter"], "layers": sorted(self.model.moe_layers),
+                     "shared": any(v["shared"] for v in self.model.moe_layers.values())} if c.moe else None),
             "has_chat_template": bool(self.tok.chat_template),
             "block_subs": [("Gated DeltaNet (linear attn)" if c.is_linear(i) else
-                            f"{'gated ' if self.model.attn_gate else ''}{attn}{' · QK-norm' if self.model.qk_norm else ''}") + " · SwiGLU"
+                            f"{'gated ' if self.model.attn_gate else ''}{attn}{' · QK-norm' if self.model.qk_norm else ''}")
+                           + (f" · MoE {c.moe['k']} of {self.model.moe_layers[i]['n']} experts"
+                              + (" + shared" if self.model.moe_layers[i]["shared"] else "")
+                              if i in self.model.moe_layers else " · SwiGLU")
                            for i in range(c.n_layers)],
             "hybrid": bool(c.layer_types),
             "extra_blocks": list(getattr(self, "extra_blocks", None) or []),     # blocks added by training (adapt.py)
             "vision": bool(c.vision),
             "weights": self.model.W.describe(),
             "capabilities": {"repeat_blocks": True, "reorder_blocks": True, "remove_blocks": True,
-                             "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": False},
-            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out", "mlp_neurons", "mlp_out", "resid_post", "weights"],
+                             "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": bool(c.moe)},
+            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out",
+                      *(["router", "expert_out"] if c.moe else []), "mlp_neurons", "mlp_out", "resid_post", "weights"],
         }
 
     def fingerprint(self):
@@ -581,19 +867,21 @@ class LLMAdapter:
         return KVCache(self.fingerprint(), n_slots, device=self.cache_device)
 
     # -------------------------------------------------------------- input building
-    def split_system(self, system: str, user: str, extra: dict | None = None) -> tuple[str, str]:
+    def split_system(self, system: str, user, extra: dict | None = None) -> tuple[str, str]:
         """Render [system, user] with the chat template and split it into (system turn, rest). Works whether the
-        template can render a system turn on its own (Qwen2.5) or refuses to (Qwen3.5/3.6 needs a user turn)."""
+        template can render a system turn on its own (Qwen2.5) or refuses to (Qwen3.5/3.6 needs a user turn).
+        `user` is the user's text, or a whole list of turns (a conversation that follows the system turn)."""
         tok = self.tok
         sys_msg = [{"role": "system", "content": system}]
-        full = tok.apply_chat(sys_msg + [{"role": "user", "content": user}], True, extra)
+        turns = user if isinstance(user, list) else [{"role": "user", "content": user}]
+        full = tok.apply_chat(sys_msg + turns, True, extra)
         try:
             head = tok.apply_chat(sys_msg, False, extra)
             if full.startswith(head):
                 return head, full[len(head):]
         except Exception:
             pass
-        rest = tok.apply_chat([{"role": "user", "content": user}], True, extra)
+        rest = tok.apply_chat(turns, True, extra)
         if full.endswith(rest):
             return full[: len(full) - len(rest)], rest
         raise ValueError("Couldn't separate the system turn in this model's chat template.")
@@ -601,25 +889,37 @@ class LLMAdapter:
     def template_extra(self, p: dict) -> dict:
         return {"enable_thinking": bool(p.get("thinking", False))}
 
+    @staticmethod
+    def turns(p: dict) -> list[dict]:
+        """The conversation the model is to continue: earlier turns (the Prompt box's conversation list) and then
+        the prompt as the newest user turn. An empty prompt after earlier turns adds nothing — the model then
+        answers the last turn of the list."""
+        hist = [{"role": m["role"], "content": m["content"]} for m in (p.get("history") or [])]
+        if p.get("prompt", "") or not hist:
+            hist.append({"role": "user", "content": p.get("prompt", "")})
+        return hist
+
     def build_ids(self, p: dict) -> tuple[list[int], list[int]]:
         tok = self.tok
         has_prefix = bool(p.get("prefix_cache"))
         extra = self.template_extra(p)
+        turns = self.turns(p)
         if has_prefix and p.get("use_chat_template") and tok.chat_template:
             # The KV prefix stands in for the start of the chat (a hidden system turn, or an earlier conversation).
             # Render system + user, then cut the system part, so the user turn continues right after the cached
             # tokens — and the template can't slip in its own default system prompt (Qwen2.5 does that).
-            _, text = self.split_system(p.get("prefix_system") or ".", p.get("prompt", ""), extra)
+            _, text = self.split_system(p.get("prefix_system") or ".", turns, extra)
             prompt_ids = tok.encode(text, add_special=False)
         elif p.get("use_chat_template") and tok.chat_template:
             msgs = []
             if p.get("system"):
                 msgs.append({"role": "system", "content": p["system"]})
-            msgs.append({"role": "user", "content": p.get("prompt", "")})
-            text = tok.apply_chat(msgs, True, extra)
+            text = tok.apply_chat(msgs + turns, True, extra)      # every turn wrapped the way the model was trained on
             prompt_ids = tok.encode(text, add_special=False)
         else:
-            text = (p["system"] + "\n\n" if p.get("system") else "") + p.get("prompt", "")
+            # No chat template: earlier turns become plain lines ("User: …" / "Assistant: …") in front of the prompt.
+            earlier = "".join(f"{m['role'].capitalize()}: {m['content']}\n" for m in (p.get("history") or []))
+            text = (p["system"] + "\n\n" if p.get("system") else "") + earlier + p.get("prompt", "")
             # after a KV prefix the sequence has already started: no second BOS
             prompt_ids = tok.encode(text, add_special=bool(p.get("add_bos", True)) and not has_prefix)
         prefill_ids = tok.encode(p["prefill"], add_special=False) if p.get("prefill") else []
@@ -676,6 +976,10 @@ class LLMAdapter:
                 "attn_out": cat(ctx.store.get("attn_out", {})), "mlp_out": cat(ctx.store.get("mlp_out", {})),
                 "q": cat(ctx.store.get("q", {})), "k": cat(ctx.store.get("k", {})), "v": cat(ctx.store.get("v", {})),
                 "neurons": cat(ctx.store.get("neurons", {})),
+                "router": cat(ctx.store.get("router", {})), "moe_sel": cat(ctx.store.get("moe_sel", {})),
+                "moe_w": cat(ctx.store.get("moe_w", {})), "moe_parts": cat(ctx.store.get("moe_parts", {})),
+                "moe_shared": cat(ctx.store.get("moe_shared", {})),
+                "moe_k": dict(ctx.store.get("moe_k") or {}), "moe_temp": dict(ctx.store.get("moe_temp") or {}),
                 "unit_range": dict(ctx.store.get("unit_range", {})), "code": dict(ctx.store.get("code", {})),
                 "attn": attn, "ids": seq, "n_prefix": n_prefix}
 
@@ -721,6 +1025,7 @@ class LLMAdapter:
             tmp.add_tokens(cap["ids"][:T], full.pos[n_pre:n_pre + T].tolist(), "prompt")
             ctx = RunContext(interventions=[])
             ctx.store["code"] = cap.get("code", {})          # edited blocks stay edited when decoding through them
+            ctx.store["moe_k"], ctx.store["moe_temp"] = cap.get("moe_k") or {}, cap.get("moe_temp") or {}
             for q in range(start, S):
                 x = self.model.block(q, schedule[q], x, tmp, ctx, lambda iv: [])
         return self.model.final(x, w_out if w_out is not None else self.model.unembed_weight())
@@ -1010,6 +1315,16 @@ class Stepper:
         # attention / the MLP wrote on their own (patching those parts from this run into another).
         ctx.store["want_neurons"] = planned * ad.cfg.inter * S_ * 2 < int(p.get("neuron_budget_mb", 512)) * 2**20
         ctx.store["want_parts"] = planned * ad.cfg.hidden * S_ * 8 < int(p.get("parts_budget_mb", 768)) * 2**20
+        if ad.cfg.moe:
+            # each selected expert's write to the stream, kept for the expert lens: tokens × k × d per MoE block
+            n_moe = sum(1 for l in plan.schedule if l in self.model.moe_layers)
+            ctx.store["want_experts"] = (planned * ad.cfg.moe["k"] * ad.cfg.hidden * n_moe * 2
+                                         < int(p.get("expert_budget_mb", 768)) * 2**20)
+            # routing settings typed into block boxes: experts per token (k) and router temperature
+            per = p.get("moe") or {}
+            for key in ("k", "temp"):
+                ctx.store["moe_" + key] = {pos: per[nid][key] for pos, nid in enumerate(plan.schedule_nodes)
+                                           if nid in per and per[nid].get(key)}
         from .blockcode import compile_code
         self.code = {nid: compile_code(c["source"], c["kind"], nid) for nid, c in (p.get("code") or {}).items()}
         ctx.store["code"] = {pos: self.code[nid] for pos, nid in enumerate(plan.schedule_nodes) if nid in self.code}
@@ -1248,6 +1563,13 @@ class Stepper:
                 "mlp_norm": round(float(torch.cat(st["mlp"]).mean()), 3),
                 "lens_last": lens_last,
                 "pending": bool(inflight) and pp >= self.bp}       # hasn't seen the in-flight token yet
+            sel = caps["moe_sel"].get(pp)
+            if sel is not None and len(sel):      # mixture of experts: how often each expert was chosen in this run
+                E = self.model.moe_layers[plan.schedule[pp]]["n"]
+                cnt = torch.bincount(sel[caps["moe_w"][pp] > 0].long(), minlength=E).float() / sel.shape[0]
+                block_stats[plan.schedule_nodes[pp]]["moe"] = {
+                    "usage": [round(float(c), 3) for c in cnt], "k": int(sel.shape[1]),
+                    "last": [[int(e), round(float(w), 3)] for e, w in zip(sel[-1], caps["moe_w"][pp][-1])]}
         n_in = self.n_in
         seq = self.seq
         outputs = {
@@ -1268,7 +1590,8 @@ class Stepper:
             "notes": getattr(self, "notes", []),
             "prints": list(ctx.store.get("prints", [])),      # print() output of edited box code
             "edited_code": sorted(self.code),
-            "captured": {"neurons": bool(caps["neurons"]), "parts": bool(caps["mlp_out"])},
+            "captured": {"neurons": bool(caps["neurons"]), "parts": bool(caps["mlp_out"]),
+                         "router": bool(caps["router"]), "expert_parts": bool(caps["moe_parts"])},
             "live": {"phase": "done" if self.done else ("idle" if self.x is None else "block"),
                      "next_pos": self.bp if self.x is not None else None, "steps": self.steps,
                      "n_complete": n_proc, "inflight": len(inflight)},

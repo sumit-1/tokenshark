@@ -62,10 +62,9 @@ class ModelPlugin:
     #   block_term       what a box on the chain is called: block | stage
     #   default_hook     hook a new intervention box starts with (default: the adapter's first hook)
     ui_schema: dict[str, Any] = {
-        "tabs": ["learn", "lora", "quant", "runs"],
+        "tabs": ["lora", "quant", "runs"],
         "palette_actions": ["intervention"],
         "train": [],
-        "course": "",
         "modality": "text",
         "texts": "",
         "block_term": "block",

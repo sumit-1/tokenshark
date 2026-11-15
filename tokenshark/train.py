@@ -30,11 +30,52 @@ from .llm import apply_rope, rms_norm
 # ======================================================================================
 
 
+def moe_mlp(W, lay: dict, moe: dict, act, h: torch.Tensor, on_route=None) -> torch.Tensor:
+    """The MLP of a mixture-of-experts block, with gradients (same maths as RawLLM._moe_mlp).
+
+    h [..., d]. The router scores every expert for every token; the k best run and their outputs are added,
+    weighted by the router's softmax scores. Gradients reach the router only through those weights — an expert
+    that is never chosen never learns, which is why training adds a load-balancing term (see TinyJob)."""
+    shape = h.shape
+    h = h.reshape(-1, shape[-1])
+    probs = torch.softmax((h @ W(lay["router"]).T).float(), -1)               # [N, E]
+    w, sel = probs.topk(min(moe["k"], probs.shape[-1]), -1)                   # [N, k]
+    if moe["norm_topk"]:
+        w = w / w.sum(-1, keepdim=True)
+    if on_route is not None:
+        on_route(probs, sel)
+
+    def mats(e):
+        b = lay["base"]
+        if e == "shared":
+            return [W(f"{b}shared_expert.{n}.weight") for n in ("gate_proj", "up_proj", "down_proj")]
+        if lay["names"] == "stacked":
+            gu = W(b + "experts.gate_up_proj")[e]
+            return [gu[: gu.shape[0] // 2], gu[gu.shape[0] // 2:], W(b + "experts.down_proj")[e]]
+        return [W(f"{b}experts.{e}.{n}.weight") for n in lay["names"]]
+
+    out = torch.zeros_like(h)
+    for e in sel.unique().tolist():
+        rows, slot = torch.where(sel == e)
+        g, u, dn = mats(e)
+        he = h[rows]
+        out = out.index_add(0, rows, ((act(he @ g.T) * (he @ u.T)) @ dn.T) * w[rows, slot, None].to(h.dtype))
+    if lay.get("shared"):
+        g, u, dn = mats("shared")
+        so = (act(h @ g.T) * (h @ u.T)) @ dn.T
+        if lay.get("shared_gate"):
+            so = so * torch.sigmoid(h @ W(lay["base"] + "shared_expert_gate.weight").T)
+        out = out + so
+    return out.view(shape)
+
+
 def forward_train(W, embed, unembed, s: dict, ids: torch.Tensor) -> torch.Tensor:
     """ids [batch, tokens] → logits [batch, tokens, vocab].
 
     W(name) returns a weight; embed(ids) looks tokens up; unembed(h) scores the vocabulary.
-    s describes the architecture: n_layers, n_heads, n_kv, head_dim, eps, inv_freq, act, qk_norm, bias(name)."""
+    s describes the architecture: n_layers, n_heads, n_kv, head_dim, eps, inv_freq, act, qk_norm, bias(name);
+    for mixture-of-experts models also moe ({layer: layout}), moe_cfg ({k, norm_topk}) and optionally
+    on_route(layer, probs, chosen), called with every router decision."""
     B, T = ids.shape
     H, Hkv, hd = s["n_heads"], s["n_kv"], s["head_dim"]
     pos = torch.arange(T, dtype=torch.float32)
@@ -60,7 +101,12 @@ def forward_train(W, embed, unembed, s: dict, ids: torch.Tensor) -> torch.Tensor
         attn = torch.softmax(q @ k.transpose(-1, -2) / math.sqrt(hd) + causal, -1)
         x = x + lin((attn @ v).transpose(1, 2).reshape(B, T, H * hd), pre + "self_attn.o_proj")
         h = rms_norm(x, W(pre + "post_attention_layernorm.weight"), s["eps"])
-        x = x + lin(s["act"](lin(h, pre + "mlp.gate_proj")) * lin(h, pre + "mlp.up_proj"), pre + "mlp.down_proj")
+        lay = (s.get("moe") or {}).get(l)
+        if lay is not None:
+            cb = s.get("on_route")
+            x = x + moe_mlp(W, lay, s["moe_cfg"], s["act"], h, (lambda pr, sel, l=l: cb(l, pr, sel)) if cb else None)
+        else:
+            x = x + lin(s["act"](lin(h, pre + "mlp.gate_proj")) * lin(h, pre + "mlp.up_proj"), pre + "mlp.down_proj")
         if l in s.get("adapters", ()):            # a thin bottleneck layer after this block (adapt.py)
             x = x + s["act"](x @ W(pre + "adapter.down.weight").T) @ W(pre + "adapter.up.weight").T
     return unembed(rms_norm(x, W("model.norm.weight"), s["eps"]))
@@ -164,8 +210,11 @@ class TinyJob(Job):
 
     def __init__(self, name: str, out_dir: Path, text: str = "", corpus: str = "mixed", d_model: int = 96,
                  n_layers: int = 3, n_heads: int = 4, context: int = 64, vocab: int = 300, steps: int = 1500,
-                 batch: int = 32, lr: float = 3e-3, seed: int = 0, sample_prompt: str = "The capital of France is"):
+                 batch: int = 32, lr: float = 3e-3, seed: int = 0, sample_prompt: str = "The capital of France is",
+                 n_experts: int = 0, experts_per_token: int = 2, balance: float = 0.01):
         super().__init__()
+        if n_experts and not 1 <= experts_per_token <= n_experts:
+            raise ValueError("Experts per token must be between 1 and the number of experts.")
         if d_model % n_heads or (d_model // n_heads) % 2:
             raise ValueError("d_model must divide by the number of heads, and the head size must be even (RoPE pairs).")
         self.name, self.out = name, Path(out_dir)
@@ -173,13 +222,19 @@ class TinyJob(Job):
         self.corpus = "your text" if text.strip() else corpus
         self.cfg = {"d": int(d_model), "L": int(n_layers), "H": int(n_heads), "ctx": int(context), "vocab": int(vocab),
                     "ff": 2 * int(d_model)}
+        # Mixture of experts (n_experts > 0): every block's MLP becomes n_experts narrow MLPs plus a router. Each
+        # expert is as wide as the model, so with k = 2 a token gets the same compute as the dense MLP (2·d).
+        self.moe = ({"n": int(n_experts), "k": int(experts_per_token), "norm_topk": True, "ff": int(d_model)}
+                    if n_experts else None)
+        self.balance = float(balance)
+        self.usage: list[list[float]] = []       # per block: how often each expert was chosen lately
         self.steps, self.batch, self.lr, self.seed = int(steps), int(batch), float(lr), int(seed)
         self.sample_prompt = sample_prompt
         self.n_params = 0
 
     def extra(self):
         return {"name": self.name, "config": self.cfg, "n_params": self.n_params, "corpus": self.corpus,
-                "corpus_chars": len(self.text)}
+                "corpus_chars": len(self.text), "moe": self.moe, "expert_usage": self.usage}
 
     # the parameters, under the names every other model uses
     def init_params(self, V: int) -> dict[str, torch.Tensor]:
@@ -195,6 +250,13 @@ class TinyJob(Job):
             for n in ("q_proj", "k_proj", "v_proj"):
                 P[pre + f"self_attn.{n}.weight"] = rn(c["d"], c["d"])
             P[pre + "self_attn.o_proj.weight"] = rn(c["d"], c["d"], std=out_std)
+            if self.moe:
+                P[pre + "mlp.gate.weight"] = rn(self.moe["n"], c["d"])               # the router: one row per expert
+                for e in range(self.moe["n"]):
+                    P[pre + f"mlp.experts.{e}.gate_proj.weight"] = rn(self.moe["ff"], c["d"])
+                    P[pre + f"mlp.experts.{e}.up_proj.weight"] = rn(self.moe["ff"], c["d"])
+                    P[pre + f"mlp.experts.{e}.down_proj.weight"] = rn(c["d"], self.moe["ff"], std=out_std)
+                continue
             P[pre + "mlp.gate_proj.weight"] = rn(c["ff"], c["d"])
             P[pre + "mlp.up_proj.weight"] = rn(c["ff"], c["d"])
             P[pre + "mlp.down_proj.weight"] = rn(c["d"], c["ff"], std=out_std)
@@ -222,6 +284,19 @@ class TinyJob(Job):
         spec = {"n_layers": c["L"], "n_heads": c["H"], "n_kv": c["H"], "head_dim": c["d"] // c["H"], "eps": 1e-6,
                 "inv_freq": 1.0 / (10000.0 ** (torch.arange(0, c["d"] // c["H"], 2, dtype=torch.float32) / (c["d"] // c["H"]))),
                 "act": F.silu, "qk_norm": False, "bias": lambda name: False}
+        aux: list[torch.Tensor] = []
+        seen: dict[int, torch.Tensor] = {}
+        if self.moe:
+            def on_route(l, probs, chosen):
+                # Load balancing (Switch Transformer): E · Σ_e (share of tokens sent to e) · (mean router prob of e).
+                # It is smallest when tokens are spread evenly, so no expert is starved and none hogs the block.
+                n = self.moe["n"]
+                frac = torch.bincount(chosen.reshape(-1), minlength=n).float() / chosen.numel()
+                aux.append(n * (frac * probs.mean(0)).sum())
+                seen[l] = frac if l not in seen else 0.9 * seen[l] + 0.1 * frac
+            spec.update(moe={l: {"base": f"model.layers.{l}.mlp.", "router": f"model.layers.{l}.mlp.gate.weight",
+                                 "names": ("gate_proj", "up_proj", "down_proj")} for l in range(c["L"])},
+                        moe_cfg=self.moe, on_route=on_route)
         E = P["model.embed_tokens.weight"]
         fwd = lambda ids: forward_train(P.__getitem__, lambda i: E[i], lambda h: h @ E.T, spec, ids)     # noqa: E731
         opt = torch.optim.AdamW(P.values(), lr=self.lr, weight_decay=0.01, betas=(0.9, 0.95))
@@ -248,12 +323,19 @@ class TinyJob(Job):
             for grp in opt.param_groups:        # warm up, then cosine down
                 grp["lr"] = self.lr * (step / warm if step <= warm else 0.5 * (1 + math.cos(math.pi * (step - warm) / max(1, self.steps - warm))))
             x = batch_of(train, self.batch)
+            aux.clear()
             loss = next_token_loss(fwd(x), x)
+            if aux and self.balance > 0:
+                loss_total = loss + self.balance * torch.stack(aux).mean()
+            else:
+                loss_total = loss
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            loss_total.backward()
             torch.nn.utils.clip_grad_norm_(P.values(), 1.0)
             opt.step()
             self.step, self.seconds = step, time.time() - t0
+            if seen:
+                self.usage = [[round(float(v), 3) for v in seen[l]] for l in sorted(seen)]
             if step % every == 0 or step == 1 or step == self.steps:
                 self.losses.append([step, round(loss.item(), 4)])
                 with torch.no_grad():
@@ -271,7 +353,11 @@ class TinyJob(Job):
         tk.save(str(self.out / "tokenizer.json"))
         (self.out / "tokenizer_config.json").write_text(json.dumps({"eos_token": "<|endoftext|>", "bos_token": None}))
         (self.out / "config.json").write_text(json.dumps({
-            "architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_size": c["d"], "intermediate_size": c["ff"],
+            **({"architectures": ["TinyMoEForCausalLM"], "model_type": "tiny_moe", "intermediate_size": self.moe["ff"],
+                "num_experts": self.moe["n"], "num_experts_per_tok": self.moe["k"], "moe_intermediate_size": self.moe["ff"],
+                "norm_topk_prob": True} if self.moe else
+               {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "intermediate_size": c["ff"]}),
+            "hidden_size": c["d"],
             "num_hidden_layers": c["L"], "num_attention_heads": c["H"], "num_key_value_heads": c["H"], "vocab_size": V,
             "rms_norm_eps": 1e-6, "rope_theta": 10000.0, "max_position_embeddings": c["ctx"], "hidden_act": "silu",
             "tie_word_embeddings": True, "eos_token_id": 0,
@@ -304,7 +390,7 @@ class LoRAJob(Job):
         ad = loaded.adapter
         if ad is None or getattr(ad, "family", "") != "causal_lm":
             raise ValueError("Load a language model first.")
-        if ad.cfg.layer_types or ad.model.attn_gate:
+        if ad.cfg.layer_types or ad.model.attn_gate or ad.model.qk_norm_flat or ad.cfg.clip_qkv or ad.cfg.mla:
             raise ValueError("LoRA training here supports the standard attention models (Llama, Qwen2/2.5/3, SmolLM, "
                              "and models trained in the Training tab), not the hybrid Qwen3.5/3.6 blocks yet.")
         if ad.model.W.total_bytes > 6 * 2**30:
@@ -376,7 +462,8 @@ class LoRAJob(Job):
             w_out = m.unembed_weight().to(m.device, torch.float32)
             spec = {"n_layers": cfg.n_layers, "n_heads": cfg.n_heads, "n_kv": cfg.n_kv, "head_dim": cfg.head_dim,
                     "eps": cfg.eps, "inv_freq": m.inv_freq.float().cpu(), "act": m.act, "qk_norm": m.qk_norm,
-                    "bias": lambda name: m.has_bias and m.W.has(name + ".bias")}
+                    "bias": lambda name: m.has_bias and m.W.has(name + ".bias"),
+                    "moe": m.moe_layers, "moe_cfg": cfg.moe}
             embed = lambda ids: m.W.rows("model.embed_tokens.weight", ids.flatten().tolist()).float().view(*ids.shape, -1)   # noqa: E731
             data = [self.encode(ad, e) for e in self.examples]
             data = [(i, w) for i, w in data if len(i) >= 2 and sum(w[1:]) > 0]

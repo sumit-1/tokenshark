@@ -21,7 +21,7 @@ from .kvcache import KVCache
 from .runs import DATA
 
 VEC_DIR = DATA / "vectors"
-PARTS = ("resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "mlp_out", "resid_post")
+PARTS = ("resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "router", "mlp_out", "resid_post")
 
 
 # ======================================================================================
@@ -43,6 +43,8 @@ def activation(cap: dict, hook: str, pos: int) -> torch.Tensor:
         return kv.transpose(0, 1).float().cpu()
     t = (cap.get(hook) or {}).get(pos)
     if t is None:
+        if hook == "router":
+            raise ValueError(f"Block #{pos} of that run has no router scores (it is not a mixture-of-experts block).")
         if hook in ("attn_out", "mlp_out", "q", "k", "v") and not cap.get(hook):
             raise ValueError(f"That run did not keep {hook} (too long for the capture budget). Patch resid_pre or "
                              f"resid_post instead, or use a shorter prompt.")
@@ -227,6 +229,9 @@ def load_prefixes(plan, adapter, state_key: str = "") -> list[KVCache]:
 def _neuron_acts(cap: dict, pos: int) -> torch.Tensor:
     a = (cap.get("neurons") or {}).get(pos)
     if a is None:
+        if pos in (cap.get("moe_sel") or {}):
+            raise ValueError("This is a mixture-of-experts block: its neurons live inside experts, and each token only "
+                             "runs a few of them. Open the Experts tab to see which experts fired and what they wrote.")
         if not cap.get("neurons"):
             raise ValueError("This run did not keep neuron activations (too long for the budget, or it was made "
                              "before neurons were recorded). Use a shorter prompt and run again.")

@@ -59,9 +59,8 @@ class QwenImage21Plugin(ModelPlugin):
     features = ("lora", "quant", "image_maps", "image_lens", "image_stepper")
 
     ui_schema = {
-        "tabs": ["learn", "output_image", "debug_image", "ilens", "lora", "quant", "train", "runs"],
+        "tabs": ["output_image", "debug_image", "ilens", "lora", "quant", "train", "runs"],
         "train": ["tiny_image"],
-        "course": "image",
         "modality": "image",
         "texts": "dit",
         "block_term": "block",

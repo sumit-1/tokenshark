@@ -281,6 +281,9 @@ class TinyReq(BaseModel):
     lr: float = 3e-3
     seed: int = 0
     sample_prompt: str = "The capital of France is"
+    n_experts: int = 0               # > 0: a mixture-of-experts model (each block: this many small MLPs + a router)
+    experts_per_token: int = 2
+    balance: float = 0.01            # weight of the load-balancing loss
 
 
 class LoRATrainReq(BaseModel):
@@ -340,13 +343,14 @@ def train_tiny(req: TinyReq):
     if LOADED.spec and LOADED.spec["id"] == name:
         raise HTTPException(409, "That model is loaded right now. Unload it, or train under another name.")
     lim = dict(d_model=(16, 512), n_layers=(1, 12), n_heads=(1, 16), context=(8, 512), vocab=(260, 8000),
-               steps=(1, 100_000), batch=(1, 256))
+               steps=(1, 100_000), batch=(1, 256), n_experts=(0, 64), experts_per_token=(1, 64))
     for k, (lo, hi) in lim.items():
         if not lo <= getattr(req, k) <= hi:
             raise HTTPException(400, f"{k} must be between {lo} and {hi}.")
     try:
         job = train.TinyJob(name, out, req.text, req.corpus, req.d_model, req.n_layers, req.n_heads, req.context,
-                            req.vocab, req.steps, req.batch, req.lr, req.seed, req.sample_prompt)
+                            req.vocab, req.steps, req.batch, req.lr, req.seed, req.sample_prompt,
+                            req.n_experts, req.experts_per_token, req.balance)
     except ValueError as e:
         raise HTTPException(400, str(e))
     train.JOBS["tiny"] = job.start()
@@ -432,3 +436,172 @@ def train_stop(kind: str):
 @app.get("/api/train/corpus/preview")
 def corpus_preview(corpus: str = "mixed"):
     return JSONResponse({"corpus": corpus, "sample": train.synthetic_corpus(corpus, 12, seed=0)})
+
+
+# ---------------------------------------------------------------- mixture of experts
+def _moe_run(run_id: str):
+    r, cap = _llm_run(run_id)
+    if not LOADED.adapter.cfg.moe:
+        raise HTTPException(400, "The loaded model is not a mixture of experts. Load an MoE model (OLMoE, Qwen-MoE, "
+                                 "Mixtral …) or train a tiny one in the Train tab.")
+    return r, cap
+
+
+@app.get("/api/runs/{run_id}/experts")
+def experts_overview(run_id: str):
+    """Every MoE block of a run: expert usage, router entropy, each token's top expert."""
+    from . import moe
+    r, cap = _moe_run(run_id)
+    return _guard(moe.overview, LOADED.adapter, cap, r.plan.schedule, r.plan.schedule_nodes)
+
+
+@app.get("/api/runs/{run_id}/experts/block")
+def experts_block(run_id: str, pos: int, token: int = -1):
+    from . import moe
+    r, cap = _moe_run(run_id)
+    return _guard(moe.block_detail, LOADED.adapter, cap, r.plan.schedule, pos, token)
+
+
+@app.get("/api/runs/{run_id}/expert")
+def expert_one(run_id: str, pos: int, index: int):
+    from . import moe
+    r, cap = _moe_run(run_id)
+    return _guard(moe.expert_detail, LOADED.adapter, cap, r.plan.schedule, pos, index)
+
+
+@app.get("/api/experts/router")
+def experts_router(layer: int):
+    from . import moe
+    adapter, _ = _llm()
+    return _guard(moe.router_rows, adapter, layer)
+
+
+class ExpertSweepReq(BaseModel):
+    flow: dict
+    pos: int = -1                    # schedule position of the block; -1 = every MoE block
+    mode: str = "ban"                # ban: the router may not pick it · zero: it is picked but writes nothing
+
+
+@app.post("/api/experts/sweep")
+def experts_sweep(req: ExpertSweepReq):
+    """Remove one expert at a time and measure what the answer loses; see moe.iter_ablation."""
+    from . import moe
+    adapter, info = _llm()
+    if req.mode not in ("ban", "zero"):
+        raise HTTPException(400, "mode must be ban or zero")
+    plan = _compile(req.flow, info)
+    prefix = _load_prefixes(plan, adapter) if plan.params.get("prefix_cache") else None
+    return _task("analysis", f"expert ablation ({req.mode})", "expert_sweep",
+                 lambda: moe.iter_ablation(adapter, plan, req.pos, prefix, req.mode), weights=adapter.model.W)
+
+
+# ---------------------------------------------------------------- introspection
+class InjectReq(BaseModel):
+    flow: dict
+    concepts: list[str]
+    blocks: list[int]
+    strengths: list[float] = [1.0, 2.0, 4.0]
+    max_new_tokens: int = 40
+    positions: str = "all"
+
+
+@app.get("/api/introspect/defaults")
+def introspect_defaults():
+    from . import introspect as it
+    return {"prompt": it.INJECTION_PROMPT, "baselines": it.BASELINE_WORDS, "concept_template": it.CONCEPT_TEMPLATE,
+            "explain_template": it.EXPLAIN_TEMPLATE, "explain_prefill": it.EXPLAIN_PREFILL}
+
+
+@app.post("/api/introspect/inject")
+def introspect_inject(req: InjectReq):
+    """Concept-injection sweep (concepts × blocks × strengths, plus a control trial); see introspect.iter_injection."""
+    from . import introspect as it
+    adapter, info = _llm()
+    concepts = [c.strip() for c in req.concepts if c.strip()][:12]
+    if len(req.blocks) * len(req.strengths) * max(1, len(concepts)) > 600:
+        raise HTTPException(400, "That is more than 600 trials; choose fewer blocks, strengths or concepts.")
+    plan = _compile(req.flow, info)
+    return _task("analysis", f"concept injection ({len(concepts)} concept(s))", "inject",
+                 lambda: it.iter_injection(adapter, plan, concepts, req.blocks, req.strengths,
+                                           max(1, min(req.max_new_tokens, 120)), req.positions),
+                 weights=adapter.model.W)
+
+
+class ConceptVecReq(BaseModel):
+    flow: dict
+    word: str
+    pos: int
+    name: str = ""
+
+
+@app.post("/api/introspect/vector")
+def introspect_vector(req: ConceptVecReq):
+    """Save one concept vector to the vector library, so it can be wired into a block as a steering box."""
+    from . import introspect as it
+    adapter, info = _llm()
+    plan = _compile(req.flow, info)
+    if not req.word.strip() or not 0 <= req.pos < len(plan.schedule):
+        raise HTTPException(400, "Give a word and a block of the current flow.")
+    cv = _guard(it.concept_vectors, adapter, plan, [req.word.strip()])
+    v = cv["vectors"][req.word.strip()][req.pos]
+    return interp.VECTORS.save(v, req.name or f"concept: {req.word.strip()} @#{req.pos}",
+                               {"source": "concept", "word": req.word.strip(), "pos": req.pos, "hook": "resid_post",
+                                "model_id": LOADED.spec["id"], "resid_norm": round(cv["resid_norm"][req.pos], 3)})
+
+
+@app.get("/api/runs/{run_id}/meter")
+def concept_meter(run_id: str, vector: str, centre: bool = True):
+    """How strongly each block's residual stream points along a saved vector, at every token of a run."""
+    from . import introspect as it
+    r, cap = _llm_run(run_id)
+    try:
+        v, meta = interp.VECTORS.load(vector)
+    except KeyError:
+        raise HTTPException(404, "Unknown vector.")
+    return {**_guard(it.concept_meter, LOADED.adapter, cap, r.plan.schedule, v, centre, r.plan), "vector": meta}
+
+
+class RoundTripReq(BaseModel):
+    run_id: str
+    pos: int
+    token: int = -1
+    inject: int = 2
+    template: str = ""
+    prefill: str | None = None
+    max_new_tokens: int = 24
+    scale: float = 1.0
+    how: str = "last"                # reconstruct from the explanation's last token | mean over its tokens
+
+
+@app.post("/api/nla/roundtrip")
+def nla_roundtrip(req: RoundTripReq):
+    """activation → words → activation with nothing trained; see introspect.iter_round_trip."""
+    from . import introspect as it
+    adapter, _ = _llm()
+    r, cap = _llm_run(req.run_id)
+    tpl = req.template.strip() or it.EXPLAIN_TEMPLATE
+    if "{x}" not in tpl:
+        raise HTTPException(400, "The template needs a {x} placeholder.")
+    pre = it.EXPLAIN_PREFILL if req.prefill is None else req.prefill
+    return _task("analysis", f"activation → words → activation (#{req.pos})", "nla",
+                 lambda: it.iter_round_trip(adapter, r.plan, cap, req.pos, req.token, req.inject, tpl, pre,
+                                            max(1, min(req.max_new_tokens, 80)), req.scale,
+                                            "mean" if req.how == "mean" else "last"),
+                 weights=adapter.model.W)
+
+
+class ScoreTextReq(BaseModel):
+    run_id: str
+    pos: int
+    token: int = -1
+    text: str
+    how: str = "last"
+
+
+@app.post("/api/nla/score")
+def nla_score(req: ScoreTextReq):
+    """Score an explanation typed by the user: can the activation be rebuilt from it?"""
+    from . import introspect as it
+    r, cap = _llm_run(req.run_id)
+    return _guard(it.score_text, LOADED.adapter, r.plan, cap, req.pos, req.token, req.text,
+                  "mean" if req.how == "mean" else "last")

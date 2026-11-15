@@ -30,7 +30,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 |---|---|
 | ![Word Cloud Through Last 2 Blocks](docs/word-cloud-through-2.png) | ![Word Tracking & Direct Logit Attribution](docs/word-tracking-dla.png) |
 
-| Logit Lens Grid (Decoded Through Last 2 Blocks, Layers 11–23) | Output Tokens, Alternatives & Guided Course (`📖 Learn`) |
+| Logit Lens Grid (Decoded Through Last 2 Blocks, Layers 11–23) | Output Tokens & Alternatives |
 |---|---|
 | ![Logit Lens Through Last 2 Blocks](docs/logit-lens.png) | ![Output & Guided Lesson](docs/llm-flow-output.png) |
 
@@ -59,6 +59,40 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 | Activation Patching (Causal Tracing Heatmap) | MLP Neuron Hunting, Vocabulary Push & Clamping |
 |---|---|
 | ![Activation Patching](docs/activation-patching.png) | ![MLP Neurons](docs/neurons.png) |
+
+### Mixture-of-Experts Models: Routers & Experts You Can See and Change
+- **MoE engine (`tokenshark/llm.py`).** Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE and DeepSeek-V2 (latent attention, YaRN positions, shared experts, grouped routing) run in the same raw PyTorch engine, checked logit-for-logit against `transformers` on tiny models of each family (`tests/test_moe.py`) and on two real checkpoints streamed from disk — the 27 GB `Qwen1.5-MoE-A2.7B-Chat` and the 29 GB `DeepSeek-V2-Lite-Chat` (same top-1 token at every position, logit correlation above 0.999, identical expert routing). The layout (router, per-expert or stacked expert tensors, shared expert) is detected from the checkpoint. With `stream from disk`, only the experts a token is routed to are read.
+- **Experts on the flow graph.** Every MoE block shows one cell per expert, shaded by how many tokens of the last run used it; the newest token's experts are outlined. Click a cell to pick an expert and **ban**, **force** (`only`), **silence** or **amplify** it from the inspector. A block's inspector also sets *experts per token* (`k`) and the *router temperature*.
+- **`Experts` tab (`tokenshark/moe.py`).** Usage of every expert in every block with router entropy; each token coloured by its top expert; the router's full score distribution at a token; what each chosen expert *wrote* there, read as words, and its push for the answer (direct logit attribution per expert); per-expert pages (where it fired, what it writes, which experts it competes with); and a **knock-out sweep** that removes one expert at a time and reports the damage.
+- **Two new hooks, two new ops.** `router` (the scores before top-k: `ban`, `only`, scale, noise, and `patch` — copy *only the routing* from another run) and `expert_out` (one expert's output before it is weighted and summed). The `Patching` tab can sweep `router`.
+- **Train a tiny MoE (`Train` tab).** Set *Experts per block* > 0: the tiny model gets a router and experts with a load-balancing loss, and a live chart of each expert's share of tokens.
+
+| Experts on the graph + inspector | `Experts` tab: usage, routing, what each expert wrote |
+|---|---|
+| ![MoE flow](docs/moe-flow.png) | ![Experts tab](docs/moe-experts.png) |
+
+![Qwen1.5-MoE-A2.7B: 24 blocks × 60 experts, streamed from disk](docs/moe-real-experts.png)
+
+### Introspection Lab (`Introspection` tab, `tokenshark/introspect.py`)
+Classroom-scale versions of two lines of Anthropic research — [Signs of introspection in large language models](https://www.anthropic.com/research/introspection) and [Natural Language Autoencoders](https://www.anthropic.com/research/natural-language-autoencoders) — on whatever open model is loaded:
+- **Concept injection.** Build concept vectors by contrast, add them at chosen blocks and strengths while the model answers “Do you detect an injected thought?”, and grade the answers (detects → names, false positives on a control trial, coherence). One click wires any trial into the flow as a steering box.
+- **Concept meter.** How strongly every block's residual stream points along a concept, token by token — the measurement behind “think about X / don't think about X”.
+- **Activation → words → activation.** A natural-language autoencoder with nothing trained: the model verbalizes one of its own activations (patched into “what does ▢ mean?”), the explanation is read back, and the rebuilt activation is scored against a ceiling and a floor. Type your own explanation and try to beat it.
+
+Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it” with nothing injected); the tab is built to show how, with the controls that make it a measurement.
+
+| Concept injection sweep with control trial | Activation → words → activation |
+|---|---|
+| ![Concept injection](docs/introspection-injection.png) | ![Round trip](docs/introspection-nla.png) |
+
+
+### Multi-Turn Conversations
+- **Write the conversation so far.** The Prompt box has a list of *earlier turns* — user and assistant, in any order — in front of the prompt. With the chat template on each is wrapped as a real turn. Assistant turns are words you put in the model's mouth: plant “The capital of France is Lyon.” and ask a follow-up to watch the model stay consistent with something it never said.
+- **Continue after a run.** The Output tab shows the whole conversation and a box for the next message: **Send** moves the exchange into the earlier turns and runs the new turn, with every interceptor, bypass and code edit still in place. *Keep as earlier turns* does the same without running, so the model's answer can be edited first.
+- **Python.** `lab.flow(prompt, history=[{"role": "user", "content": …}, …])`, `flow.say("assistant", "…")`, `run.conversation`, and `run.reply("next message")`.
+
+![Conversation](docs/conversation.png)
+
 
 ### Editable KV Cache & Per-Layer Prompts
 - **Pre-RoPE KV cache (`tokenshark/kvcache.py`).** Keys are stored *before* RoPE with an explicit position per token, so a cache saved from one conversation can be prepended to another:
@@ -91,8 +125,8 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 ![Image Diffusion Flow, Cross-Attention Heatmap & Step Strip](docs/image-diffusion.png)
 
-### Guided Courses (`📖 Learn` Tab) & MCP Tutor Server
-- **Built-in interactive courses (`tokenshark/web/tabs/learn.js`).** Step-by-step guided lessons for both **Language Models** (*Tokens*, *One token at a time*, *Where the answer forms*, *Break it on purpose*, *Find where a fact lives*, *Steer and hunt neurons*, *A prompt only some layers can read*, *The model is a short program*, *Smaller, and your own*) and **Image Models** (*How an image model is built*, *From noise to picture*, *Steps and the noise schedule*, *How the picture reads the prompt*, *Guidance and the negative prompt*, *A different prompt for different blocks*, *Which blocks matter?*, *What each block thinks the picture is*, *Start from a picture*, *Step in and paint mid-way*, *Train your own image model*).
+### Course Website (Tokenshark Academy) & MCP Tutor Server
+- **Tokenshark Academy (`course/`, `python -m course`).** A complete course website: a primer for newcomers (*how language models work, and how we know*), ten modules that each run introduction → motivation → how it works → step-by-step lab → Python script → results → conclusion → questions, and an encyclopedia of the concepts behind them. Modules 9 and 10 cover mixture of experts and introspection.
 - **MCP Tutor Server (`tokenshark/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m tokenshark.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive Tokenshark as an interactive tutor. Every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
 
 ---
@@ -100,7 +134,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 ## For Educators / Coursework
 
 - **Readable, wrapper-free forward passes:** Every transformer and diffusion operation (`tokenshark/llm.py`, `tokenshark/sd.py`, `tokenshark/qimage.py`) is written in explicit, single-file PyTorch without `transformers` or `diffusers` at runtime, and any block opens in the browser as ~15 lines of editable Python.
-- **Turnkey classroom & self-paced labs (`📖 Learn` tab):** Includes 19 guided, interactive lessons covering tokenization, attention, logit lens, causal tracing (activation patching), steering vectors, neuron clamping, quantization, LoRA/adaptation, and flow-matching diffusion.
+- **Turnkey classroom & self-paced course (`python -m course`):** Ten modules with results and check-yourself questions covering tokenization, attention, logit lens, causal tracing, steering, neurons, KV caches, diffusion, training and adaptation, quantization, mixture of experts and introspection — plus a primer and an encyclopedia.
 - **Runs on standard student laptops:** Pure Python with zero Node.js/build steps (`run.bat` / `./run.sh`); 0.5B–1.7B models and from-scratch training run on CPU in seconds, while layer streaming (`disk` policy) lets students inspect 27B–70B models without a cluster.
 - **Reproducible homework & grading:** Students can save flows (`.json`), export any browser experiment, including patches, steering vectors, and custom block code into a standalone Python script (`tokenshark.api`), or pair with an AI teaching assistant via the built-in MCP tutor server.
 - **Adopt or cite in your syllabus:** Free for university courses, workshops, and training bootcamps. See [`CITATION.cff`](CITATION.cff) to cite Tokenshark in lecture notes, lab handouts, or academic publications.
@@ -142,13 +176,19 @@ Built-in catalog (`tokenshark/models.json` & `tokenshark/plugins/*.py`):
 | `qwen3-1.7b` | `causal_lm` (text → text) | 3.4 GB | 28 blocks, per-head QK RMSNorm |
 | `llama-3.2-1b-instruct` | `causal_lm` (text → text) | 2.5 GB | gated: accept the licence and run `hf auth login` |
 | `qwen3.6-27b` | `causal_lm` (text → text) | 55.0 GB | hybrid: 48 Gated DeltaNet (linear-attention) + 16 gated-attention blocks (64 total); stream from disk |
+| `olmoe-1b-7b-instruct` | `causal_lm` (text → text) | 12.9 GB | **mixture of experts**: 16 blocks × 64 experts, 8 per token; best first MoE model |
+| `qwen1.5-moe-a2.7b-chat` | `causal_lm` (text → text) | 26.7 GB | **MoE**: 60 experts (4 per token) + a shared expert |
+| `deepseek-v2-lite-chat` | `causal_lm` (text → text) | 29.3 GB | **MoE + latent attention (MLA)**: 64 experts (6 per token) + shared experts |
+| `qwen3-30b-a3b` | `causal_lm` (text → text) | 56.9 GB | **MoE**: 48 blocks × 128 experts, 8 per token; stream from disk |
+| `mixtral-8x7b-instruct` | `causal_lm` (text → text) | 87.0 GB | **MoE**: 8 large experts, 2 per token; stream from disk (slow) |
+| *your own* | `causal_lm` | < 0.01 GB | a tiny MoE trained in the `Train` tab in minutes — the quickest way to try the Experts tab |
 | `sd-turbo` | `stable_diffusion` (text → image) | 2.6 GB | UNet, 1–4 steps, no CFG; best first image model |
 | `tiny-sd` | `stable_diffusion` (text → image) | 1.0 GB | distilled SD 1.5 UNet |
 | `sd-1.5` | `stable_diffusion` (text → image) | 2.0 GB | classic UNet with CFG; reference model for cross-attention maps |
 | `qwen-image-2.1` | `qwen_image_21` (text → image) | 33.1 GB | single-stream DiT (32 blocks, 7B) + Qwen3-VL 8B text encoder + 64-ch Wan VAE |
 
 Click **+** next to the model picker to add any Hugging Face repo or local folder (`data/models.local.json`). The raw engine supports:
-- **Text (`causal_lm`):** Llama 2/3/3.1/3.2, Qwen2/2.5, Qwen3, Mistral, SmolLM, and **Qwen3.5/3.6 dense hybrids** (Gated DeltaNet linear attention + gated full attention). Supports Hugging Face `.safetensors` and Meta `consolidated.00.pth` + `params.json` + `tokenizer.model`.
+- **Text (`causal_lm`):** Llama 2/3/3.1/3.2, Qwen2/2.5, Qwen3, Mistral, SmolLM, **Qwen3.5/3.6 hybrids** (Gated DeltaNet linear attention + gated full attention), and **mixture-of-experts** models: Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE and DeepSeek-V2 (MLA). Supports Hugging Face `.safetensors` and Meta `consolidated.00.pth` + `params.json` + `tokenizer.model`.
 - **Image (`stable_diffusion` & `qwen_image_21`):** Stable Diffusion 1.x / 2.x UNets (including distilled variants) and Qwen-Image 2.1 single-stream DiT pipelines.
 
 ---
@@ -240,6 +280,7 @@ tests/
   test_oracles.py       raw LLM & SD engines vs transformers / diffusers on random weights; KV-cache maths
   test_features.py      stepper, bypass, word through-k decoding, DLA tracking, region locks, model discovery
   test_hybrid.py        Qwen3.5/3.6 hybrid Gated DeltaNet + gated attention vs transformers & cache roundtrips
+  test_moe.py           Mixtral / Qwen-MoE / OLMoE vs transformers, router & expert interceptors, expert sweep, tiny MoE, introspection
   test_qimage.py        raw Qwen-Image 2.1 vs diffusers QwenImage21Pipeline, Prompt-KV, sketch guide, ImageStepper
   test_lab.py           patching, steering, neurons, layer prompts, box code, quantization, adaptation, MCP, export
   test_routes.py        end-to-end HTTP API tests for all lab, quantization, code, and training endpoints

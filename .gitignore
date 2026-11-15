@@ -12,3 +12,4 @@ vision/
 build/
 dist/
 *.egg-info/
+/course

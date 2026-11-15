@@ -109,6 +109,63 @@ class RunResult:
     def neuron(self, block: int, index: int) -> dict:
         return interp.neuron_detail(self.lab.adapter, self.captures, self.plan.schedule, block, index)
 
+    # ---------------------------------------------------------------- conversations
+    @property
+    def conversation(self) -> list[dict]:
+        """Every turn of this run including the model's answer: [{"role", "content"}, …]."""
+        p = self.plan.params
+        turns = self.lab.adapter.turns(p)
+        return turns + [{"role": "assistant", "content": (p.get("prefill") or "") + self.text}]
+
+    def reply(self, text: str, **kw) -> "RunResult":
+        """Continue the conversation: this run's turns and answer become the history and `text` the next user
+        turn. Interceptors, bypasses and edited code of the flow stay in place. Keyword arguments as for lab.flow
+        (prefill, max_new_tokens, …)."""
+        fb = FlowBuilder(self.flow)
+        fb.prompt(prompt=text, prefill=kw.pop("prefill", ""), history=self.conversation,
+                  **{k: kw.pop(k) for k in ("system", "chat", "thinking") if k in kw})
+        if kw:
+            fb.sampler(**kw)
+        return self.lab.run(fb)
+
+    # ---------------------------------------------------------------- mixture of experts
+    def routing(self, block: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """(chosen experts [tokens, k], their weights [tokens, k], router scores [tokens, experts]) of an MoE block."""
+        from . import moe
+        sel, w = moe._need(self.captures, block)
+        return sel, w, (self.captures.get("router") or {}).get(block)
+
+    def experts(self, block: int | None = None, token: int = -1) -> dict:
+        """Expert usage of every MoE block (block=None), or one block's routing table and what each expert wrote."""
+        from . import moe
+        if block is None:
+            return moe.overview(self.lab.adapter, self.captures, self.plan.schedule, self.plan.schedule_nodes)
+        return moe.block_detail(self.lab.adapter, self.captures, self.plan.schedule, block, token)
+
+    def expert(self, block: int, index: int) -> dict:
+        from . import moe
+        return moe.expert_detail(self.lab.adapter, self.captures, self.plan.schedule, block, index)
+
+    # ---------------------------------------------------------------- introspection
+    def meter(self, vector, centre: bool = True) -> dict:
+        """How strongly each block's stream points along a vector (tensor, vector dict or id), token by token."""
+        from . import introspect
+        v = vector if isinstance(vector, torch.Tensor) else self.lab.load_vector(vector)
+        return introspect.concept_meter(self.lab.adapter, self.captures, self.plan.schedule, v, centre, self.plan)
+
+    def verbalize(self, block: int, token: int = -1, inject: int = 2, **kw) -> dict:
+        """activation → words → activation: the model explains one of its own activations, and the explanation is
+        scored by how well the activation can be rebuilt from it (introspect.iter_round_trip)."""
+        from . import introspect
+        out = None
+        for out in introspect.iter_round_trip(self.lab.adapter, self.plan, self.captures, block, token, inject, **kw):
+            pass
+        return out
+
+    def score_explanation(self, block: int, token: int, text: str) -> dict:
+        from . import introspect
+        return introspect.score_text(self.lab.adapter, self.plan, self.captures, block, token, text)
+
     def save_cache(self, name: str = "") -> dict:
         """Save this run's KV cache to the library (usable as a prefix in later runs and in the app)."""
         from .caches import LIBRARY
@@ -153,7 +210,7 @@ class Lab:
         """The model's default flow. Keyword arguments go to the prompt box (system, prefill, chat) or the sampler
         (max_new_tokens, temperature, top_k, top_p, seed)."""
         fb = FlowBuilder(self.plugin.default_flow(self.info))
-        pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt") if k in kw}
+        pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt", "history") if k in kw}
         if prompt is not None or pk:
             fb.prompt(prompt=prompt, **pk)
         if kw:
@@ -217,6 +274,44 @@ class Lab:
         v, meta = interp.vector_from_word(self.adapter, word, minus)
         return interp.VECTORS.save(v, name or (f"“{meta['word']}”" + (f" − “{meta['minus']}”" if minus else "")),
                                    {"model_id": self.model_id, "source": "word", **meta})
+
+    def concept_vector(self, word: str, block: int, name: str = "", flow=None) -> dict:
+        """Activation on "Tell me about <word>." minus the average over unrelated words, at one block; saved to
+        the vector library (introspect.concept_vectors)."""
+        from . import introspect
+        cv = introspect.concept_vectors(self.adapter, self.plan(flow or self.flow("x")), [word])
+        return interp.VECTORS.save(cv["vectors"][word][block], name or f"concept: {word} @#{block}",
+                                   {"model_id": self.model_id, "source": "concept", "word": word, "pos": block,
+                                    "hook": "resid_post", "resid_norm": round(cv["resid_norm"][block], 3)})
+
+    @torch.no_grad()
+    def inject(self, concepts: list[str], blocks: list[int], strengths: list[float] = (0.1, 0.2, 0.4),
+               prompt: str | None = None, max_new_tokens: int = 40, flow=None) -> dict:
+        """Concept-injection experiment: add each concept's vector at each block and strength while the model
+        answers "do you detect an injected thought?", and grade the answers against a control trial."""
+        from . import introspect
+        fb = flow or self.flow(prompt or introspect.INJECTION_PROMPT, chat=True)
+        out = None
+        for out in introspect.iter_injection(self.adapter, self.plan(fb), list(concepts), list(blocks), list(strengths),
+                                             max_new_tokens):
+            pass
+        return out
+
+    @torch.no_grad()
+    def expert_sweep(self, flow_or_prompt, block: int = -1, mode: str = "ban", **kw) -> dict:
+        """Remove one expert at a time (of one MoE block, or of all with block=-1) and measure the damage to the
+        next-token prediction (moe.iter_ablation)."""
+        from . import moe
+        fb = flow_or_prompt if isinstance(flow_or_prompt, (FlowBuilder, dict)) else self.flow(flow_or_prompt, **kw)
+        out = None
+        for out in moe.iter_ablation(self.adapter, self.plan(fb), block, None, mode):
+            pass
+        return out
+
+    def router(self, layer: int) -> dict:
+        """The router matrix of one MoE layer: similarity between experts' rows and the tokens each row attracts."""
+        from . import moe
+        return moe.router_rows(self.adapter, layer)
 
     def save_vector(self, v: torch.Tensor, name: str = "") -> dict:
         return interp.VECTORS.save(v, name, {"model_id": self.model_id, "source": "python"})

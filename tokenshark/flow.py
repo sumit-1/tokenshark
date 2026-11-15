@@ -23,7 +23,9 @@ from typing import Any
 # Plan data model (serialisable — stored in every run manifest)
 # --------------------------------------------------------------------------------------
 
-LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out", "mlp_neurons", "mlp_out", "resid_post", "weights"]
+LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out", "router", "expert_out", "mlp_neurons",
+             "mlp_out", "resid_post", "weights"]
+MOE_HOOKS = ["router", "expert_out"]     # only on mixture-of-experts blocks: the router's scores · one expert's output
 UNET_HOOKS = ["out", "skip", "both", "word"]
 DIT_HOOKS = ["out"]
 OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
@@ -33,8 +35,9 @@ OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
 #   project_out — remove (value=1) or scale the component along a saved direction (`ref` = vector id)
 #   clamp       — pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
 #   quantize    — round this tensor / block's weights / KV cache to `value` bits (1..16)
-LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp"]
-PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "mlp_out", "resid_post"]
+#   ban / only  — mixture-of-experts router: these experts can never be chosen / are the only ones that can
+LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "ban", "only"]
+PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "router", "mlp_out", "resid_post"]
 CODE_KINDS = ["embed", "block", "final_norm", "lm_head", "sampler"]     # boxes whose Python can be edited
 PREFIX_MODES = ["shift", "negative", "offset", "overwrite"]
 
@@ -55,6 +58,7 @@ class Intervention:
     src_positions: str = ""  # patch: token(s) to copy from in the source run ("" = the same token index)
     neurons: str = "all"     # which units of the activation's last axis the op touches — all | 12 | 3,7 | 0:64
     clamp: str = "max"       # clamp: max | min | value
+    experts: str = "all"     # mixture-of-experts hooks (router, expert_out, mlp_neurons): all | 3 | 0:8 | 1,5 | shared
 
 
 @dataclass
@@ -120,14 +124,17 @@ def default_llm_flow(info: dict) -> dict:
     for l, e in sorted(extra.items()):
         order.insert(order.index(int(e["after"])) + 1 if int(e["after"]) in order else len(order), l)
     blocks = [f"block_{i}" for i in order]
-    for nid, x, y in _snake(blocks, 0, 210, dy=140):
+    moe = info.get("moe") or {}
+    moe_layers, moe_n = set(moe.get("layers") or []), moe.get("n_experts")      # these boxes show their experts
+    for nid, x, y in _snake(blocks, 0, 210, dy=140 if not moe else 170):
         i = int(nid.split("_")[1])
         subs = info.get("block_subs") or []
         nodes.append(_node(nid, "block", f"Block {i} · new" if i in extra else f"Block {i}", x, y,
                            (f"added after block {extra[i]['after']} · " if i in extra else "")
-                           + (subs[i] if i < len(subs) else info.get("block_sub", "")), layer=i))
+                           + (subs[i] if i < len(subs) else info.get("block_sub", "")), layer=i,
+                           **({"moe": moe_n} if i in moe_layers else {})))
     rows = (n + 5) // 6
-    yb = 210 + rows * 140 + 10
+    yb = 210 + rows * (140 if not moe else 170) + 10
     nodes += [
         _node("final_norm", "final_norm", "Final norm", 0, yb, info.get("norm", "RMSNorm")),
         _node("lm_head", "lm_head", "LM head", 220, yb, "unembed → logits"),
@@ -206,6 +213,16 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
         top_p=min(1.0, max(0.0, _num(s.get("top_p"), 1.0))) or 1.0,
         seed=_num(s.get("seed"), 0, int), add_bos=bool(p.get("add_bos", True)),
     )
+    # Earlier turns of the conversation (the Prompt box's list): [{"role": "user" | "assistant", "content": …}].
+    hist = []
+    for m in p.get("history") or []:
+        role, content = (m or {}).get("role"), str((m or {}).get("content") or "")
+        if role not in ("user", "assistant"):
+            raise FlowError([{"message": "Conversation turns must be 'user' or 'assistant'.", "node": find_kind("input_prompt")[0]}])
+        if content.strip():
+            hist.append({"role": role, "content": content})
+    if hist:
+        params["history"] = hist
     # KV prefixes: a saved cache (kv_import), or text typed straight into a box (kv_text, a "layer prompt").
     kv = [nid for nid in find_kind("kv_import") + find_kind("kv_text")
           if any(e["source"] == nid and e["target"] in find_kind("embed") and e.get("targetHandle") == "cache"
@@ -244,6 +261,15 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
             code[nid] = {"kind": nodes[nid]["data"]["kind"], "source": str(nodes[nid]["data"]["code"])}
     if code:
         params["code"] = code
+    # Mixture-of-experts routing settings typed into a block box: experts per token, router temperature.
+    moe = {}
+    for nid in chain:
+        d = nodes[nid]["data"]
+        k, temp = _num(d.get("moe_k"), 0, int), _num(d.get("moe_temp"), 0.0)
+        if k > 0 or temp > 0:
+            moe[nid] = {"k": max(0, k), "temp": max(0.0, temp)}
+    if moe:
+        params["moe"] = moe
     return params
 
 
@@ -441,6 +467,23 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if hook == "weights" and op not in ("quantize", "scale", "zero", "add_noise"):
             err("Hook 'weights' supports quantize, scale, zero or add_noise.", e["source"])
             continue
+        moe_layers = (info.get("moe") or {}).get("layers") or []
+        on_moe = int(nodes[e["target"]]["data"].get("layer", -1)) in moe_layers
+        if (hook in MOE_HOOKS or op in ("ban", "only")) and not on_moe:
+            err(f"'{nodes[e['target']]['data'].get('label')}' is not a mixture-of-experts block: it has no router "
+                f"or experts to intercept.", e["source"])
+            continue
+        if op in ("ban", "only") and hook != "router":
+            err("ban / only act on the router: set the hook to 'router'.", e["source"])
+            continue
+        if hook == "expert_out" and op in ("patch", "clamp", "quantize"):
+            err("expert_out supports zero, scale, add_noise, mean, steer and project_out.", e["source"])
+            continue
+        try:
+            _expert_spec(str(src.get("experts") or "all"))
+        except ValueError as ex:
+            err(str(ex), e["source"])
+            continue
         if op == "quantize" and not 1 <= _num(src.get("value"), 4, int) <= 16:
             err("Quantize bits (value) must be between 1 and 16.", e["source"])
             continue
@@ -453,7 +496,7 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if op in ("steer", "project_out") and not src.get("ref"):
             err("Choose a steering vector (make one in the Steering tab).", e["source"])
             continue
-        if op in ("steer", "project_out") and hook in ("attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v"):
+        if op in ("steer", "project_out") and hook in ("attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v", "router"):
             err("A steering vector lives in the residual stream: use resid_pre, attn_out, mlp_out or resid_post.",
                 e["source"])
             continue
@@ -471,7 +514,8 @@ def compile_flow(flow: dict, info: dict) -> Plan:
                                 heads=str(src.get("heads") or "all"),
                                 region=str(src.get("region") or "") if shape.regions else "",
                                 ref=str(src.get("ref") or ""), src_positions=str(src.get("src_positions") or ""),
-                                neurons=str(src.get("neurons") or "all"), clamp=str(src.get("clamp") or "max")))
+                                neurons=str(src.get("neurons") or "all"), clamp=str(src.get("clamp") or "max"),
+                                experts=str(src.get("experts") or "all")))
         try:
             parse_index_spec(ivs[-1].neurons, 1_000_000)
             parse_index_spec(ivs[-1].steps if shape.steps else "all", 10_000)
@@ -484,6 +528,12 @@ def compile_flow(flow: dict, info: dict) -> Plan:
     params = shape.params(nodes, edges, find_kind, chain, caps)
     params["bypassed"] = sorted(bypassed)
     return Plan(family=family, schedule=schedule, schedule_nodes=chain, interventions=ivs, params=params)
+
+
+def _expert_spec(spec: str):
+    """Check an experts spec (all | 3 | 0:8 | 1,5 | shared) without knowing the number of experts."""
+    rest = ",".join(x.strip() for x in spec.lower().split(",") if x.strip() and x.strip() != "shared")
+    parse_index_spec(rest or "all", 1_000_000)
 
 
 def _round8(v: int) -> int:

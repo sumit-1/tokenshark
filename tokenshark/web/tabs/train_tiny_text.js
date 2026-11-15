@@ -15,8 +15,9 @@ function tinyTextSection(st, running) {
   const corpus = selectOf([['mixed', 'built-in: facts + counting'], ['facts', 'built-in: capitals and animal sounds'], ['counting', 'built-in: counting and sums'], ['own', 'my own text (paste below)']], f.corpus)
   corpus.onchange = () => { f.corpus = corpus.value; renderTab() }
   g.append(inp('name', 'Name', 150, 'text'), labelled('Text to learn', corpus), inp('d_model', 'Width d_model'), inp('n_layers', 'Blocks'), inp('n_heads', 'Heads'), inp('context', 'Context (tokens)'),
-    inp('vocab', 'Vocabulary'), inp('steps', 'Steps', 80), inp('batch', 'Batch'), inp('lr', 'Learning rate', 80), inp('sample_prompt', 'Test prompt', 190, 'text'))
+    inp('vocab', 'Vocabulary'), inp('n_experts', 'Experts per block (0 = ordinary MLP)', 50), inp('experts_per_token', 'Experts used per token', 50), inp('steps', 'Steps', 80), inp('batch', 'Batch'), inp('lr', 'Learning rate', 80), inp('sample_prompt', 'Test prompt', 190, 'text'))
   a.appendChild(g)
+  if (f.n_experts > 0) a.appendChild(el('div', { className: 'small' }, `<b>Mixture of experts.</b> Each block gets ${f.n_experts} small MLPs and a router that sends every token to ${f.experts_per_token} of them. Train it on the built-in “facts + counting” text, load it, and open the <b>Experts</b> tab: do number tokens and word tokens end up at different experts?`))
   if (f.corpus === 'own') { const ta = el('textarea', { rows: 4, placeholder: 'Paste a few thousand characters of text or more…', value: f.text }); ta.oninput = () => { f.text = ta.value }; a.appendChild(ta) }
   else { const pv = el('pre', { className: 'codehelp' }); a.appendChild(pv); GET(`/api/train/corpus/preview?corpus=${f.corpus}`).then(r => { pv.textContent = r.sample.trim() + '\n…' }).catch(() => {}) }
   const arow = el('div', { className: 'row' })

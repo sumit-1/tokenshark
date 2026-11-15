@@ -24,6 +24,7 @@ export async function renderPatch(p) {
     ['v', 'v — new value heads'],
     ['kv_k', 'kv_k — cached keys in KV cache'],
     ['kv_v', 'kv_v — cached values in KV cache'],
+    ...(S.info?.moe ? [['router', 'router — MoE: which experts the token was sent to']] : []),
   ], st.hook); hook.onchange = () => { st.hook = hook.value }
   const toks = selectOf([['all', 'every token'], ['last', 'last token only (fast)']], st.tokens); toks.onchange = () => { st.tokens = toks.value }
   const out = el('div')

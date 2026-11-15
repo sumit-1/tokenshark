@@ -18,7 +18,9 @@ export const LLM_HOOK_LABELS = [
   ['kv_v', 'kv_v — all cached values in this block’s KV cache'],
   ['attn_heads', 'attn_heads — each attention head’s output'],
   ['attn_out', 'attn_out — what attention writes to the stream'],
-  ['mlp_neurons', 'mlp_neurons — the MLP’s hidden neurons'],
+  ['router', 'router — MoE: the router’s score for each expert (ban / force experts, patch the routing)'],
+  ['expert_out', 'expert_out — MoE: what the chosen experts write, before it is weighted and summed'],
+  ['mlp_neurons', 'mlp_neurons — the MLP’s hidden neurons (MoE: of the experts you name)'],
   ['mlp_out', 'mlp_out — what the MLP writes to the stream'],
   ['resid_post', 'resid_post — the stream leaving the block'],
   ['weights', 'weights — this block’s weight matrices (per-block quantize / scale)'],
@@ -32,7 +34,7 @@ export const FIELDS = {
   input_prompt: modality => modality === 'image'
     ? [['prompt', 'Prompt', 'textarea'], ['negative_prompt', 'Negative prompt (what to steer away from; needs guidance > 1)', 'textarea'],
        ['switch_prompt', 'Switch to this prompt at a step (optional)', 'textarea'], ['switch_step', 'Switch at step', 'number']]
-    : [['system', 'System', 'textarea'], ['prompt', 'User / prompt', 'textarea'],
+    : [['system', 'System', 'textarea'], ['prompt', 'User / prompt (the newest turn)', 'textarea'],
        ['prefill', 'Assistant prefill (forced tokens)', 'textarea'], ['use_chat_template', 'Use chat template', 'checkbox'],
        ['thinking', 'Let the model think first (<think>…</think>, models that support it)', 'checkbox'],
        ['add_bos', 'Add BOS (no template)', 'checkbox']],
@@ -40,7 +42,9 @@ export const FIELDS = {
     ['top_k', 'Top-k (0 = off)', 'number'], ['top_p', 'Top-p (1 = off)', 'number'], ['seed', 'Seed', 'number']],
   noise: () => [['seed', 'Seed', 'number'], ['width', 'Width', 'number'], ['height', 'Height', 'number']],
   scheduler: () => [['steps', 'Steps', 'number'], ['guidance_scale', 'Guidance (CFG, ≤1 = off)', 'number']],
-  block: () => [['layer', 'Weights of layer', 'number'], ['label', 'Label', 'text']],
+  block: (m, n) => [['layer', 'Weights of layer', 'number'], ['label', 'Label', 'text'],
+    ...(n?.data.moe ? [['moe_k', `Experts per token (empty = the model’s own ${S.info?.moe?.top_k ?? ''}; 1 … ${n.data.moe})`, 'number'],
+      ['moe_temp', 'Router temperature (empty = 1; higher = flatter choice, lower = sharper)', 'number']] : [])],
   intervention: (modality, n) => {
     if (modality === 'image') return [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'],
       ['hook', 'Hook', 'select', S.info?.hooks || []], ['op', 'Operation', 'select', ['zero', 'scale', 'add_noise', 'mean', 'quantize']],
@@ -53,7 +57,9 @@ export const FIELDS = {
       ['op', 'Operation', 'select', [['zero', 'zero — remove it'], ['scale', 'scale — multiply by the value'], ['add_noise', 'add_noise — add random noise'],
         ['mean', 'mean — replace by the average over tokens'], ['quantize', 'quantize — round to N bits (1..16)'],
         ['patch', 'patch — copy it from another run'], ['steer', 'steer — add a steering vector'],
-        ['project_out', 'project_out — erase / project out a direction'], ['clamp', 'clamp — pin units to a fixed value']]]]
+        ['project_out', 'project_out — erase / project out a direction'], ['clamp', 'clamp — pin units to a fixed value'],
+        ...(S.info?.moe ? [['ban', 'ban — MoE router: these experts can never be chosen'], ['only', 'only — MoE router: only these experts can be chosen']] : [])]]]
+    if (['router', 'expert_out', 'mlp_neurons'].includes(hook) && S.info?.moe) f.push(['experts', `Experts (all | 3 | 0:8 | 1,5${S.info.moe.shared ? ' | shared' : ''})`, 'text'])
     if (op === 'patch') f.push(['ref', 'Copy from run (the “clean” run)', 'select', [['', '— choose a run —'], ...keepRef(runs, n.data.ref)]],
       ['src_positions', 'Take the source run’s token (empty = same token index; or last, or a number)', 'text'])
     if (op === 'steer' || op === 'project_out') f.push(['ref', 'Vector direction', 'select', [['', '— choose a vector —'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
@@ -64,7 +70,7 @@ export const FIELDS = {
     if (op === 'scale' || op === 'add_noise' || op === 'quantize') f.push(['value', op === 'scale' ? 'Scale factor' : op === 'quantize' ? 'Bit width (1..16 bits)' : 'Noise size σ (× the activation’s spread)', 'number'])
     if (hook !== 'weights') f.push(['positions', 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
     if (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook)) f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
-    if (hook !== 'weights') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
+    if (hook !== 'weights' && hook !== 'router') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
     if (op === 'add_noise') f.push(['seed', 'Noise seed', 'number'])
     return f
   },
@@ -88,10 +94,11 @@ export const FIELDS = {
 }
 
 export const KIND_HELP = {
-  input_prompt: 'Text that goes into the model. Prefill tokens are forced: the model continues from them.',
+  input_prompt: 'Text that goes into the model. The prompt is the newest user turn; earlier turns of the conversation (below) come before it. Prefill tokens are forced: the model continues from them.',
   tokenizer: 'Splits text into token ids.',
   embed: 'Looks up one vector per token: the start of the residual stream. The KV input on top prepends another conversation\'s cache.',
   block: 'One transformer block: RMSNorm → attention (q·kᵀ with RoPE) → add → RMSNorm → SwiGLU MLP → add. Rewire arrows to remove, repeat or reorder blocks. Wire an interceptor into the top port.',
+  block_moe: 'A mixture-of-experts block: RMSNorm → attention → add → RMSNorm → router → the few chosen experts → add. Instead of one wide MLP there are many narrow ones (the cells on the box). For each token the router scores every expert, runs only the best few and adds their outputs, weighted by their scores. Click a cell to pick an expert; ban it, force it, silence it or amplify it, then run again.',
   final_norm: 'RMSNorm before unembedding.', lm_head: 'Projects the residual stream onto the vocabulary → logits.',
   sampler: 'Turns logits into the next token; the loop arrow feeds it back in.',
   output_text: 'Generated text. Click a token to see the alternatives the model considered and fork from there.',
@@ -143,8 +150,41 @@ export function field(n, [key, label, type, options]) {
     flow.updateNodeData(n.id, { [key]: v })
     // these choices decide which other fields the box has
     if (n.data.kind === 'intervention' && ['op', 'hook', 'clamp'].includes(key)) renderInspector()
+    if (n.data.kind === 'intervention' && ['op', 'hook', 'experts', 'enabled'].includes(key)) hooks.refreshBadges?.()
   })
   wrap.append(el('span', { textContent: label }), input)
+  return wrap
+}
+
+// The conversation before the newest user turn: a list of user / assistant turns you can write by hand (to put
+// words in the model's mouth), reorder and delete. With the chat template on, each is wrapped as a real turn.
+export function historyEditor(n) {
+  const wrap = el('div', { className: 'sec' })
+  const hist = () => (n.data.history || []).map(m => ({ ...m }))
+  const save = (h, redraw) => { flow.updateNodeData(n.id, { history: h }); if (redraw) renderInspector() }
+  wrap.appendChild(el('h4', { textContent: `Earlier turns of the conversation (${hist().length})` }))
+  wrap.appendChild(el('div', { className: 'small', textContent: hist().length
+    ? 'These come before the prompt above, in this order. Assistant turns are words you put in the model’s mouth: it reads them as things it said.'
+    : 'None: the prompt above is the first message. Add turns to start in the middle of a conversation, or press “Continue the conversation” in the Output tab after a run.' }))
+  hist().forEach((m, i) => {
+    const row = el('div', { className: `turn ${m.role}` })
+    const role = el('select'); ['user', 'assistant'].forEach(r => role.appendChild(el('option', { value: r, textContent: r })))
+    role.value = m.role
+    role.onchange = () => { const h = hist(); h[i].role = role.value; save(h, true) }
+    const ta = el('textarea', { rows: 2, value: m.content })
+    ta.oninput = () => { const h = hist(); h[i].content = ta.value; save(h, false) }
+    const head = el('div', { className: 'row' })
+    head.append(role, btn('↑', () => { if (!i) return; const h = hist(); [h[i - 1], h[i]] = [h[i], h[i - 1]]; save(h, true) }, 'mini'),
+      btn('↓', () => { const h = hist(); if (i === h.length - 1) return; [h[i + 1], h[i]] = [h[i], h[i + 1]]; save(h, true) }, 'mini'),
+      btn('✕', () => { const h = hist(); h.splice(i, 1); save(h, true) }, 'mini'))
+    row.append(head, ta)
+    wrap.appendChild(row)
+  })
+  const add = el('div', { className: 'row' })
+  const push = role => { const h = hist(); h.push({ role, content: '' }); save(h, true) }
+  add.append(btn('+ user turn', () => push('user'), 'mini'), btn('+ assistant turn', () => push('assistant'), 'mini'))
+  if (hist().length) add.append(btn('Clear all', () => save([], true), 'mini ghost'))
+  wrap.appendChild(add)
   return wrap
 }
 
@@ -160,14 +200,17 @@ export function renderInspector() {
   }
   const k = n.data.kind
   box.appendChild(el('h3', { id: 'insp-title', textContent: n.data.label || k }))
-  box.appendChild(el('div', { className: 'help', textContent: HELP_SETS[texts()]?.[k] || KIND_HELP[k] || '' }))
+  box.appendChild(el('div', { className: 'help', textContent: (k === 'block' && n.data.moe ? KIND_HELP.block_moe : HELP_SETS[texts()]?.[k]) || KIND_HELP[k] || '' }))
   if (k === 'init_image') box.appendChild(startImageEditor(n))
   else (FIELDS[k]?.(schema().modality, n) || []).forEach(f => box.appendChild(field(n, f)))
+  if (k === 'input_prompt' && schema().modality !== 'image') box.appendChild(historyEditor(n))
   const actions = el('div', { className: 'row' })
   if (k === 'block') {
     actions.append(btn('Repeat block', () => duplicateBlock(n)), btn(n.data.bypass ? 'Restore' : 'Bypass', () => bypassBlock(n)),
       btn('+ Interceptor', () => addIntervention(n)), btn('Debug: run to here', () => debugRunTo(n)))
   }
+  if (k === 'block' && n.data.moe) hooks.expertPanel?.(n, box)
+  if (k === 'intervention' && ['router', 'expert_out'].includes(n.data.hook) && tabAvailable('experts')) actions.append(btn('Open Experts tab', () => setTab('experts')))
   if (k === 'intervention') {                // shortcuts to the tab that goes with this kind of interceptor, if the model has it
     if (n.data.op === 'patch' && tabAvailable('patch')) actions.append(btn('Find where to patch (sweep)', () => setTab('patch')))
     if ((n.data.op === 'steer' || n.data.op === 'project_out') && tabAvailable('steer')) actions.append(btn('Make a steering vector', () => setTab('steer')))

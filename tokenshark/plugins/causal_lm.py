@@ -1,4 +1,5 @@
-"""Plugin: Decoder-Only Causal Language Models (Llama, Qwen2/2.5/3/3.5/3.6, Mistral, SmolLM).
+"""Plugin: Decoder-Only Causal Language Models (Llama, Qwen2/2.5/3/3.5/3.6, Mistral, SmolLM) and their
+mixture-of-experts relatives (Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, DeepSeek-V2).
 
 What this plugin teaches:
 -------------------------
@@ -9,6 +10,10 @@ What this plugin teaches:
   through the last `k` blocks) onto the vocabulary to see when the model decides on the next word.
 - **Hybrid Linear + Full Attention (Qwen3.5/3.6)**: comparing Gated DeltaNet running-memory blocks
   against standard softmax attention blocks.
+- **Mixture of Experts**: blocks whose MLP is many small MLPs plus a router. The flow shows every expert; the
+  Experts tab reads the routing and what each expert writes; `router` / `expert_out` hooks ban, force, silence
+  or amplify experts. The layout is detected from the checkpoint, so any model that routes this way loads.
+- **Introspection**: concept injection, a concept meter, and activation → words → activation round trips.
 
 How to add a new Causal LM model:
 ---------------------------------
@@ -28,11 +33,12 @@ from . import ModelPlugin, register_plugin
 @register_plugin
 class CausalLMPlugin(ModelPlugin):
     id = "causal_lm"
-    name = "Decoder-Only Causal LM (Llama / Qwen / Mistral / SmolLM)"
+    name = "Decoder-Only Causal LM (Llama / Qwen / Mistral / SmolLM / MoE)"
     family = "causal_lm"
     summary = (
         "Autoregressive text generation with editable pre-RoPE KV cache, step-by-step block debugger, "
-        "logit lens, word clouds, direct logit attribution, and LoRA / fine-tune inspection."
+        "logit lens, word clouds, direct logit attribution, LoRA / fine-tune inspection, mixture-of-experts "
+        "routing tools and introspection experiments."
     )
 
     # Built-in models for this plugin (downloadable on first load into models/<id>/)
@@ -78,6 +84,62 @@ class CausalLMPlugin(ModelPlugin):
             "notes": "Gated on Hugging Face: accept the licence and run `hf auth login` first.",
         },
         {
+            "id": "olmoe-1b-7b-instruct",
+            "plugin": "causal_lm",
+            "family": "causal_lm",
+            "repo": "allenai/OLMoE-1B-7B-0924-Instruct",
+            "size_gb": 12.9,
+            "notes": (
+                "Mixture of experts: 16 blocks, each with 64 experts of which 8 run per token (about 1B of 7B "
+                "weights active). Best first MoE model. Fits a 16 GB GPU; otherwise 'stream from disk'."
+            ),
+        },
+        {
+            "id": "qwen1.5-moe-a2.7b-chat",
+            "plugin": "causal_lm",
+            "family": "causal_lm",
+            "repo": "Qwen/Qwen1.5-MoE-A2.7B-Chat",
+            "size_gb": 26.7,
+            "notes": (
+                "Mixture of experts: 24 blocks, 60 experts (4 per token) plus a shared expert every token uses. "
+                "~27 GB in bf16 — 'RAM → device' or 'stream from disk'."
+            ),
+        },
+        {
+            "id": "deepseek-v2-lite-chat",
+            "plugin": "causal_lm",
+            "family": "causal_lm",
+            "repo": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+            "size_gb": 29.3,
+            "notes": (
+                "Mixture of experts with latent attention (MLA): 27 blocks, 64 experts (6 per token) plus shared "
+                "experts; the first block is dense. ~29 GB — 'RAM → device' or 'stream from disk' (about a minute for a "
+                "short answer when streamed)."
+            ),
+        },
+        {
+            "id": "qwen3-30b-a3b",
+            "plugin": "causal_lm",
+            "family": "causal_lm",
+            "repo": "Qwen/Qwen3-30B-A3B",
+            "size_gb": 56.9,
+            "notes": (
+                "Mixture of experts: 48 blocks, 128 experts (8 per token): 30B weights, about 3B active. ~57 GB — "
+                "use 'stream from disk'; only the experts a token is routed to are read."
+            ),
+        },
+        {
+            "id": "mixtral-8x7b-instruct",
+            "plugin": "causal_lm",
+            "family": "causal_lm",
+            "repo": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "size_gb": 87.0,
+            "notes": (
+                "Mixture of experts: 32 blocks, 8 large experts (2 per token). ~87 GB — 'stream from disk' only, "
+                "and slow: each expert is 2.6 GB."
+            ),
+        },
+        {
             "id": "qwen3.6-27b",
             "plugin": "causal_lm",
             "family": "causal_lm",
@@ -95,11 +157,10 @@ class CausalLMPlugin(ModelPlugin):
     run_loop = "token_stepper"
 
     ui_schema = {
-        "tabs": ["learn", "output_text", "debug_text", "lens", "cloud", "attn", "patch", "steer", "neurons", "tokenizer",
+        "tabs": ["output_text", "debug_text", "lens", "cloud", "attn", "experts", "patch", "steer", "introspect", "neurons", "tokenizer",
                  "sampler", "kv", "lora", "quant", "train", "runs"],
         "palette_actions": ["intervention", "duplicate_block", "bypass_block", "kv_prefix", "kv_prefill", "code"],
         "train": ["tiny_text", "adapt"],
-        "course": "text",
         "modality": "text",
         "texts": "lm",
         "block_term": "block",

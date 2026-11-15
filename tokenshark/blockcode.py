@@ -22,6 +22,8 @@ Block      in:  x  [tokens, d_model]                     out: x   (optional: att
            rope(t, positions) rotate by position (RoPE)
            mask(scores)       0 where a token may look, -inf where it may not (later tokens, hidden prefixes)
            n_heads, n_kv_heads, head_dim, d_model, layer, position
+           mixture-of-experts blocks also have: expert(e) → (gate, up, down) matrices of expert e ("shared" for
+           the shared expert), top_k(probs, k) → (weights, chosen), n_experts, experts_per_token
 Embed      in:  ids (list of token ids)                   out: x
            embedding(ids)
 Final norm in:  x                                         out: x          W(name), rms_norm
@@ -180,7 +182,14 @@ def run_block(model, code: Code, p: int, l: int, x: torch.Tensor, cache, ctx):
         ok = model.attn_allowed(p, scores.shape[-2], scores.shape[-1], cache, scores.device)
         return torch.zeros(ok.shape, dtype=scores.dtype, device=scores.device).masked_fill(~ok, float("-inf"))
 
+    lay = model.moe_layers.get(l)
+    moe_names = {}
+    if lay is not None:
+        moe_names = {"expert": lambda e: model.expert_weights(lay, e), "top_k": lambda t, k: tuple(t.topk(int(k), -1)),
+                     "n_experts": lay["n"],
+                     "experts_per_token": int((ctx.store.get("moe_k") or {}).get(p) or cfg.moe["k"])}
     g = _exec(code, {
+        **moe_names,
         "x": x, "W": W, "rms_norm": lambda t, w: rms_norm(t, w, cfg.eps),
         "heads": lambda t: t.view(t.shape[0], -1, cfg.head_dim).transpose(0, 1),
         "unheads": lambda t: t.transpose(0, 1).reshape(t.shape[1], -1),
@@ -196,7 +205,15 @@ def run_block(model, code: Code, p: int, l: int, x: torch.Tensor, cache, ctx):
         attn = _tensor(g, "attn")
         if attn is not None and attn.ndim == 3 and attn.shape[1] == n and ctx.store.get("want_attn", True):
             ctx.store.setdefault("attn", {}).setdefault(p, []).append(attn.detach().to(torch.float16).cpu())
-        neurons = _tensor(g, "neurons", (n, cfg.inter))
+        chosen, weights, scores = _tensor(g, "chosen"), _tensor(g, "weights"), _tensor(g, "scores")
+        if lay is not None and chosen is not None and weights is not None and chosen.shape == weights.shape \
+                and chosen.ndim == 2 and chosen.shape[0] == n:          # the routing, for the Experts tab
+            st = ctx.store
+            st.setdefault("moe_sel", {}).setdefault(p, []).append(chosen.detach().to(torch.int16).cpu())
+            st.setdefault("moe_w", {}).setdefault(p, []).append(weights.detach().float().cpu())
+            if scores is not None and tuple(scores.shape) == (n, lay["n"]):
+                st.setdefault("router", {}).setdefault(p, []).append(scores.detach().float().clamp(min=-1e4).cpu())
+        neurons = _tensor(g, "neurons", (n, cfg.inter)) if lay is None else None
         if neurons is not None:
             model.note_units(p, "mlp_neurons", neurons, ctx)
             if ctx.store.get("want_neurons", False):
@@ -301,6 +318,10 @@ def default_code(kind: str, model=None, layer: int = 0) -> dict:
     if cfg.is_linear(layer):
         return {"code": None, "editable": False,
                 "reason": "This is a linear-attention (Gated DeltaNet) block; its code view is not written yet."}
+    if cfg.mla:
+        return {"code": None, "editable": False,
+                "reason": "This model's latent-attention (MLA) blocks have no code view yet; RawLLM._mla_attn in "
+                          "tokenshark/llm.py is the readable version."}
     if model.attn_gate:
         return {"code": None, "editable": False,
                 "reason": "This model's gated attention blocks have no code view yet."}
@@ -313,6 +334,40 @@ def default_code(kind: str, model=None, layer: int = 0) -> dict:
     act = {"silu": "silu", "gelu": "gelu", "relu": "relu"}.get(cfg.act, "silu")
     qk = ('q = rms_norm(q, W("self_attn.q_norm.weight"))            # this model normalises q and k per head\n'
           'k = rms_norm(k, W("self_attn.k_norm.weight"))\n') if model.qk_norm else ""
+    if model.qk_norm and model.qk_norm_flat:
+        qk = ('q = heads(rms_norm(unheads(q), W("self_attn.q_norm.weight")))   # normalised across all heads at once\n'
+              'k = heads(rms_norm(unheads(k), W("self_attn.k_norm.weight")))\n')
+    if cfg.clip_qkv:
+        qk += "".join(f"{t} = clip({t}, -{cfg.clip_qkv}, {cfg.clip_qkv})\n" for t in "qkv")
+    lay = model.moe_layers.get(layer)
+    if lay is None:
+        mlp = (f"# --- MLP: each token thinks on its own\n"
+               f'h = rms_norm(x, W("post_attention_layernorm.weight"))\n'
+               f"neurons = {act}({lin('h', 'mlp.gate_proj')}) * ({lin('h', 'mlp.up_proj')})\n"
+               f"mlp_out = {lin('neurons', 'mlp.down_proj')}\n"
+               f"x = x + mlp_out\n")
+    else:
+        router = lay["router"][len(pre):]
+        mlp = (f"# --- mixture of experts: instead of one wide MLP, {lay['n']} narrow ones. A router scores how well\n"
+               f"# each expert suits each token; only the best experts_per_token of them run for that token.\n"
+               f'h = rms_norm(x, W("post_attention_layernorm.weight"))\n'
+               f'scores = h @ W("{router}").T              # [tokens, experts]\n'
+               f"probs = softmax(scores)\n"
+               f"weights, chosen = top_k(probs, experts_per_token)   # [tokens, k]: how much, and which experts\n"
+               + ("weights = weights / weights.sum(-1, keepdim=True)   # the chosen weights are rescaled to sum to 1\n"
+                  if cfg.moe["norm_topk"] else "")
+               + f"mlp_out = zeros_like(x)\n"
+               f"for e in range(n_experts):\n"
+               f"    share = (weights * (chosen == e)).sum(-1, keepdim=True)   # this expert's weight per token (0 = not chosen)\n"
+               f"    if share.max() > 0:\n"
+               f"        gate, up, down = expert(e)                          # the expert's three matrices\n"
+               f"        mlp_out = mlp_out + share * (({act}(h @ gate.T) * (h @ up.T)) @ down.T)\n"
+               + ((f'gate, up, down = expert("shared")                       # one more expert that every token uses\n'
+                   f"shared_out = ({act}(h @ gate.T) * (h @ up.T)) @ down.T\n"
+                   + (f'shared_out = shared_out * sigmoid(h @ W("{router.replace("gate.weight", "shared_expert_gate.weight")}").T)\n'
+                      if lay["shared_gate"] else "")
+                   + "mlp_out = mlp_out + shared_out\n") if lay["shared"] else "")
+               + f"x = x + mlp_out\n")
     return _ok(
         f"# Block {layer}.  x is the residual stream coming in: one row per new token  [tokens, d_model]\n"
         f'h = rms_norm(x, W("input_layernorm.weight"))\n'
@@ -328,11 +383,7 @@ def default_code(kind: str, model=None, layer: int = 0) -> dict:
         f"attn_out = {lin('unheads(attn @ V)', 'self_attn.o_proj')}\n"
         f"x = x + attn_out\n"
         f"\n"
-        f"# --- MLP: each token thinks on its own\n"
-        f'h = rms_norm(x, W("post_attention_layernorm.weight"))\n'
-        f"neurons = {act}({lin('h', 'mlp.gate_proj')}) * ({lin('h', 'mlp.up_proj')})\n"
-        f"mlp_out = {lin('neurons', 'mlp.down_proj')}\n"
-        f"x = x + mlp_out\n"
+        + mlp
         + (f"\n# --- adapter: a thin layer added by training (squeeze to a few numbers, expand, add)\n"
            f'x = x + {act}(x @ W("adapter.down.weight").T) @ W("adapter.up.weight").T\n'
            if model.W.has(pre + "adapter.down.weight") else ""))

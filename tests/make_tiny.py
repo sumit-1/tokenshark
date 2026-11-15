@@ -65,16 +65,66 @@ def make_llm(out: Path, arch="qwen2", seed=0):
             for name, p in m.named_parameters():
                 if name.endswith(("A_log", "dt_bias")) or "norm" in name:
                     p.copy_(torch.randn_like(p) * 0.5)
+    elif arch in MOE_ARCHS:
+        m = _make_moe(arch, common)
     else:  # llama with llama3 rope scaling
         cfg = T.LlamaConfig(**common, rope_theta=500000.0, tie_word_embeddings=False,
                             rope_scaling={"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
                                           "high_freq_factor": 4.0, "original_max_position_embeddings": 64})
         m = T.LlamaForCausalLM(cfg)
     with torch.no_grad():   # random init is small; scale up so layers actually matter
-        for p in m.parameters():
-            if p.ndim == 2:
+        for name, p in m.named_parameters():
+            if p.ndim >= 2:
                 p.mul_(3.0)
+            if name.endswith((".gate.weight", "shared_expert_gate.weight")) and p.abs().max() == 0:
+                p.copy_(torch.randn_like(p) * 0.3)     # routers that start at zero would route every token alike
     m.save_pretrained(out, safe_serialization=True)
+    return m
+
+
+MOE_ARCHS = ("mixtral", "qwen2_moe", "qwen3_moe", "olmoe", "qwen3_5_moe", "deepseek_v2", "deepseek_v2_grouped")
+
+
+def _make_moe(arch, common):
+    """Tiny mixture-of-experts models, one per routing flavour the engine supports."""
+    import transformers as T
+    moe = dict(num_experts=6, num_experts_per_tok=2)
+    if arch == "mixtral":          # top-k weights always renormalised; experts named w1 / w2 / w3 on the hub
+        return T.MixtralForCausalLM(T.MixtralConfig(**common, num_local_experts=6, num_experts_per_tok=2,
+                                                    rope_theta=10000.0, tie_word_embeddings=False))
+    if arch == "qwen2_moe":        # attention biases, a shared expert behind a sigmoid gate, a dense layer in between
+        return T.Qwen2MoeForCausalLM(T.Qwen2MoeConfig(**common, **moe, moe_intermediate_size=48,
+                                                      shared_expert_intermediate_size=96, norm_topk_prob=False,
+                                                      decoder_sparse_step=1, mlp_only_layers=[1], rope_theta=10000.0))
+    if arch == "qwen3_moe":        # per-head QK norm, renormalised top-k
+        return T.Qwen3MoeForCausalLM(T.Qwen3MoeConfig(**common, **moe, head_dim=16, moe_intermediate_size=48,
+                                                      norm_topk_prob=True, rope_theta=10000.0))
+    if arch == "olmoe":            # QK norm over the whole projection, clipped q/k/v, top-k not renormalised
+        return T.OlmoeForCausalLM(T.OlmoeConfig(**{**common, "intermediate_size": 48}, **moe, norm_topk_prob=False,
+                                                clip_qkv=1.5, rope_theta=10000.0))
+    if arch.startswith("deepseek_v2"):   # latent attention, YaRN positions, a dense first layer, shared experts
+        grouped = arch.endswith("grouped")
+        kw = {k: v for k, v in common.items() if k != "num_key_value_heads"}
+        return T.DeepseekV2ForCausalLM(T.DeepseekV2Config(
+            **kw, n_routed_experts=6, num_experts_per_tok=2, n_shared_experts=2, moe_intermediate_size=48,
+            first_k_dense_replace=1, kv_lora_rank=24, q_lora_rank=20 if grouped else None, qk_nope_head_dim=12,
+            qk_rope_head_dim=8, v_head_dim=10, routed_scaling_factor=1.5 if grouped else 1.0,
+            topk_method="group_limited_greedy" if grouped else "greedy", n_group=3 if grouped else 1,
+            topk_group=2 if grouped else 1, tie_word_embeddings=False,
+            rope_parameters={"rope_type": "yarn", "rope_theta": 10000.0, "factor": 40, "beta_fast": 32, "beta_slow": 1,
+                             "mscale": 0.707, "mscale_all_dim": 0.707, "original_max_position_embeddings": 64}))
+    tc = dict(common, head_dim=32, layer_types=["linear_attention", "full_attention", "linear_attention", "full_attention"],
+              num_hidden_layers=4, linear_conv_kernel_dim=4, linear_key_head_dim=8, linear_value_head_dim=8,
+              linear_num_key_heads=2, linear_num_value_heads=4, tie_word_embeddings=False, **moe,
+              moe_intermediate_size=48, shared_expert_intermediate_size=64,
+              rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.25,
+                               "mrope_section": [2, 1, 1]})
+    tc.pop("intermediate_size", None)
+    m = T.Qwen3_5MoeForCausalLM(T.Qwen3_5MoeTextConfig(**tc))
+    with torch.no_grad():
+        for name, p in m.named_parameters():
+            if name.endswith(("A_log", "dt_bias")) or "norm" in name:
+                p.copy_(torch.randn_like(p) * 0.5)
     return m
 
 

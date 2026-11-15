@@ -8,6 +8,7 @@ import { addLayerPrompt } from '../tabs/kv.js'
 export async function resetFlow() {
   const g = await GET('/api/flow/default')
   flow.setGraph(g)
+  hooks.refreshBadges?.()             // boxes that show structure before any run (the experts of an MoE block)
   setTimeout(() => flow.fit(), 50)
   S.selected = null
   renderInspector()
@@ -47,7 +48,7 @@ export function addIntervention(target, world) {
   const at = target ? { x: target.position.x + 10, y: target.position.y - 105 } : (world || flow.center())
   const n = flow.addNode({ id: newId('iv'), type: 'box', position: at, data: {
     kind: 'intervention', label: 'Interceptor', hook: schema().default_hook || S.info?.hooks?.[0] || 'out', op: 'zero', value: 0,
-    positions: 'all', steps: 'all', heads: 'all', enabled: true } })
+    positions: 'all', steps: 'all', heads: 'all', experts: 'all', enabled: true } })
   if (target) flow.addEdge({ source: n.id, sourceHandle: 'out', target: target.id, targetHandle: 'mod' })
   flow.select({ type: 'node', id: n.id })
 }

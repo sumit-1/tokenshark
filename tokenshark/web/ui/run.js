@@ -103,6 +103,11 @@ export function applyRunBadges() {
       b[n.id] = `<span class="pk" style="background:rgba(255,140,40,${0.25 + 0.65 * ld.heat})" title="LoRA / fine-tune ΔW on layer ${ld.layer}: ${pct}% (${ld.modules.join(', ')})">ΔW ${pct}%</span>`
     }
   })
+  // Mixture-of-experts blocks show their experts as a strip of cells — before any run too, so the structure is
+  // visible; after a run each cell is shaded by how many tokens used that expert.
+  if (S.info?.moe) flow.nodes.forEach(n => {
+    if (n.data.kind === 'block' && n.data.moe) b[n.id] = (b[n.id] || '') + expertStrip(n, o?.block_stats?.[n.id]?.moe)
+  })
   if (!o) { flow.setBadges(b); return }
   for (const [nid, st] of Object.entries(o.block_stats || {})) {
     const prev = b[nid] || ''
@@ -121,6 +126,48 @@ export function applyRunBadges() {
   const embed = flow.nodes.find(n => n.data.kind === 'embed')
   if (embed && o.cache) b[embed.id] = `<span class="small">KV ${o.cache.n_tokens} tok${o.prefix_tokens ? ` (${o.prefix_tokens} imported)` : ''}</span>`
   flow.setBadges(b)
+}
+
+// Experts an interceptor box names for hook router (ban / only), as a Set of indices; null = none.
+export function routerEdits(node) {
+  const E = node.data.moe, banned = new Set(), only = new Set()
+  let hasOnly = false
+  for (const e of flow.edges) {
+    if (e.target !== node.id || e.targetHandle !== 'mod') continue
+    const d = flow.node(e.source)?.data
+    if (!d || d.kind !== 'intervention' || d.enabled === false || d.hook !== 'router' || !['ban', 'only'].includes(d.op)) continue
+    const ids = parseSpec(d.experts, E)
+    if (d.op === 'ban') ids.forEach(i => banned.add(i)); else { hasOnly = true; ids.forEach(i => only.add(i)) }
+  }
+  if (hasOnly) for (let i = 0; i < E; i++) if (!only.has(i)) banned.add(i)
+  return banned
+}
+
+export function parseSpec(spec, n) {
+  spec = String(spec ?? 'all').trim().toLowerCase()
+  if (!spec || spec === 'all' || spec === '*') return [...Array(n).keys()]
+  const out = new Set()
+  for (const part of spec.split(',')) {
+    const m = part.trim().match(/^(-?\d*)\s*:\s*(-?\d*)$/)
+    if (m) { const a = m[1] === '' ? 0 : +m[1], z = m[2] === '' ? n : +m[2]; for (let i = Math.max(0, a); i < Math.min(n, z); i++) out.add(i) }
+    else if (/^\d+$/.test(part.trim())) { const i = +part.trim(); if (i < n) out.add(i) }
+  }
+  return [...out]
+}
+
+export const expertHue = i => (i * 47) % 360          // a stable colour per expert index
+
+export function expertStrip(node, moe) {
+  const E = node.data.moe, per = E <= 16 ? E : E <= 64 ? 16 : 32, banned = routerEdits(node)
+  const mx = Math.max(...(moe?.usage || [0]), 1e-9)
+  const last = new Map((moe?.last || []).map(([e, w]) => [e, w]))
+  let h = `<div class="xstrip" style="grid-template-columns:repeat(${per},1fr)" title="The ${E} experts of this block. Brighter = used by more tokens of the last run; gold outline = used by the newest token; red = banned by an interceptor. Click one.">`
+  for (let i = 0; i < E; i++) {
+    const u = moe ? moe.usage[i] / mx : 0
+    const sel = S.moe?.node === node.id && S.moe?.expert === i
+    h += `<b data-pick="expert" data-expert="${i}" class="${last.has(i) ? 'now' : ''}${banned.has(i) ? ' ban' : ''}${sel ? ' sel' : ''}" title="expert ${i}${moe ? ` · used by ${(moe.usage[i] * 100).toFixed(0)}% of tokens` : ''}${last.has(i) ? ` · weight ${last.get(i)} at the newest token` : ''}${banned.has(i) ? ' · banned' : ''}" style="background:${moe ? `hsla(${expertHue(i)},70%,${14 + 46 * u}%,${0.35 + 0.65 * u})` : 'var(--line)'}"></b>`
+  }
+  return h + '</div>'
 }
 
 export const maxOf = (o, key) => Math.max(...Object.values(o.block_stats).map(s => s[key] || 0))

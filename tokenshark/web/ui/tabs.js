@@ -2,11 +2,12 @@
 // each tab registers itself (core.registerTab) and the loaded model's plugin lists the ones it supports.
 import { $, S, TABS, el, on, schema } from '../core.js'
 
-const NO_MODEL = ['learn', 'train', 'runs']          // what makes sense before a model is loaded
+const NO_MODEL = ['train', 'runs']          // what makes sense before a model is loaded
 
 // Tab modules available for the loaded model, in the plugin's order.
 export function tabList() {
-  return (S.info ? schema().tabs || [] : NO_MODEL).map(id => TABS[id]).filter(Boolean)
+  // A tab may declare `when(info)`: it is only offered for models that have what it shows (e.g. experts).
+  return (S.info ? schema().tabs || [] : NO_MODEL).map(id => TABS[id]).filter(t => t && (!t.when || !S.info || t.when(S.info)))
 }
 const nameOf = t => t.alias || t.id
 // The module behind a tab name ('output' → output_text or output_image, whichever this model has).
@@ -53,4 +54,4 @@ export function renderTab() {
 }
 
 // A different model has different tabs: rebuild the row, and leave a tab the new model doesn't have.
-on('model', () => { buildNav(); setTab(resolve(S.tab) ? S.tab : 'learn') })
+on('model', () => { buildNav(); setTab(resolve(S.tab) ? S.tab : (S.info ? 'output' : 'runs')) })

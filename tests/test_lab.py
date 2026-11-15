@@ -542,3 +542,36 @@ def test_per_block_interceptors_kv_quant_qkv_and_project_out(lab):
     assert float(c_zero.k[0].abs().max()) > 0.0
     assert float(c_zero.v[1].abs().max()) > 0.0
 
+
+
+def test_conversations_prefilled_and_continued(lab):
+    """Earlier turns typed into the Prompt box, and a run continued with a follow-up turn."""
+    tok = lab.adapter.tok
+    hist = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "The capital"}]
+    fb = lab.flow("of France", chat=True, max_new_tokens=3, history=hist)
+    plan = lab.plan(fb)
+    assert plan.params["history"] == hist
+    ids, _ = lab.adapter.build_ids(plan.params)
+    want = tok.apply_chat(hist + [{"role": "user", "content": "of France"}], True, lab.adapter.template_extra(plan.params))
+    assert ids == tok.encode(want, add_special=False)
+    r = lab.run(fb)
+    assert [m["role"] for m in r.conversation] == ["user", "assistant", "user", "assistant"] and r.conversation[-1]["content"] == r.text
+    # continuing: everything so far becomes history, the new text the next user turn
+    r2 = r.reply("is Paris", max_new_tokens=2)
+    assert r2.plan.params["history"] == r.conversation and r2.plan.params["prompt"] == "is Paris"
+    assert len(r2.conversation) == 6 and len(r2.token_ids) > len(r.token_ids)
+    # .say() appends turns; an empty prompt answers the last turn of the history
+    fb = lab.flow("", chat=True, max_new_tokens=1).say("user", "Hello").say("assistant", "Hi").say("user", "of France")
+    ids2, _ = lab.adapter.build_ids(lab.plan(fb).params)
+    assert ids2 == tok.encode(tok.apply_chat([{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"},
+                                             {"role": "user", "content": "of France"}], True, {"enable_thinking": False}), add_special=False)
+    # without the chat template the turns are plain lines in front of the prompt
+    raw, _ = lab.adapter.build_ids(lab.plan(lab.flow("of France", chat=False, history=hist)).params)
+    assert tok.decode(raw).endswith("User: Hello\nAssistant: The capital\nof France")
+    # a KV prefix still stands in for the system turn, with the whole conversation after it
+    bad = lab.flow("x", chat=True, history=[{"role": "narrator", "content": "y"}])
+    with pytest.raises(FlowError):
+        lab.plan(bad)
+    from tokenshark.export import run_script
+    r.model_id, r.label, r.sources = lab.model_id, "", {}
+    assert "history=[{'role': 'user'" in run_script(r, lambda _r: lab.plugin.default_flow(lab.info), lambda rid: None, {})

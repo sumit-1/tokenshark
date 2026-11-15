@@ -9,7 +9,7 @@ from __future__ import annotations
 from .flowbuild import walk_chain
 
 _IV_DEFAULTS = {"hook": "mlp_out", "op": "zero", "value": 0.0, "positions": "all", "heads": "all", "neurons": "all",
-                "src_positions": "", "clamp": "max", "seed": 0, "steps": "all"}
+                "src_positions": "", "clamp": "max", "seed": 0, "steps": "all", "experts": "all"}
 
 
 def _lit(v) -> str:
@@ -39,7 +39,8 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
     p, p0 = _node(flow, "input_prompt"), _node(default, "input_prompt")
     if p and p0:
         d = _diff(p["data"], p0["data"], {"prompt": "prompt", "system": "system", "prefill": "prefill",
-                                         "use_chat_template": "chat", "thinking": "thinking", "negative_prompt": "negative_prompt"})
+                                         "use_chat_template": "chat", "thinking": "thinking", "negative_prompt": "negative_prompt",
+                                         "history": "history"})
         if d:
             out.append(f"{var}.prompt({_kw(d)})")
     s, s0 = _node(flow, "sampler"), _node(default, "sampler")
@@ -114,7 +115,7 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
             else:
                 extra = [("hook", d.get("hook")), ("op", op)] + _diff(d, _IV_DEFAULTS, {
                     "value": "value", "positions": "positions", "heads": "heads", "neurons": "neurons", "seed": "seed",
-                    "steps": "steps"})
+                    "steps": "steps", "experts": "experts"})
                 out.append(f"{var}.intervene({tgt}, {_kw(extra)})")
         elif k == "kv_text" and e.get("targetHandle") == "cache" and d.get("enabled") is not False:
             extra = _diff(d, {"layers": "all", "mode": "shift", "as_system": False, "offset": 0},

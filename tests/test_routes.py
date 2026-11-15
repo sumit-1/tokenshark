@@ -95,7 +95,7 @@ def test_patch_sweep_and_patch_run(api):
     c = api
     clean = _run(c, _flow(c, "The capital of France is"), "clean")
     corrupt = _run(c, _flow(c, "The capital of Japan is"), "corrupt")
-    assert clean["outputs"]["captured"] == {"neurons": True, "parts": True}
+    assert clean["outputs"]["captured"]["neurons"] and clean["outputs"]["captured"]["parts"]
     sw = _task(c, c.post("/api/patch/sweep", json={"flow": corrupt["flow"], "source_run": clean["id"], "tokens": "last"}))
     assert len(sw["grid"]) == 3 and abs(sw["grid"][2][0] - 1) < 1e-3
     f = _flow(c, "The capital of Japan is")
