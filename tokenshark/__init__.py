@@ -1,7 +1,7 @@
 """Tokenshark — inspection-and-intervention engine for open-weight generative models."""
 from pathlib import Path as _Path
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def code_stamp() -> str:

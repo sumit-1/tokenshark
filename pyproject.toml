@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokenshark"
-version = "0.2.0"
+version = "0.2.1"
 description = "Open, inspect, edit, and train how open-weight language and image models compute in the browser, from pure Python."
 readme = "README.md"
 license = "MIT"
@@ -65,18 +65,13 @@ Repository = "https://github.com/sumit-1/tokenshark"
 [project.scripts]
 tokenshark = "tokenshark.__main__:main"
 tokenshark-mcp = "tokenshark.mcp_server:main"
-tokenshark-course = "course.app:main"
 
 [tool.setuptools.packages.find]
-include = ["tokenshark*", "course*"]
+include = ["tokenshark*"]
 
 [tool.setuptools.package-data]
 tokenshark = [
   "models.json",
   "web/*",
   "web/**/*",
-]
-course = [
-  "templates/*",
-  "static/*",
 ]

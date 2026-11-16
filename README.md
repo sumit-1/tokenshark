@@ -2,7 +2,7 @@
 
 Open, inspect, edit, and train how open-weight language and image models compute in the browser, from pure Python.
 
-![Tokenshark Walkthrough](docs/walkthrough.gif)
+![Tokenshark Walkthrough](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/walkthrough.gif)
 
 ---
 
@@ -10,7 +10,7 @@ Open, inspect, edit, and train how open-weight language and image models compute
 
 ### 1. Step Debugger & Token-by-Token Generation
 
-![Stepping through Qwen2.5-0.5B block by block and token by token](docs/stepping-demo.gif)
+![Stepping through Qwen2.5-0.5B block by block and token by token](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/stepping-demo.gif)
 
 Load `qwen2.5-0.5b-instruct` (24 blocks, GQA 14q/2kv, SwiGLU) and press **🐞 Step**:
 - **Block ▸** (`F10`) runs one box at a time; **Token ▸▸** (`F11`) runs to the next token prediction; right-click any block → *Debug: run to here*.
@@ -20,7 +20,7 @@ Load `qwen2.5-0.5b-instruct` (24 blocks, GQA 14q/2kv, SwiGLU) and press **🐞 S
 
 | Mid-Token Block Stepping (`Block 21` active) | Token Boundary Prediction (`Paris` at 30.2%) |
 |---|---|
-| ![Step Debugger Mid-Block](docs/step-debugger.png) | ![Step Debugger Prediction](docs/step-debugger-prediction.png) |
+| ![Step Debugger Mid-Block](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/step-debugger.png) | ![Step Debugger Prediction](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/step-debugger-prediction.png) |
 
 ### 2. Word Clouds & Direct Logit Attribution ("Through the Last 2 Blocks")
 
@@ -28,11 +28,11 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 | Word Clouds Decoded Through Last 2 Blocks | Word Tracking & Direct Logit Attribution (`"Paris"`) |
 |---|---|
-| ![Word Cloud Through Last 2 Blocks](docs/word-cloud-through-2.png) | ![Word Tracking & Direct Logit Attribution](docs/word-tracking-dla.png) |
+| ![Word Cloud Through Last 2 Blocks](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/word-cloud-through-2.png) | ![Word Tracking & Direct Logit Attribution](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/word-tracking-dla.png) |
 
 | Logit Lens Grid (Decoded Through Last 2 Blocks, Layers 11–23) | Output Tokens & Alternatives |
 |---|---|
-| ![Logit Lens Through Last 2 Blocks](docs/logit-lens.png) | ![Output Tokens & Alternatives](docs/llm-flow-output.png) |
+| ![Logit Lens Through Last 2 Blocks](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/logit-lens.png) | ![Output Tokens & Alternatives](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/llm-flow-output.png) |
 
 ---
 
@@ -48,7 +48,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 - **Editable box code (`tokenshark/blockcode.py`).** Click **View / edit code** on any language-model box (`Embed`, any `Block`, `Final norm`, `LM head`, `Sampler`) to view the exact ~15 lines of Python it runs (`rms_norm`, `heads`, `remember(k, v)`, `rope`, `softmax`, `silu`, `unembed`). Edit the code in the browser (e.g., remove `x = x + mlp_out`, scale `attn_out`, or write a custom sampler) and the engine executes your Python in place of the built-in step, capturing `print(...)` output.
 - **Export run as Python script (`tokenshark/export.py` & `tokenshark/api.py`).** Any run in the browser (including its block schedule, bypasses, patches, steering vectors, neuron clamps, layer prompts, LoRA/quantization overlays, and custom box code) can be exported as a standalone Python script using `from tokenshark.api import Lab`.
 
-![Editable Box Code](docs/editable-box-code.png)
+![Editable Box Code](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/editable-box-code.png)
 
 ### Mechanistic Interpretability Lab Tools
 - **Activation patching / causal tracing (`Patching` tab).** Run a clean prompt (`"The capital of France is"`) and sweep a corrupted prompt (`"The capital of Japan is"`) across every `(block, token)` pair, copying one activation (`resid_post`, `resid_pre`, `attn_out`, or `mlp_out`) at a time to locate where the model stores a fact. Click any heatmap cell to wire that exact patch into the flow.
@@ -58,7 +58,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 | Activation Patching (Causal Tracing Heatmap) | MLP Neuron Hunting, Vocabulary Push & Clamping |
 |---|---|
-| ![Activation Patching](docs/activation-patching.png) | ![MLP Neurons](docs/neurons.png) |
+| ![Activation Patching](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/activation-patching.png) | ![MLP Neurons](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/neurons.png) |
 
 ### Mixture-of-Experts Models: Routers & Experts You Can See and Change
 - **MoE engine (`tokenshark/llm.py`).** Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE and DeepSeek-V2 (latent attention, YaRN positions, shared experts, grouped routing) run in the same raw PyTorch engine, checked logit-for-logit against `transformers` on tiny models of each family (`tests/test_moe.py`) and on two real checkpoints streamed from disk — the 27 GB `Qwen1.5-MoE-A2.7B-Chat` and the 29 GB `DeepSeek-V2-Lite-Chat` (same top-1 token at every position, logit correlation above 0.999, identical expert routing). The layout (router, per-expert or stacked expert tensors, shared expert) is detected from the checkpoint. With `stream from disk`, only the experts a token is routed to are read.
@@ -67,16 +67,16 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 - **Custom routing.** Take the router's job yourself: in a block's inspector build a *custom route* — pick experts and give each a weight (`3=0.7, 5=0.3`; a slider per expert; an empty weight keeps the router's own score; negative weights subtract an expert's write) — for every token or only some. Blocks with a **shared expert** have a switch to turn it off. From Python: `flow.route(block, {3: 0.7, 5: 0.3})`, `flow.shared_expert(block, False)`.
 - **Edits carry through every calculation.** Whatever you change — a banned expert, a custom route, a steering box, edited code — is part of the logit lens, word clouds and word tracking (including *decode through the last k blocks*, which re-runs those blocks as edited), of the patching and knock-out sweeps, and of the introspection experiments, not only of the run itself.
 
-![Custom route](docs/moe-custom-route.png)
+![Custom route](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/moe-custom-route.png)
 
 - **Two new hooks, three new ops.** `router` (the scores before top-k: `ban`, `only`, `route`, scale, noise, and `patch` — copy *only the routing* from another run) and `expert_out` (one expert's output before it is weighted and summed). The `Patching` tab can sweep `router`.
 - **Train a tiny MoE (`Train` tab).** Set *Experts per block* > 0: the tiny model gets a router and experts with a load-balancing loss, and a live chart of each expert's share of tokens.
 
 | Experts on the graph + inspector | `Experts` tab: usage, routing, what each expert wrote |
 |---|---|
-| ![MoE flow](docs/moe-flow.png) | ![Experts tab](docs/moe-experts.png) |
+| ![MoE flow](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/moe-flow.png) | ![Experts tab](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/moe-experts.png) |
 
-![Qwen1.5-MoE-A2.7B: 24 blocks × 60 experts, streamed from disk](docs/moe-real-experts.png)
+![Qwen1.5-MoE-A2.7B: 24 blocks × 60 experts, streamed from disk](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/moe-real-experts.png)
 
 ### Introspection Lab (`Introspection` tab, `tokenshark/introspect.py`)
 Classroom-scale versions of two lines of Anthropic research — [Signs of introspection in large language models](https://www.anthropic.com/research/introspection) and [Natural Language Autoencoders](https://www.anthropic.com/research/natural-language-autoencoders) — on whatever open model is loaded:
@@ -88,7 +88,7 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 
 | Concept injection sweep with control trial | Activation → words → activation |
 |---|---|
-| ![Concept injection](docs/introspection-injection.png) | ![Round trip](docs/introspection-nla.png) |
+| ![Concept injection](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/introspection-injection.png) | ![Round trip](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/introspection-nla.png) |
 
 
 ### Multi-Turn Conversations
@@ -96,7 +96,7 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 - **Continue after a run.** The Output tab shows the whole conversation and a box for the next message: **Send** moves the exchange into the earlier turns and runs the new turn, with every interceptor, bypass and code edit still in place. *Keep as earlier turns* does the same without running, so the model's answer can be edited first.
 - **Python.** `lab.flow(prompt, history=[{"role": "user", "content": …}, …])`, `flow.say("assistant", "…")`, `run.conversation`, and `run.reply("next message")`.
 
-![Conversation](docs/conversation.png)
+![Conversation](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/conversation.png)
 
 
 ### Editable KV Cache & Per-Layer Prompts
@@ -118,9 +118,9 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 
 | In-Browser Training (Tiny LLM, Flow-Matching Image & Adaptation) | LoRA / Fine-Tune Weight Diff Inspector |
 |---|---|
-| ![Train Tab](docs/train-tab.png) | ![LoRA Inspector](docs/lora-inspector.png) |
+| ![Train Tab](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/train-tab.png) | ![LoRA Inspector](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/lora-inspector.png) |
 
-![Quantization Error & Precision Comparison](docs/quantization.png)
+![Quantization Error & Precision Comparison](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/quantization.png)
 
 ### Image Generation: Stable Diffusion UNets & Qwen-Image 2.1 Single-Stream DiT
 - **Stable Diffusion UNet (`tokenshark/sd.py`) & Qwen-Image 2.1 DiT (`tokenshark/qimage.py`).** Full support for both multi-scale UNet models (`sd-turbo`, `tiny-sd`, `sd-1.5`) and `qwen-image-2.1` (32-block 7B single-stream DiT + 36-block Qwen3-VL 8B text encoder + 64-channel 16× Wan VAE).
@@ -128,7 +128,7 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 - **Image lens ("Decode through last k blocks", `ilens` tab).** Project any intermediate DiT block's image tokens into pixel space (via fast fitted linear preview or exact VAE decode), either directly or after jumping through the last `k` blocks.
 - **Block contributions (`contrib` tab).** See *where* each stage writes (residual update heatmap), *what* it encodes (3-component PCA RGB map), and *how much it matters* (ablation diff and ranking), plus a two-row per-step strip showing the noisy input `x_t` and predicted `x̂₀` at every step.
 
-![Image Diffusion Flow, Cross-Attention Heatmap & Step Strip](docs/image-diffusion.png)
+![Image Diffusion Flow, Cross-Attention Heatmap & Step Strip](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/image-diffusion.png)
 
 ### MCP Tutor Server
 - **MCP Tutor Server (`tokenshark/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m tokenshark.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive Tokenshark as an interactive tutor. Every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
@@ -140,7 +140,7 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 - **Readable, wrapper-free forward passes:** Every transformer and diffusion operation (`tokenshark/llm.py`, `tokenshark/sd.py`, `tokenshark/qimage.py`) is written in explicit, single-file PyTorch without `transformers` or `diffusers` at runtime, and any block opens in the browser as ~15 lines of editable Python.
 - **Runs on standard student laptops:** Pure Python with zero Node.js/build steps (`run.bat` / `./run.sh`); 0.5B–1.7B models and from-scratch training run on CPU in seconds, while layer streaming (`disk` policy) lets students inspect 27B–70B models without a cluster.
 - **Reproducible homework & grading:** Students can save flows (`.json`), export any browser experiment, including patches, steering vectors, and custom block code into a standalone Python script (`tokenshark.api`), or pair with an AI teaching assistant via the built-in MCP tutor server.
-- **Adopt or cite in your syllabus:** Free for university courses, workshops, and training bootcamps. See [`CITATION.cff`](CITATION.cff) to cite Tokenshark in lecture notes, lab handouts, or academic publications.
+- **Adopt or cite in your syllabus:** Free for university courses, workshops, and training bootcamps. See [`CITATION.cff`](https://github.com/sumit-1/tokenshark/blob/main/CITATION.cff) to cite Tokenshark in lecture notes, lab handouts, or academic publications.
 
 ---
 
