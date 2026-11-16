@@ -27,7 +27,6 @@ itself from that:
 | `tabs` | results tabs, in order | `registerTab({ id })` in `tabs/*.js` |
 | `palette_actions` | flow-editing buttons | `data-action="…"` in `index.html` |
 | `train` | sections of the Train tab | `sections` in `tabs/train.js` |
-| `course` | guided course on the Learn tab | `COURSES` in `tabs/learn.js` |
 | `step_debugger` | whether the header's step buttons apply | — |
 
 A tab can also say when it applies: `registerTab({ ..., when: info => !!info.moe })` hides the Experts tab for

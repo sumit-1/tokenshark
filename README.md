@@ -32,7 +32,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 | Logit Lens Grid (Decoded Through Last 2 Blocks, Layers 11–23) | Output Tokens & Alternatives |
 |---|---|
-| ![Logit Lens Through Last 2 Blocks](docs/logit-lens.png) | ![Output & Guided Lesson](docs/llm-flow-output.png) |
+| ![Logit Lens Through Last 2 Blocks](docs/logit-lens.png) | ![Output Tokens & Alternatives](docs/llm-flow-output.png) |
 
 ---
 
@@ -42,7 +42,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 - **Flow editor.** Each model is drawn as boxes and arrows (`prompt → tokenizer → embed → blocks → norm → head → sampler`, `prompt → CLIP → UNet stages → VAE`, or `prompt → Qwen3-VL → 32 single-stream DiT blocks → Wan VAE`). Re-wire arrows to remove, repeat, or re-order transformer blocks; wire intervention boxes into a block's top port to zero, scale, add noise, mean-ablate, patch, steer, or clamp an activation.
 - **Bypass keeps the block.** A bypassed block stays on the canvas, struck through; the residual stream skips it. Restore it from the right-click menu or the inspector.
 - **Raw PyTorch engine.** No `transformers`, no `diffusers` at runtime. Every matmul is in `tokenshark/llm.py`, `tokenshark/sd.py`, and `tokenshark/qimage.py`, small enough to read in class.
-- **Declarative plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`) that declares its `ui_schema` (tabs, palette actions, courses, training sections) and backend `features`.
+- **Declarative plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`) that declares its `ui_schema` (tabs, palette actions, training sections) and backend `features`.
 
 ### Editable Box Code & Export to Python Script
 - **Editable box code (`tokenshark/blockcode.py`).** Click **View / edit code** on any language-model box (`Embed`, any `Block`, `Final norm`, `LM head`, `Sampler`) to view the exact ~15 lines of Python it runs (`rms_norm`, `heads`, `remember(k, v)`, `rope`, `softmax`, `silu`, `unembed`). Edit the code in the browser (e.g., remove `x = x + mlp_out`, scale `attn_out`, or write a custom sampler) and the engine executes your Python in place of the built-in step, capturing `print(...)` output.
@@ -130,8 +130,7 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 
 ![Image Diffusion Flow, Cross-Attention Heatmap & Step Strip](docs/image-diffusion.png)
 
-### Course Website (Tokenshark Academy) & MCP Tutor Server
-- **Tokenshark Academy (`course/`, `python -m course`).** A complete course website: a primer for newcomers (*how language models work, and how we know*), ten modules that each run introduction → motivation → how it works → step-by-step lab → Python script → results → conclusion → questions, and an encyclopedia of the concepts behind them. Modules 9 and 10 cover mixture of experts and introspection.
+### MCP Tutor Server
 - **MCP Tutor Server (`tokenshark/mcp_server.py`).** Zero-dependency stdio MCP server (`python -m tokenshark.mcp_server`) that lets Claude Desktop, Claude Code, or Cursor drive Tokenshark as an interactive tutor. Every run, intervention, and patching sweep performed by the tutor appears live in the student's browser.
 
 ---
@@ -139,7 +138,6 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 ## For Educators / Coursework
 
 - **Readable, wrapper-free forward passes:** Every transformer and diffusion operation (`tokenshark/llm.py`, `tokenshark/sd.py`, `tokenshark/qimage.py`) is written in explicit, single-file PyTorch without `transformers` or `diffusers` at runtime, and any block opens in the browser as ~15 lines of editable Python.
-- **Turnkey classroom & self-paced course (`python -m course`):** Ten modules with results and check-yourself questions covering tokenization, attention, logit lens, causal tracing, steering, neurons, KV caches, diffusion, training and adaptation, quantization, mixture of experts and introspection — plus a primer and an encyclopedia.
 - **Runs on standard student laptops:** Pure Python with zero Node.js/build steps (`run.bat` / `./run.sh`); 0.5B–1.7B models and from-scratch training run on CPU in seconds, while layer streaming (`disk` policy) lets students inspect 27B–70B models without a cluster.
 - **Reproducible homework & grading:** Students can save flows (`.json`), export any browser experiment, including patches, steering vectors, and custom block code into a standalone Python script (`tokenshark.api`), or pair with an AI teaching assistant via the built-in MCP tutor server.
 - **Adopt or cite in your syllabus:** Free for university courses, workshops, and training bootcamps. See [`CITATION.cff`](CITATION.cff) to cite Tokenshark in lecture notes, lab handouts, or academic publications.
