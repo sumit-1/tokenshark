@@ -1,6 +1,7 @@
 :root {
   --bg: #0f1216; --panel: #161a20; --panel2: #1c2128; --line: #2a313b; --text: #dde3ea; --muted: #8b96a5;
   --accent: #5b9dff; --ok: #3ecf8e; --bad: #ff6b6b; --warn: #f5b84a; --mod: #ff9f43; --loop: #a78bfa; --skip: #4fd1c5;
+  --kv: #4fd1c5;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 13px;
 }
 * { box-sizing: border-box; }
@@ -29,7 +30,7 @@ main { flex: 1; display: grid; grid-template-columns: 150px 1fr 340px; min-heigh
 .palette h4 { margin: 8px 0 2px; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
 .legend { margin-top: 12px; color: var(--muted); font-size: 11px; display: grid; gap: 4px; }
 .lg { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--accent); margin-right: 6px; vertical-align: middle; }
-.lg.mod { border-color: var(--mod); } .lg.loop { border-top-style: dashed; border-color: var(--loop); } .lg.skip { border-top-style: dotted; border-color: var(--skip); }
+.lg.kv { border-color: var(--kv); } .lg.mod { border-color: var(--mod); } .lg.loop { border-top-style: dashed; border-color: var(--loop); } .lg.skip { border-top-style: dotted; border-color: var(--skip); }
 .center { position: relative; display: flex; flex-direction: column; min-width: 0; }
 #canvas { flex: 1; }
 .plan { padding: 5px 12px; border-top: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--muted); }
@@ -93,6 +94,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .fe-edge .line { fill: none; stroke: currentColor; stroke-width: 2; }
 .fe-edge .hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; }
 .fe-edge.mod { color: var(--mod); } .fe-edge.aux { color: var(--warn); }
+.fe-edge.kv { color: var(--kv); }
 .fe-edge.loop { color: var(--loop); } .fe-edge.loop .line { stroke-dasharray: 6 5; }
 .fe-edge.skip { color: var(--skip); } .fe-edge.skip .line { stroke-dasharray: 2 4; opacity: .7; }
 .fe-edge.sel .line { stroke-width: 4; filter: drop-shadow(0 0 4px currentColor); }
@@ -111,7 +113,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .fe-badge .outtext { white-space: pre-wrap; color: var(--ok); }
 .kind-block, .kind-unet_block { border-top: 3px solid var(--accent); }
 .kind-intervention { border-top: 3px solid var(--mod); background: #2a2116; }
+.kind-block_kv { border-top: 3px solid var(--kv); background: #142824; }
 .kind-kv_import, .kind-init_image { border-top: 3px solid var(--warn); background: #29230f; }
+.fe-node.linear-block { opacity: .72; }
+.fe-node.linear-block .fe-title::after { content: " · linear"; color: var(--muted); font-weight: 500; font-size: 11px; }
 .kind-input_prompt, .kind-noise, .kind-scheduler { border-top: 3px solid var(--ok); }
 .kind-output_text, .kind-output_image { border-top: 3px solid var(--ok); width: 220px !important; }
 .kind-denoiser_in, .kind-denoiser_out, .kind-sampler { border-top: 3px solid var(--loop); }
@@ -309,6 +314,7 @@ table.grid.heat { width: auto; } table.grid.heat td, table.grid.heat th { border
 .pfstrip { display: flex; flex-wrap: wrap; gap: 3px; margin: 8px 0; }
 .pfcell { min-width: 30px; height: 34px; padding: 2px 3px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel2); display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; }
 .pfcell:hover { border-color: var(--accent); }
+.pfcell.off { opacity: .4; cursor: default; } .pfcell.off:hover { border-color: var(--line); }
 .pfn { font-size: 10px; color: var(--muted); }
 .pfcell i { display: block; width: 20px; height: 4px; border-radius: 2px; }
 .pfcell i.ow { height: 6px; outline: 1px solid #fff; }

@@ -45,10 +45,10 @@
     <h4>Edit the flow</h4>
     <!-- data-action buttons are shown when the loaded model's plugin lists that action (ui_schema.palette_actions) -->
     <button id="btn-iv" data-action="intervention">+ Interceptor</button>
+    <button id="btn-bkv" data-action="block_kv" title="Wire into a block’s KV port: recreate that block’s cache from a replaced or appended system / user prompt, then grow it as tokens are generated">+ Rewrite prompt (KV)</button>
     <button id="btn-dup" data-action="duplicate_block">Repeat block</button>
     <button id="btn-bypass" data-action="bypass_block">Bypass / restore</button>
     <button id="btn-kv" data-action="kv_prefix">+ KV-cache prefix</button>
-    <button id="btn-kvt" data-action="kv_prefill" title="Text that only chosen blocks can read (select a block first to aim it at that block)">+ Layer KV prefill</button>
     <button id="btn-code" data-action="code" title="See the selected box as a few lines of Python, and change them">View / edit code</button>
     <button id="btn-init" data-action="init_image">+ Start image</button>
     <button id="btn-pkv" data-action="prompt_kv_replace" title="Give chosen blocks a different prompt">+ Other prompt (blocks)</button>
@@ -62,6 +62,7 @@
     <input id="flow-file" type="file" accept=".json" hidden>
     <div class="legend">
       <div><i class="lg main"></i>residual stream</div>
+      <div><i class="lg kv"></i>block KV override</div>
       <div><i class="lg mod"></i>interceptor</div>
       <div><i class="lg loop"></i>loop (per token / step)</div>
       <div><i class="lg skip"></i>UNet skip</div>

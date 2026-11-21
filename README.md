@@ -99,14 +99,9 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 ![Conversation](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/conversation.png)
 
 
-### Editable KV Cache & Per-Layer Prompts
-- **Pre-RoPE KV cache (`tokenshark/kvcache.py`).** Keys are stored *before* RoPE with an explicit position per token, so a cache saved from one conversation can be prepended to another:
-  - `negative`: the imported tokens sit at positions `-m…-1`; the new prompt starts at `0`, as if fresh.
-  - `shift`: the imported tokens keep `0…m-1`; the new prompt continues at `m`.
-  - `offset`: put the imported tokens anywhere.
-  - `overwrite` (for layer prompts): replaces the prompt in chosen blocks so those blocks read the layer prompt instead of the main prompt.
-  - Export/import `.safetensors` caches and `truncate`, `keep`, `drop`, or `shift` token spans.
-- **Hidden prompt & per-layer KV prefill.** Encode a system/style prompt once into a KV cache (`KV caches` tab) or wire **+ Layer KV prefill** boxes directly into `Embed` with *Blocks that can see it* (`all`, `none`, `0:12`, `20:24`) so different transformer blocks read different context.
+### Editable KV Cache & Per-Block Prompt Rewrite
+- **Pre-RoPE KV cache (`tokenshark/kvcache.py`).** Keys are stored *before* RoPE with an explicit position per token, so a cache saved from one conversation can be prepended to another (`shift` / `negative` / `offset`), exported/imported as `.safetensors`, and surgically edited (`truncate`, `keep`, `drop`, zero/scale/quantize K or V per block).
+- **Rewrite prompt per block.** Wire **+ Rewrite prompt (KV)** into a full-attention block’s **KV** port (linear / Gated DeltaNet blocks have no KV cache). Ops: `replace_system`, `append_system`, `prepend_system`, `replace_user`, `append_user`, `prepend_user`. Tokenshark recreates that block’s KV cache from the rewritten prompt, then grows it as tokens are generated. From Python: `flow.replace_system("…", blocks="12:24")`.
 
 ### LoRA / Fine-Tune Inspector, Quantization & In-Browser Training
 - **LoRA & fine-tune overlay (`LoRA / Fine-tune` tab, `tokenshark/lora.py`).** Attach any Hugging Face PEFT LoRA, Diffusers/Kohya `.safetensors` LoRA, or full fine-tuned checkpoint at the `WeightStore` level. Inspect exact Frobenius norms `‖ΔW‖_F`, relative change `‖ΔW‖ / ‖W‖` per block and module (`q_proj`, `v_proj`, `mlp`), highlight the most-changed blocks on the flow canvas, and slide the LoRA scale live from `-2.0×` (anti-LoRA) to `+3.0×`.
@@ -203,7 +198,7 @@ Click **+** next to the model picker to add any Hugging Face repo or local folde
 | Activation patch (`op="patch"`) | Patching tab / Intervention box | copies `resid_pre`, `attn_out`, `mlp_out`, or `resid_post` from a source run at chosen tokens | Branch from step `k` |
 | Steering vector (`op="steer"`) | Steering tab / Intervention box | adds `value × vector` (`run A − run B` or word direction) to a block's stream | Guidance / word re-weighting |
 | Neuron clamp (`op="clamp"`) | Neurons tab / Intervention box | pins chosen MLP neurons to `max`, `min`, or `value` | Feature channel scaling |
-| Layer KV prefill (`kv_text`) | Palette → `+ Layer KV prefill` | gives chosen blocks their own prompt prefix or overwrites their prompt (`shift`, `negative`, `offset`, `overwrite`) | Per-block Prompt-KV (`+ Other prompt (blocks)` / `+ Hidden prompt`) |
+| Rewrite prompt / Block KV (`block_kv`) | Palette → `+ Rewrite prompt (KV)` · right-click a block | recreates chosen full-attention blocks’ KV from replace/append system or user prompt; cache grows gradually | Per-block Prompt-KV on Qwen-Image (`+ Other prompt` / `+ Hidden prompt`) |
 | Negative prompt + guidance > 1 | Prompt, Scheduler boxes | pushes each denoising step away from the negative text | System prompt / contrastive steering |
 | Prompt switch at step `k` | Prompt box | prompt A sets layout in early steps, prompt B paints detail later | Changing the instruction mid-answer |
 | Start image + strength / Sketch guide | Palette → `+ Start image` | starts from your image noised by *strength*, or steers only drawn tiles from pure noise (*sketch guide*) | Assistant prefill |
@@ -258,7 +253,7 @@ To connect Claude Desktop, Claude Code, or Cursor to a running Tokenshark instan
 tokenshark/
   weights.py       WeightStore: safetensors/.bin/.pth, offload policies, per-layer streaming, LoRA/quant hooks
   llm.py           raw decoder-only LLM: RMSNorm, RoPE (incl. llama3 scaling), GQA, SwiGLU, QK-norm, Gated DeltaNet
-  kvcache.py       pre-RoPE KV cache & hybrid linear memory: append, prepend (shift/negative/offset/overwrite), edit
+  kvcache.py       pre-RoPE KV cache, per-block recreated caches, hybrid linear memory, prepend/edit
   sd.py            raw Stable Diffusion: CLIP text encoder, UNet, VAE, Euler scheduler, cross-attn & stage maps
   qimage.py        raw Qwen-Image 2.1: Qwen3-VL text encoder, 32-block single-stream DiT, Wan VAE, ImageStepper
   tokenizer.py     tokenizer.json / tiktoken + Jinja chat templates; pure-Python CLIP BPE

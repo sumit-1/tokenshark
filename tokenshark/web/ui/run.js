@@ -95,12 +95,21 @@ export function applyRunBadges() {
   if (lora?.active && lora.layers?.length) {
     lora.layers.forEach(l => { loraByLayer[l.layer] = l })
   }
-  // Attach LoRA ΔW badges to block boxes even before a run starts
+  // Attach LoRA ΔW and custom RoPE badges to block boxes even before a run starts
   flow.nodes.forEach(n => {
     if (n.data?.layer != null && loraByLayer[n.data.layer]) {
       const ld = loraByLayer[n.data.layer]
       const pct = (ld.relative_change * 100).toFixed(2)
       b[n.id] = `<span class="pk" style="background:rgba(255,140,40,${0.25 + 0.65 * ld.heat})" title="LoRA / fine-tune ΔW on layer ${ld.layer}: ${pct}% (${ld.modules.join(', ')})">ΔW ${pct}%</span>`
+    }
+    if (n.data?.kind === 'block') {
+      const rParts = []
+      if (n.data.rope_scale !== undefined && n.data.rope_scale !== '' && +n.data.rope_scale !== 1) rParts.push(+n.data.rope_scale === 0 ? 'off' : `×${n.data.rope_scale}`)
+      if (n.data.rope_theta !== undefined && n.data.rope_theta !== '' && +n.data.rope_theta > 0) rParts.push(`θ=${n.data.rope_theta}`)
+      if (n.data.rope_q_offset !== undefined && n.data.rope_q_offset !== '' && +n.data.rope_q_offset !== 0) rParts.push(`Δq=${n.data.rope_q_offset > 0 ? '+' : ''}${n.data.rope_q_offset}`)
+      if (rParts.length) {
+        b[n.id] = (b[n.id] || '') + `<span class="pk" style="background:rgba(167,139,250,0.35);border:1px solid var(--loop)" title="Custom RoPE on this block: ${rParts.join(' · ')}">RoPE ${esc(rParts.join(' '))}</span>`
+      }
     }
   })
   // Mixture-of-experts blocks show their experts as a strip of cells — before any run too, so the structure is
@@ -110,7 +119,11 @@ export function applyRunBadges() {
   })
   if (!o) { flow.setBadges(b); return }
   for (const [nid, st] of Object.entries(o.block_stats || {})) {
-    const prev = b[nid] || ''
+    let prev = b[nid] || ''
+    if (st.kv_override) {
+      const ov = st.kv_override
+      prev += `<span class="pk" style="background:rgba(79,209,197,0.28);border:1px solid var(--kv)" title="${esc((ov.op || '') + (ov.text ? ': ' + ov.text : ''))}">KV ${esc(ov.op || ov.label || 'override')}${ov.n_prompt != null ? ` · ${ov.n_prompt} tok` : ''}</span>`
+    }
     if ('resid_norm' in st) b[nid] = prev + `<span class="lens"${st.pending ? ' style="visibility:hidden"' : ''} title="top prediction at the newest token">${esc(st.lens_last ?? '')}</span><i style="width:${Math.min(100, st.mlp_norm / (maxOf(o, 'mlp_norm') || 1) * 100)}%"></i>`
     else {
       const lay = o.prompt_layout?.[st.pos]

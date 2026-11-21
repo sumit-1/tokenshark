@@ -1,13 +1,14 @@
-import { $, S, btn, canRewire, el, flow, heat, hooks, schema, spark, texts } from '../core.js'
+import { $, POST, S, btn, can, canRewire, el, flow, heat, hooks, schema, spark, texts, toast } from '../core.js'
 import { esc } from '../flow.js'
 import { maskPreview, openPaint } from '../paint.js'
 import { codeSection } from './codeedit.js'
 import { debugRunTo } from './debugger.js'
-import { addIntervention, bypassBlock, duplicateBlock, selectedNode } from './flowedit.js'
+import { addBlockKV, addIntervention, bypassBlock, duplicateBlock, selectedNode } from './flowedit.js'
 import { setTab, tabAvailable } from './tabs.js'
 import { saveRunCache } from '../tabs/kv.js'
 import { stepStrip } from '../tabs/output_image.js'
 import { renderTokens } from '../tabs/output_text.js'
+import { neighbors, renderWordDictionary } from '../tabs/tokenizer.js'
 
 export const LLM_HOOK_LABELS = [
   ['resid_pre', 'resid_pre — the stream entering the block'],
@@ -16,6 +17,7 @@ export const LLM_HOOK_LABELS = [
   ['v', 'v — new value heads (written to KV cache)'],
   ['kv_k', 'kv_k — all cached keys in this block’s KV cache'],
   ['kv_v', 'kv_v — all cached values in this block’s KV cache'],
+  ['rope', 'rope — rotary position angles (zero / scale / jitter token positions)'],
   ['attn_heads', 'attn_heads — each attention head’s output'],
   ['attn_out', 'attn_out — what attention writes to the stream'],
   ['router', 'router — MoE: the router’s score for each expert (ban / force experts, patch the routing)'],
@@ -26,9 +28,22 @@ export const LLM_HOOK_LABELS = [
   ['weights', 'weights — this block’s weight matrices (per-block quantize / scale)'],
 ]
 
+export const BLOCK_KV_OPS = [
+  ['replace_system', 'replace_system — Replace system prompt'],
+  ['append_system', 'append_system — Append to system prompt'],
+  ['prepend_system', 'prepend_system — Prepend to system prompt'],
+  ['replace_user', 'replace_user — Replace user’s prompt'],
+  ['append_user', 'append_user — Append to user’s prompt'],
+  ['prepend_user', 'prepend_user — Prepend to user’s prompt'],
+]
+
+const BLOCK_KV_OP_LABELS = {
+  replace_system: 'Replace system', append_system: 'Append system', prepend_system: 'Prepend system',
+  replace_user: 'Replace user', append_user: 'Append user', prepend_user: 'Prepend user',
+}
+
 export const PREFIX_MODES = [['shift', 'shift: prefix at 0..m−1, the prompt continues at m (like real context — use for a hidden system prompt)'],
-  ['negative', 'negative: prefix at −m..−1, the prompt starts at 0 (as if fresh)'], ['offset', 'offset: prefix starts at the offset below'],
-  ['overwrite', 'overwrite: prefix at 0..m−1 in place of the prompt — these blocks read it instead of the prompt']]
+  ['negative', 'negative: prefix at −m..−1, the prompt starts at 0 (as if fresh)'], ['offset', 'offset: prefix starts at the offset below']]
 
 export const FIELDS = {
   input_prompt: modality => modality === 'image'
@@ -39,10 +54,15 @@ export const FIELDS = {
        ['thinking', 'Let the model think first (<think>…</think>, models that support it)', 'checkbox'],
        ['add_bos', 'Add BOS (no template)', 'checkbox']],
   sampler: () => [['max_new_tokens', 'Max new tokens', 'number'], ['temperature', 'Temperature (0 = greedy)', 'number'],
-    ['top_k', 'Top-k (0 = off)', 'number'], ['top_p', 'Top-p (1 = off)', 'number'], ['seed', 'Seed', 'number']],
+    ['top_k', 'Top-k (0 = off)', 'number'], ['top_p', 'Top-p (1 = off)', 'number'], ['seed', 'Seed', 'number'],
+    ['rope_step_stride', 'RoPE step stride per generated token (1 = normal, 0 = freeze pos, 50 = fast-forward / forget)', 'number'],
+    ['rope_prompt_scale', 'RoPE prompt position scale (1 = normal, 0 = bag-of-words prompt)', 'number']],
   noise: () => [['seed', 'Seed', 'number'], ['width', 'Width', 'number'], ['height', 'Height', 'number']],
   scheduler: () => [['steps', 'Steps', 'number'], ['guidance_scale', 'Guidance (CFG, ≤1 = off)', 'number']],
   block: (m, n) => [['layer', 'Weights of layer', 'number'], ['label', 'Label', 'text'],
+    ['rope_scale', 'RoPE position scale (empty/1 = normal, 0 = off / no RoPE, −1 = reverse)', 'number'],
+    ['rope_theta', `RoPE base θ override (empty = model’s ${S.info?.rope_theta ?? 10000}; try 100 to desync)`, 'number'],
+    ['rope_q_offset', 'RoPE query shift Δpos (shifts Q relative to K in this block)', 'number'],
     ...(n?.data.moe ? [['moe_k', `Experts per token (empty = the model’s own ${S.info?.moe?.top_k ?? ''}; 1 … ${n.data.moe})`, 'number'],
       ['moe_temp', 'Router temperature (empty = 1; higher = flatter choice, lower = sharper)', 'number'],
       ...(S.info?.moe?.shared ? [['moe_shared', 'Use the shared expert (the one every token goes through)', 'checkbox']] : [])] : [])],
@@ -74,18 +94,18 @@ export const FIELDS = {
     if (op === 'scale' || op === 'add_noise' || op === 'quantize') f.push(['value', op === 'scale' ? 'Scale factor' : op === 'quantize' ? 'Bit width (1..16 bits)' : 'Noise size σ (× the activation’s spread)', 'number'])
     if (hook !== 'weights') f.push(['positions', 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
     if (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook)) f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
-    if (hook !== 'weights' && hook !== 'router') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
+    if (hook !== 'weights' && hook !== 'router' && hook !== 'rope') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
     if (op === 'add_noise') f.push(['seed', 'Noise seed', 'number'])
     return f
   },
+  block_kv: () => [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'],
+    ['op', 'What to change', 'select', BLOCK_KV_OPS],
+    ['text', 'New / extra text', 'textarea'],
+    ['layers', 'Also apply to schedule positions (optional if wired: all | 12:24 | 3,5)', 'text']],
   kv_import: () => [['cache_id', 'KV cache', 'select', S.caches.map(c => [c.id, `${c.name} · ${c.n_tokens} tok`])],
     ['mode', 'Position mode', 'select', PREFIX_MODES],
     ['offset', 'Offset (mode = offset)', 'number'],
     ['layers', 'Blocks that can see it (schedule positions: all | none | 0:12 | 20:24 | 3,5)', 'text'], ['label', 'Label', 'text']],
-  kv_text: () => [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'], ['text', 'Prefill text only these blocks can read', 'textarea'],
-    ['layers', 'Blocks that can see it (schedule positions: all | none | 14 | 10:14 | 3,5)', 'text'],
-    ['mode', 'Position mode', 'select', PREFIX_MODES], ['offset', 'Offset (mode = offset)', 'number'],
-    ['as_system', 'Wrap it as the system turn of the chat template', 'checkbox']],
   prompt_kv: () => [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'], ['prompt', 'Prompt', 'textarea'],
     ['role', 'Role', 'select', [['replace', 'replace: these blocks read this prompt instead of the main one'],
       ['prepend', 'prepend: a hidden prompt in front of the main one (the prompt and the image both see it)']]],
@@ -114,7 +134,7 @@ export const KIND_HELP = {
   denoiser_out: 'Noise prediction → Euler step → next latent. Loops for every step.',
   vae_decode: 'Turns the 4-channel latent back into pixels.',
   intervention: 'Intercepts and modifies a block’s activations, KV cache, or weights while the model runs. Wire it into the top port of one or more blocks. Supports zero, scale, noise, quantize (per-block weight or KV-cache bits), patch, steer, project_out, and clamp.',
-  kv_text: 'A per-layer KV prefill: text that only the blocks you choose can read. It is pushed through the whole model once and its keys and values are kept; the chosen blocks then attend to them as a prefix, the other blocks never see it. Try an instruction for a few middle blocks. Mode overwrite hides the real prompt from those blocks, so they read this text instead.',
+  block_kv: 'Rewrites what a KV-capable block remembers. The system or user prompt is changed (replace / append / prepend), then that block’s KV cache is recreated from the rewritten prompt and grows as new tokens are generated. Wire into the block’s top KV port (linear-attention / Gated DeltaNet blocks have no KV port).',
   kv_import: 'Prepends a saved KV cache: the new prompt attends to it without recomputing it. Keys are stored before RoPE, so positions can be moved freely. Add several boxes (each wired into Embed’s KV port) to give different blocks different prefixes; each box’s “Blocks that can see it” decides which blocks read it. With the chat template on, the Prompt box’s System field is ignored — the prefix plays that role.',
   prompt_kv: 'A second prompt for chosen blocks. Qwen-Image pushes the prompt through the blocks once and keeps its keys/values — a KV cache — so each block can read a different one. replace: those blocks see this prompt instead (e.g. layout blocks “a cat”, detail blocks “a dog”). prepend: a hidden prompt the main prompt and the image both attend to in those blocks, like the hidden system prompt of the language models.',
   init_image: 'Image prefill. Strength sets how much noise is added before denoising starts (low = stay close to the image). Paint a region to lock it: at every locked step that region is reset to the start image at the current noise level — the image version of forced tokens. “regenerate” flips it: only the painted area changes (inpainting).',
@@ -155,7 +175,13 @@ export function field(n, [key, label, type, options]) {
     // these choices decide which other fields the box has
     if (n.data.kind === 'intervention' && ['op', 'hook', 'clamp'].includes(key)) renderInspector()
     if (n.data.kind === 'intervention' && ['op', 'hook', 'experts', 'enabled'].includes(key)) hooks.refreshBadges?.()
-    if (key === 'moe_shared') hooks.refreshBadges?.()
+    if (n.data.kind === 'block_kv' && key === 'op') {
+      const lab = BLOCK_KV_OP_LABELS[v]
+      if (lab) flow.updateNodeData(n.id, { label: lab })
+    }
+    if (n.data.kind === 'block_kv' && ['op', 'text', 'layers', 'enabled'].includes(key)) hooks.refreshBadges?.()
+    if (['moe_shared', 'rope_scale', 'rope_theta', 'rope_q_offset'].includes(key)) hooks.refreshBadges?.()
+    if (n.data.kind === 'input_prompt') refreshRightPaneDict()
   })
   wrap.append(el('span', { textContent: label }), input)
   return wrap
@@ -211,8 +237,25 @@ export function renderInspector() {
   if (k === 'input_prompt' && schema().modality !== 'image') box.appendChild(historyEditor(n))
   const actions = el('div', { className: 'row' })
   if (k === 'block') {
+    const ropeOff = n.data.rope_scale === 0
     actions.append(btn('Repeat block', () => duplicateBlock(n)), btn(n.data.bypass ? 'Restore' : 'Bypass', () => bypassBlock(n)),
+      btn(ropeOff ? 'RoPE: Restore' : 'RoPE: Turn off (0×)', () => {
+        flow.updateNodeData(n.id, { rope_scale: ropeOff ? '' : 0 })
+        hooks.refreshBadges?.()
+        renderInspector()
+      }),
       btn('+ Interceptor', () => addIntervention(n)), btn('Debug: run to here', () => debugRunTo(n)))
+    if (n.data.has_kv !== false && can('block_kv')) {
+      actions.append(btn('+ Rewrite prompt (KV)', () => addBlockKV(n)))
+    }
+  }
+  if (k === 'block_kv') {
+    actions.append(
+      btn(n.data.enabled === false ? 'Enable' : 'Disable', () => {
+        flow.updateNodeData(n.id, { enabled: n.data.enabled === false }); renderInspector(); hooks.refreshBadges?.()
+      }),
+      btn('Open KV caches', () => setTab('kv')),
+    )
   }
   if (k === 'block' && n.data.moe) hooks.expertPanel?.(n, box)
   if (k === 'intervention' && ['router', 'expert_out'].includes(n.data.hook) && tabAvailable('experts')) actions.append(btn('Open Experts tab', () => setTab('experts')))
@@ -225,11 +268,52 @@ export function renderInspector() {
   }
   if (k === 'unet_block' && canRewire(n)) actions.append(btn('Repeat block', () => duplicateBlock(n)), btn(n.data.bypass ? 'Restore' : 'Bypass', () => bypassBlock(n)))
   if (k === 'unet_block') actions.append(btn('+ Interceptor', () => addIntervention(n)))
-  if (k === 'kv_import' || k === 'kv_text') actions.append(btn(k === 'kv_text' ? 'Edit all prefills (KV tab)' : 'Open KV caches', () => setTab('kv')))
+  if (k === 'kv_import') actions.append(btn('Open KV caches', () => setTab('kv')))
   if (k === 'intervention' && S.info?.capabilities?.regions) box.appendChild(regionEditor(n))
   if (actions.children.length) box.appendChild(actions)
   codeSection(n, box)
+  if ((k === 'tokenizer' || k === 'input_prompt') && schema().modality !== 'image') renderRightPaneTokenDict(box)
   renderNodeResults(n, box)
+}
+
+let _dictTimer = null
+function refreshRightPaneDict() {
+  clearTimeout(_dictTimer)
+  _dictTimer = setTimeout(() => {
+    const target = document.getElementById('insp-word-dict')
+    if (target) populateRightPaneTokenDict(target)
+  }, 180)
+}
+
+export function renderRightPaneTokenDict(box) {
+  const wrap = el('div', { id: 'insp-word-dict', className: 'results' })
+  box.appendChild(wrap)
+  populateRightPaneTokenDict(wrap)
+}
+
+async function populateRightPaneTokenDict(wrap) {
+  const pNode = flow.nodes.find(x => x.data.kind === 'input_prompt')
+  if (!pNode || !S.info) return
+  const d = pNode.data
+  try {
+    const r = await POST('/api/tokenize', {
+      text: d.prompt || '',
+      chat: !!d.use_chat_template,
+      system: d.system || '',
+      history: d.history || [],
+      prefill: d.prefill || '',
+      add_bos: !!d.add_bos,
+    })
+    wrap.innerHTML = ''
+    const dictContainer = el('div')
+    const nbContainer = el('div')
+    S.tk = S.tk || { picked: null }
+    renderWordDictionary(dictContainer, r, S.tk, nbContainer)
+    wrap.append(dictContainer, nbContainer)
+    if (S.tk.picked != null && r.ids.includes(S.tk.picked)) neighbors(nbContainer, S.tk.picked)
+  } catch (e) {
+    wrap.innerHTML = `<div class="small bad">${esc(e.message)}</div>`
+  }
 }
 
 // ---------- painting (start image, lock region, intervention regions)
@@ -327,12 +411,14 @@ export function renderNodeResults(n, box) {
   }
   if (k === 'output_text' || k === 'sampler' || k === 'lm_head') renderTokens(sec, true)
   if (k === 'embed' && o.cache) {
-    sec.innerHTML += `<h4>KV cache after the run</h4><div class="small">${o.cache.n_tokens} tokens × ${o.cache.n_slots} slots · ${(o.cache.bytes / 2 ** 20).toFixed(1)} MB${o.prefix_tokens ? ` · ${o.prefix_tokens} imported` : ''}</div>`
-    sec.appendChild(btn('Save this cache', saveRunCache))
+    sec.innerHTML += `<h4>KV cache after the run</h4><div class="small">${o.cache.n_tokens} tokens × ${o.cache.n_slots} slots · ${(o.cache.bytes / 2 ** 20).toFixed(2)} MB${o.prefix_tokens ? ` · ${o.prefix_tokens} imported` : ''}</div>`
+    const row = el('div', { className: 'row' })
+    row.append(btn('Analyze KV cache', () => setTab('kv')), btn('Save this cache', saveRunCache))
+    sec.appendChild(row)
   }
   if ((k === 'output_image' || k === 'vae_decode') && o.image) sec.appendChild(el('img', { src: o.image, className: 'thumb big' }))
   if (k === 'denoiser_out' || k === 'scheduler' || k === 'denoiser_in') sec.appendChild(stepStrip())
-  if ((k === 'tokenizer' || k === 'text_encoder' || (k === 'input_prompt' && !o.segments)) && o.tokens) {
+  if ((k === 'text_encoder' || (k === 'input_prompt' && schema().modality === 'image')) && o.tokens) {
     sec.innerHTML += `<h4>Tokens</h4><div class="tokens">${o.tokens.map(t => `<span class="tok">${esc(t)}</span>`).join('')}</div>`
   }
   if (sec.childNodes.length) box.appendChild(sec)

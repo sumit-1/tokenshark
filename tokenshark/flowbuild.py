@@ -9,7 +9,7 @@ Pure Python, no torch — used by the Python API (tokenshark.api), by exported r
     flow.patch(7, clean_run, hook="resid_post", positions="last")
     flow.steer(6, vector, value=8)
     flow.clamp(4, neurons="1021", to="max", value=5)
-    flow.layer_prompt("Answer in French.", layers="10:14", mode="overwrite")
+    flow.replace_system("Answer in French.", blocks="10:14")
     flow.code(2, source)                                # run your own Python for block 2
 
 A block is named by its layer number (the box "Block 3") or by its box id (needed for repeated blocks).
@@ -93,8 +93,36 @@ class FlowBuilder:
         d["history"] = list(d.get("history") or []) + [{"role": role, "content": content}]
         return self
 
-    def sampler(self, max_new_tokens=None, temperature=None, top_k=None, top_p=None, seed=None):
-        return self._set("sampler", max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p, seed=seed)
+    def sampler(self, max_new_tokens=None, temperature=None, top_k=None, top_p=None, seed=None,
+                rope_step_stride=None, rope_prompt_scale=None):
+        return self._set("sampler", max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p,
+                         seed=seed, rope_step_stride=rope_step_stride, rope_prompt_scale=rope_prompt_scale)
+
+    def rope_step(self, stride: float | None = None, prompt_scale: float | None = None):
+        """Change how RoPE positions advance per generation step (stride=0 freezes decode position; stride=50
+        fast-forwards so earlier turns fade fast; prompt_scale=0 collapses prompt positions to 0)."""
+        return self.sampler(rope_step_stride=stride, rope_prompt_scale=prompt_scale)
+
+    def rope(self, block="all", scale: float | None = None, theta: float | None = None, q_offset: float | None = None):
+        """Change RoPE on one block, a list of blocks, or a slice spec ('all', '12:24', '1,2'):
+        scale=0 turns off RoPE on those blocks; theta overrides base frequency; q_offset shifts Q positions vs K."""
+        chain = walk_chain(self.flow)
+        if isinstance(block, int):
+            targets = [self.node(block)]
+        elif isinstance(block, (list, tuple)):
+            targets = [self.node(b) for b in block]
+        elif isinstance(block, str) and block in {n["id"] for n in chain}:
+            targets = [self.node(block)]
+        else:
+            from .flow import parse_index_spec
+            idx = parse_index_spec(str(block), len(chain))
+            targets = [chain[i] for i in idx]
+        for n in targets:
+            d = n["data"]
+            for key, v in (("rope_scale", scale), ("rope_theta", theta), ("rope_q_offset", q_offset)):
+                if v is not None:
+                    d[key] = v
+        return self
 
     # ---------------------------------------------------------------- the block chain
     def bypass(self, *blocks, on: bool = True):
@@ -227,14 +255,76 @@ class FlowBuilder:
                 d.pop(key, None)
         return self
 
-    # ---------------------------------------------------------------- KV prefixes
-    def layer_prompt(self, text: str, layers: str = "all", mode: str = "shift", as_system: bool = False,
-                     offset: float = 0, label: str = "") -> str:
-        """Text that only the chosen blocks can read: it is run through the model once and its keys/values are
-        prepended for those blocks. mode: shift | negative | offset | overwrite (replaces the prompt there)."""
-        return self._add("kvt", "embed", "cache", {"kind": "kv_text", "label": label or "Layer prompt", "text": text,
-                                                   "layers": str(layers), "mode": mode, "as_system": as_system,
-                                                   "offset": offset, "enabled": True})
+    # ---------------------------------------------------------------- KV overrides & prefixes
+    def kv_override(self, block="all", op: str = "replace_system", text: str = "", label: str = "") -> str:
+        """Recreate the KV cache at chosen KV-capable block(s) using a modified system or user prompt, and let it
+        grow gradually as new tokens are generated.
+
+        op: replace_system | append_system | prepend_system | replace_user | append_user | prepend_user
+        block: int (single block, e.g. 12), node id ('block_12'), list of blocks ([8, 12]), or slice ('all', '12:24').
+        """
+        chain = walk_chain(self.flow)
+        nid = f"bkv_{next(self._n)}"
+        while any(n["id"] == nid for n in self.flow["nodes"]):
+            nid = f"bkv_{next(self._n)}"
+        targets = []
+        layers_str = ""
+        if isinstance(block, int):
+            targets = [self.node(block)]
+        elif isinstance(block, str) and block in {n["id"] for n in chain}:
+            targets = [self.node(block)]
+        elif isinstance(block, (list, tuple)):
+            targets = [self.node(b) for b in block]
+        else:
+            layers_str = str(block)
+        op_labels = {
+            "replace_system": "Replace system",
+            "append_system": "Append system",
+            "prepend_system": "Prepend system",
+            "replace_user": "Replace user",
+            "append_user": "Append user",
+            "prepend_user": "Prepend user",
+        }
+        anchor = targets[0] if targets else (chain[0] if chain else self.node("embed"))
+        self.flow["nodes"].append({
+            "id": nid, "type": "box",
+            "position": {"x": anchor["position"]["x"] + 8, "y": anchor["position"]["y"] - 118},
+            "data": {
+                "kind": "block_kv",
+                "label": label or op_labels.get(op, "KV override"),
+                "op": op,
+                "text": text,
+                "layers": layers_str,
+                "enabled": True,
+            },
+        })
+        for t in targets:
+            self.flow["edges"].append({
+                "id": f"e-{nid}-out-{t['id']}-kv",
+                "source": nid, "target": t["id"],
+                "sourceHandle": "out", "targetHandle": "kv",
+            })
+        return nid
+
+    block_kv = kv_override
+
+    def replace_system(self, text: str, blocks="all", label: str = "") -> str:
+        return self.kv_override(blocks, op="replace_system", text=text, label=label)
+
+    def append_system(self, text: str, blocks="all", label: str = "") -> str:
+        return self.kv_override(blocks, op="append_system", text=text, label=label)
+
+    def prepend_system(self, text: str, blocks="all", label: str = "") -> str:
+        return self.kv_override(blocks, op="prepend_system", text=text, label=label)
+
+    def replace_user(self, text: str, blocks="all", label: str = "") -> str:
+        return self.kv_override(blocks, op="replace_user", text=text, label=label)
+
+    def append_user(self, text: str, blocks="all", label: str = "") -> str:
+        return self.kv_override(blocks, op="append_user", text=text, label=label)
+
+    def prepend_user(self, text: str, blocks="all", label: str = "") -> str:
+        return self.kv_override(blocks, op="prepend_user", text=text, label=label)
 
     def kv_prefix(self, cache_id: str, layers: str = "all", mode: str = "shift", offset: float = 0, label: str = "") -> str:
         return self._add("kv", "embed", "cache", {"kind": "kv_import", "label": label or "KV prefix", "cache_id": cache_id,

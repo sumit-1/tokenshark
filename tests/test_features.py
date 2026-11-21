@@ -237,6 +237,39 @@ def test_cloud_alignment_and_tracking(llm):
     assert tr["rows"][-1]["choice_rank"] == 1
 
 
+def test_block_kv_override_recreates_and_grows(llm):
+    """replace_system on one schedule slot recreates that block's KV cache from the rewritten prompt;
+    prefill/generated tokens then append so the per-block cache grows gradually."""
+    ad, info, flow = llm
+    import copy
+    from tokenshark.flowbuild import FlowBuilder
+    fb = FlowBuilder(copy.deepcopy(flow))
+    fb.prompt(prompt="Where is Paris?", system="Be brief.", chat=True)
+    fb.sampler(max_new_tokens=3, temperature=0.0, seed=0)
+    fb.replace_system("Answer like a pirate. Always say arr.", blocks=1)
+    plan = compile_flow(fb.flow, info)
+    assert plan.params["kv_overrides"] and plan.params["kv_overrides"][0]["slots"] == [1]
+    res = ad.run(plan)
+    cache = res["captures"]["cache"]
+    assert 1 in cache.block_caches and 0 not in cache.block_caches
+    bc = cache.block_caches[1]
+    assert bc.op == "replace_system" and bc.n_prompt > 0
+    assert len(bc) == bc.n_prompt + 3                     # prompt recreated, then 3 generated tokens appended
+    prompt_seg = next(s for s in cache.segments if s.origin == "prompt")
+    main_prompt = cache.tokens[prompt_seg.start:prompt_seg.end]
+    assert bc.tokens[: bc.n_prompt] != main_prompt        # rewritten system ⇒ different prompt KV
+    attn = ad.attention(res["captures"], 1, None)
+    assert attn.get("kv_override", {}).get("op") == "replace_system"
+    from tokenshark import interp
+    kva = interp.kv_analysis(ad, res["captures"], plan.schedule, plan.schedule_nodes)
+    assert kva["blocks"][1]["override"]["op"] == "replace_system"
+    # Empty append text is rejected; replace_system with empty text is allowed (clears system)
+    bad = FlowBuilder(copy.deepcopy(flow))
+    bad.append_system("", blocks=0)
+    with pytest.raises(FlowError):
+        compile_flow(bad.flow, info)
+
+
 def test_hidden_system_prompt_and_layer_restricted_prefix(llm):
     ad, info, flow = llm
     import copy

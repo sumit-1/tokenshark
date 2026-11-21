@@ -46,7 +46,8 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
     s, s0 = _node(flow, "sampler"), _node(default, "sampler")
     if s and s0:
         d = _diff(s["data"], s0["data"], {"max_new_tokens": "max_new_tokens", "temperature": "temperature",
-                                         "top_k": "top_k", "top_p": "top_p", "seed": "seed"})
+                                         "top_k": "top_k", "top_p": "top_p", "seed": "seed",
+                                         "rope_step_stride": "rope_step_stride", "rope_prompt_scale": "rope_prompt_scale"})
         if d:
             out.append(f"{var}.sampler({_kw(d)})")
     for kind in ("noise", "scheduler"):                      # image models: set the box fields directly
@@ -79,6 +80,12 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
     byp = [ref(n["id"]) for n in chain if n["data"].get("bypass")]
     if byp:
         out.append(f"{var}.bypass({', '.join(_lit(b) for b in byp)})")
+    for n in chain:
+        rd = _diff(n["data"], {"rope_scale": 1.0, "rope_theta": None, "rope_q_offset": 0.0},
+                   {"rope_scale": "scale", "rope_theta": "theta", "rope_q_offset": "q_offset"})
+        rd = [(k, v) for k, v in rd if v != ""]
+        if rd:
+            out.append(f"{var}.rope({_lit(ref(n['id']))}, {_kw(rd)})")
     for n in chain + [x for x in flow["nodes"] if x["data"].get("kind") in ("embed", "final_norm", "lm_head", "sampler")]:
         if str(n["data"].get("code") or "").strip():
             target = ref(n["id"]) if n in chain else n["data"]["kind"]
@@ -117,16 +124,30 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
                     "value": "value", "positions": "positions", "heads": "heads", "neurons": "neurons", "seed": "seed",
                     "steps": "steps", "experts": "experts"})
                 out.append(f"{var}.intervene({tgt}, {_kw(extra)})")
-        elif k == "kv_text" and e.get("targetHandle") == "cache" and d.get("enabled") is not False:
-            extra = _diff(d, {"layers": "all", "mode": "shift", "as_system": False, "offset": 0},
-                          {"layers": "layers", "mode": "mode", "as_system": "as_system", "offset": "offset"})
-            out.append(f"{var}.layer_prompt({_lit(d.get('text', ''))}{', ' + _kw(extra) if extra else ''})")
         elif k == "kv_import" and e.get("targetHandle") == "cache" and d.get("enabled") is not False:
             extra = _diff(d, {"layers": "all", "mode": "shift", "offset": 0}, {"layers": "layers", "mode": "mode", "offset": "offset"})
             out.append(f"{var}.kv_prefix({_lit(d.get('cache_id', ''))}{', ' + _kw(extra) if extra else ''})"
                        f"      # a KV cache saved in data/caches/ on this machine")
         elif k in ("init_image", "prompt_kv"):
             out.append(f"# NOTE: the '{d.get('label') or k}' box is not expressed here; restore the flow in the app for it.")
+
+    # Per-block KV overrides (wired to block 'kv' handles and/or carrying a 'layers' slice)
+    bkv_edges: dict[str, list] = {}
+    for e in flow.get("edges", []):
+        if e.get("targetHandle") == "kv" and e.get("target") in nodes:
+            bkv_edges.setdefault(e["source"], []).append(ref(e["target"]))
+    for n in flow["nodes"]:
+        d = n.get("data") or {}
+        if d.get("kind") == "block_kv" and d.get("enabled") is not False:
+            tgts = bkv_edges.get(n["id"], [])
+            lay = str(d.get("layers") or "").strip()
+            if len(tgts) == 1 and not lay:
+                blk_arg = _lit(tgts[0])
+            elif tgts and not lay:
+                blk_arg = _lit(tgts)
+            else:
+                blk_arg = _lit(lay or "all")
+            out.append(f"{var}.kv_override({blk_arg}, op={_lit(d.get('op', 'replace_system'))}, text={_lit(d.get('text', ''))})")
     return out
 
 

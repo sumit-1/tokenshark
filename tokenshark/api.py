@@ -109,6 +109,10 @@ class RunResult:
     def neuron(self, block: int, index: int) -> dict:
         return interp.neuron_detail(self.lab.adapter, self.captures, self.plan.schedule, block, index)
 
+    def kv_analysis(self) -> dict:
+        """Analyze this run's KV cache: GQA memory savings, per-block & per-token K/V norms, and attention sinks."""
+        return interp.kv_analysis(self.lab.adapter, self.captures, self.plan.schedule, self.plan.schedule_nodes)
+
     # ---------------------------------------------------------------- conversations
     @property
     def conversation(self) -> list[dict]:

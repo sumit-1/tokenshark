@@ -141,37 +141,29 @@ def test_neuron_capture_and_clamp(lab):
     assert float(z.resid(1)[:, :4].abs().max()) == 0 and float(z.resid(1)[:, 4:].abs().max()) > 0
 
 
-# ---------------------------------------------------------------- layer prompts
-def test_layer_prompt_modes(lab):
+# ---------------------------------------------------------------- per-block KV overrides
+def test_block_kv_overrides(lab):
     base = lab.run(B, max_new_tokens=3)
-    # a layer prompt nobody sees changes nothing
+    # a block KV override targeting no blocks changes nothing
     f = lab.flow(B, max_new_tokens=3)
-    f.layer_prompt("Paris Paris Paris", layers="none", mode="negative")
+    f.replace_system("Paris Paris Paris", blocks="none")
     assert lab.run(f).token_ids == base.token_ids
-    # visible to all blocks with mode shift == the saved-cache route
+    # replacing system on all blocks changes logits vs baseline
     f = lab.flow(B, max_new_tokens=3)
-    f.layer_prompt("Paris Paris Paris", layers="all", mode="shift")
+    f.replace_system("Paris Paris Paris", blocks="all")
     r_all = lab.run(f)
-    assert r_all.outputs["prefix_tokens"] > 0
+    assert r_all.outputs["cache"]["block_overrides"]
     assert not torch.allclose(_logits(r_all), _logits(base))
-    # visible to one block only: that block's attention sees the prefix, the others don't
-    f = lab.flow(B, max_new_tokens=1)
-    f.layer_prompt("Paris Paris Paris", layers="1", mode="negative")
+    # targeting block 1 only: only block 1 owns a recreated cache
+    f = lab.flow(B, max_new_tokens=2)
+    f.replace_user("The capital of France is", blocks=1)
     r1 = lab.run(f)
-    n_pre = r1.outputs["prefix_tokens"]
-    assert float(r1.attention(1)[:, :, :n_pre].sum()) > 0
-    assert float(r1.attention(0)[:, :, :n_pre].sum()) == 0 and float(r1.attention(2)[:, :, :n_pre].sum()) == 0
-    # overwrite: in that block the other prompt tokens are hidden; a token still sees itself and the prefix
-    f = lab.flow(B, max_new_tokens=1)
-    f.layer_prompt("Paris Paris Paris", layers="1", mode="overwrite")
-    ro = lab.run(f)
-    att = ro.attention(1).sum(0)                      # [tokens, prefix + tokens]
-    T = att.shape[0]
-    own = att[:, n_pre:n_pre + T]
-    assert float((own - torch.diag(torch.diag(own))).abs().max()) == 0
-    assert float(ro.attention(0)[:, :, n_pre:].sum()) > 0
+    ov = r1.outputs["cache"]["block_overrides"]
+    assert 1 in ov or "1" in ov
+    assert 0 not in ov and "0" not in ov
+    # append with empty text is rejected
     f = lab.flow(B)
-    f.layer_prompt("", layers="1")
+    f.append_system("", blocks=1)
     with pytest.raises(FlowError):
         lab.plan(f)
 
@@ -302,7 +294,7 @@ def test_export_script_reproduces_the_run(lab, tmp_path):
     f.patch("block_1_r1", clean, positions="last")
     f.intervene(2, hook="attn_heads", op="scale", value=0.5, heads="0:2")
     f.clamp(1, "3,4", to="value", value=2.0)
-    f.layer_prompt("Paris", layers="1:", mode="negative")
+    f.replace_system("Paris", blocks="1:")
     f.code("block_1_r1", lab.block_code(1) + "x = x * 1.0\n")
     f.code("sampler", lab.block_code(kind="sampler"))
     run = lab.run(f)

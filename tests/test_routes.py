@@ -137,8 +137,9 @@ def test_vectors_neurons_logits(api):
 
 def test_tokenizer_code_script(api):
     c = api
-    t = c.post("/api/tokenize", json={"text": "The capital"}).json()
+    t = c.post("/api/tokenize", json={"text": "The capital", "prefill": " Paris"}).json()
     assert t["n_tokens"] == len(t["ids"]) > 0
+    assert "word_map" in t and t["n_words"] == len(t["word_map"]) > 0
     assert c.get("/api/tokens/search?q=cap").json()["n"] >= 1
     assert len(c.get(f"/api/tokens/{t['ids'][0]}/neighbors?k=4").json()["neighbors"]) == 4
     d = c.get("/api/code/default?kind=block&layer=1").json()
@@ -150,15 +151,20 @@ def test_tokenizer_code_script(api):
         for n in f["nodes"]:
             if n["id"] == "block_1":
                 n["data"]["code"] = d["code"] + "print('hi')\n"
-        f["nodes"].append({"id": "lp", "type": "box", "position": {"x": 0, "y": 0}, "data": {
-            "kind": "kv_text", "text": "Paris Paris", "layers": "1", "mode": "overwrite"}})
-        f["edges"].append({"id": "lpe", "source": "lp", "target": "embed", "sourceHandle": "out", "targetHandle": "cache"})
+        f["nodes"].append({"id": "bkv", "type": "box", "position": {"x": 0, "y": 0}, "data": {
+            "kind": "block_kv", "op": "replace_system", "text": "You are a pirate.", "layers": "", "enabled": True}})
+        f["edges"].append({"id": "bkve", "source": "bkv", "target": "block_1", "sourceHandle": "out", "targetHandle": "kv"})
 
     r = _run(c, _flow(c, "The capital of France is", edit=edit))
-    assert r["outputs"]["edited_code"] == ["block_1"] and r["outputs"]["prints"] and r["outputs"]["prefix_tokens"] > 0
+    assert r["outputs"]["edited_code"] == ["block_1"] and r["outputs"]["prints"] and r["outputs"]["cache"]["block_overrides"]
+    kva = c.get(f"/api/runs/{r['id']}/kv_analysis").json()
+    assert kva["n_tokens"] == r["outputs"]["cache"]["n_tokens"] and len(kva["blocks"]) == 3 and kva["gqa_ratio"] == 2.0
+    ov = [b for b in kva["blocks"] if b.get("override")]
+    assert ov and ov[0]["override"]["op"] == "replace_system"
     src = c.get(f"/api/runs/{r['id']}/script").text
-    assert "flow.layer_prompt('Paris Paris', layers='1', mode='overwrite')" in src and "flow.code(1," in src
+    assert "flow.kv_override(" in src and "replace_system" in src and "flow.code(1," in src
     compile(src, "s.py", "exec")
+
     bad = _flow(c, "x", edit=lambda f: [n["data"].update(code="x = nope") for n in f["nodes"] if n["id"] == "block_0"])
     rid = c.post("/api/runs", json={"flow": bad}).json()["run"]["id"]
     for _ in range(200):

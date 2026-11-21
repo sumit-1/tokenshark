@@ -31,7 +31,7 @@ import torch.nn.functional as F
 
 from .engine import Cancelled, RunContext, apply_op, set_determinism
 from .flow import Plan, parse_index_spec
-from .kvcache import KVCache
+from .kvcache import BlockKVCache, KVCache
 from .tokenizer import LLMTokenizer
 from .weights import WeightStore, read_json
 
@@ -209,9 +209,10 @@ def rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     return (xf * w.float()).to(x.dtype)
 
 
-def rope_inv_freq(cfg: LLMConfig) -> torch.Tensor:
+def rope_inv_freq(cfg: LLMConfig, theta: float | None = None) -> torch.Tensor:
     d = cfg.rot_dim or cfg.head_dim
-    inv = 1.0 / (cfg.theta ** (torch.arange(0, d, 2, dtype=torch.float32) / d))
+    base_theta = float(theta) if theta is not None else cfg.theta
+    inv = 1.0 / (base_theta ** (torch.arange(0, d, 2, dtype=torch.float32) / d))
     rs = cfg.rope_scaling or {}
     kind = rs.get("rope_type") or rs.get("type")
     if kind == "llama3":
@@ -231,7 +232,7 @@ def rope_inv_freq(cfg: LLMConfig) -> torch.Tensor:
         # linear ramp between — so a model trained on short contexts keeps its local sense of position.
         factor = rs.get("factor") or cfg.max_pos / rs["original_max_position_embeddings"]
         old, bf, bs = rs["original_max_position_embeddings"], rs.get("beta_fast") or 32, rs.get("beta_slow") or 1
-        corr = lambda rot: (d * math.log(old / (rot * 2 * math.pi))) / (2 * math.log(cfg.theta))      # noqa: E731
+        corr = lambda rot: (d * math.log(old / (rot * 2 * math.pi))) / (2 * math.log(base_theta))      # noqa: E731
         lo, hi = max(math.floor(corr(bf)), 0), min(math.ceil(corr(bs)), d - 1)
         if lo == hi:
             hi += 0.001
@@ -437,8 +438,24 @@ class RawLLM:
         x = x + attn_out
         return self._mlp_and_finish(p, pre, x, attn_out, ctx, idx_of, cap)
 
-    def attn_allowed(self, p: int, n: int, T: int, cache: KVCache, device) -> torch.Tensor:
+    def attn_allowed(self, p: int, n: int, T: int, cache: KVCache, device,
+                     ctx: RunContext | None = None) -> torch.Tensor:
         """[n, T] — True where new token i (row) may look at token j of the cache (column) in block slot p."""
+        bc = cache.block_caches.get(p)
+        if bc is not None:
+            # Per-block recreated KV cache: during main prompt chunk processing (len(bc) == bc.n_prompt and n == n_prompt_main),
+            # map causal horizon proportionally across the recreated prompt tokens so no token attends past its point;
+            # during prefill / autoregressive decode (after n_prompt), every new token sits at the end of bc!
+            if ctx is not None and ctx.store.get("chunk_origin") == "prompt":
+                qi = torch.linspace(0, max(0, T - 1), steps=n, device=device).floor()[:, None]
+            else:
+                t0 = T - n
+                qi = torch.arange(t0, T, device=device)[:, None]
+            kj = torch.arange(T, device=device)[None, :]
+            allowed = kj <= qi
+            if self.cfg.sliding_window:
+                allowed &= kj > qi - self.cfg.sliding_window
+            return allowed
         t0 = T - n
         qi = torch.arange(t0, T, device=device)[:, None]
         kj = torch.arange(T, device=device)[None, :]
@@ -448,9 +465,6 @@ class RawLLM:
         for a, b, slots in cache.prefix_spans:            # imported prefixes this block was told not to see
             if slots is not None and p not in slots:
                 allowed &= (kj < a) | (kj >= b)
-        for a, b, slots in cache.hidden_spans:            # "overwrite": the prompt's own keys are hidden here
-            if slots is None or p in slots:
-                allowed &= (kj < a) | (kj >= b) | (kj == qi)
         return allowed
 
     def note_units(self, p: int, hook: str, a: torch.Tensor, ctx: RunContext):
@@ -459,6 +473,63 @@ class RawLLM:
         rng = ctx.store.setdefault("unit_range", {})
         old = rng.get((p, hook))
         rng[(p, hook)] = (lo, hi) if old is None else (torch.minimum(old[0], lo), torch.maximum(old[1], hi))
+
+    def _rope_for_block(self, p: int, n: int, T: int, cache: KVCache, ctx: RunContext):
+        """Compute (pos_q [n], pos_k [T], inv_freq) for block slot p, applying per-block RoPE settings
+        (scale, theta, q_offset) and any hook='rope' interceptors."""
+        bc = cache.block_caches.get(p)
+        r_cfg = (ctx.store.get("rope") or {}).get(p) or {}
+        inv_freq = self.inv_freq
+        if r_cfg.get("theta"):
+            inv_freq = rope_inv_freq(self.cfg, theta=float(r_cfg["theta"])).to(self.inv_freq.device)
+        if bc is not None:
+            pos_k = bc.pos[:T].to(self.inv_freq.device).float().clone()
+            if "scale" in r_cfg:
+                pos_k = pos_k * float(r_cfg["scale"])
+            for iv in ctx.active("rope"):
+                if T > 0:
+                    sub = pos_k[:, None]
+                    loc_idx = [T - 1] if iv.positions.strip().lower() == "last" else parse_index_spec(iv.positions, T)
+                    if loc_idx:
+                        pos_k = apply_op(sub, iv, ctx, 0, loc_idx)[:, 0]
+            if ctx.store.get("chunk_origin") == "prompt":
+                main_pos = cache.pos[-n:].to(self.inv_freq.device).float().clone()
+                # Shift query positions during main prompt prefill so the last prompt query sits right at the end of bc!
+                delta = (float(bc.pos[bc.n_prompt - 1]) - float(main_pos[-1])) if (bc.n_prompt > 0 and len(main_pos) > 0) else 0.0
+                pos_q = main_pos + delta
+                if "scale" in r_cfg:
+                    pos_q = pos_q * float(r_cfg["scale"])
+            else:
+                pos_q = pos_k[T - n:].clone()
+            if r_cfg.get("q_offset"):
+                pos_q = pos_q + float(r_cfg["q_offset"])
+            if ctx.capture:
+                ctx.store.setdefault("rope_pos", {})[p] = (pos_q.detach().cpu(), pos_k.detach().cpu())
+            return pos_q, pos_k, inv_freq
+
+        pos_k = cache.pos.to(self.inv_freq.device).float().clone()
+        if "scale" in r_cfg:
+            pos_k = pos_k * float(r_cfg["scale"])
+        n_pre = sum(b - a for a, b, _ in cache.prefix_spans)
+        for iv in ctx.active("rope"):
+            run_len = max(0, T - n_pre)
+            if run_len > 0:
+                sub = pos_k[n_pre:, None]
+                if iv.positions.strip().lower() == "last":
+                    loc_idx = [run_len - 1]
+                else:
+                    rng = {k: range(min(r.start, run_len), min(r.stop, run_len))
+                           for k, r in (ctx.token_ranges or {}).items()}
+                    loc_idx = parse_index_spec(iv.positions, run_len, rng)
+                if loc_idx:
+                    pos_k[n_pre:] = apply_op(sub, iv, ctx, 0, loc_idx)[:, 0]
+        t0 = T - n
+        pos_q = pos_k[t0:].clone()
+        if r_cfg.get("q_offset"):
+            pos_q = pos_q + float(r_cfg["q_offset"])
+        if ctx.capture:
+            ctx.store.setdefault("rope_pos", {})[p] = (pos_q.detach().cpu(), pos_k.detach().cpu())
+        return pos_q, pos_k, inv_freq
 
     def _full_attn(self, p, pre, h, cache, ctx, idx_of):
         """Softmax attention over the cache. Qwen3.5/3.6: the query projection also yields a per-head output gate."""
@@ -489,24 +560,36 @@ class RawLLM:
         k = self._head_hook(p, "k", k, ctx, idx_of, cap)
         v = self._head_hook(p, "v", v, ctx, idx_of, cap)
         x = h
-        cache.append(p, k, v)
-        if ctx.active("kv_k"):
-            cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(x.device), ctx, idx_of, False).to(cache.device)
-        if ctx.active("kv_v"):
-            cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(x.device), ctx, idx_of, False).to(cache.device)
-        K = cache.k[p].to(x.device)
-        V = cache.v[p].to(x.device)
+        bc = cache.block_caches.get(p)
+        if bc is not None:
+            # During main prompt processing, this block already owns its recreated prompt KV cache!
+            # During prefill / decode (after prompt), append new tokens so the block's cache grows gradually.
+            if ctx.store.get("chunk_origin") != "prompt":
+                bc.append(k, v)
+            if ctx.active("kv_k") and bc.k is not None:
+                bc.k = self._head_hook(p, "kv_k", bc.k.to(x.device), ctx, idx_of, False).to(bc.device)
+            if ctx.active("kv_v") and bc.v is not None:
+                bc.v = self._head_hook(p, "kv_v", bc.v.to(x.device), ctx, idx_of, False).to(bc.device)
+            K = bc.k.to(x.device)
+            V = bc.v.to(x.device)
+        else:
+            cache.append(p, k, v)
+            if ctx.active("kv_k"):
+                cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(x.device), ctx, idx_of, False).to(cache.device)
+            if ctx.active("kv_v"):
+                cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(x.device), ctx, idx_of, False).to(cache.device)
+            K = cache.k[p].to(x.device)
+            V = cache.v[p].to(x.device)
         T = K.shape[1]
-        t0 = T - n
-        pos_all = cache.pos.to(self.inv_freq.device)
-        qr = apply_rope(q, pos_all[t0:], self.inv_freq)
-        kr = apply_rope(K, pos_all, self.inv_freq)
+        pos_q, pos_k, inv_freq = self._rope_for_block(p, n, T, cache, ctx)
+        qr = apply_rope(q, pos_q, inv_freq)
+        kr = apply_rope(K, pos_k, inv_freq)
         rep = cfg.n_heads // cfg.n_kv
         if rep > 1:
             kr = kr.repeat_interleave(rep, 0)
             V = V.repeat_interleave(rep, 0)
         scores = (qr.float() @ kr.float().transpose(1, 2)) / math.sqrt(cfg.head_dim)   # [H, n, T]
-        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, x.device), float("-inf"))
+        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, x.device, ctx), float("-inf"))
         probs = torch.softmax(scores, -1)
         if cap and ctx.store.get("want_attn", True):
             ctx.store.setdefault("attn", {}).setdefault(p, []).append(probs.detach().to(torch.float16).cpu())
@@ -559,21 +642,31 @@ class RawLLM:
         q = self._head_hook(p, "q", q, ctx, idx_of, cap)
         k = self._head_hook(p, "k", k, ctx, idx_of, cap)
         v = self._head_hook(p, "v", v, ctx, idx_of, cap)
-        cache.append(p, k, v)
-        if ctx.active("kv_k"):
-            cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(h.device), ctx, idx_of, False).to(cache.device)
-        if ctx.active("kv_v"):
-            cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(h.device), ctx, idx_of, False).to(cache.device)
-        K, V = cache.k[p].to(h.device), cache.v[p].to(h.device)
+        bc = cache.block_caches.get(p)
+        if bc is not None:
+            if ctx.store.get("chunk_origin") != "prompt":
+                bc.append(k, v)
+            if ctx.active("kv_k") and bc.k is not None:
+                bc.k = self._head_hook(p, "kv_k", bc.k.to(h.device), ctx, idx_of, False).to(bc.device)
+            if ctx.active("kv_v") and bc.v is not None:
+                bc.v = self._head_hook(p, "kv_v", bc.v.to(h.device), ctx, idx_of, False).to(bc.device)
+            K, V = bc.k.to(h.device), bc.v.to(h.device)
+        else:
+            cache.append(p, k, v)
+            if ctx.active("kv_k"):
+                cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(h.device), ctx, idx_of, False).to(cache.device)
+            if ctx.active("kv_v"):
+                cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(h.device), ctx, idx_of, False).to(cache.device)
+            K, V = cache.k[p].to(h.device), cache.v[p].to(h.device)
         T = K.shape[1]
-        pos_all = cache.pos.to(self.inv_freq.device)
-        qr = apply_rope(q, pos_all[T - n:], self.inv_freq).float()
-        kr = apply_rope(K, pos_all, self.inv_freq).float()
+        pos_q, pos_k, inv_freq = self._rope_for_block(p, n, T, cache, ctx)
+        qr = apply_rope(q, pos_q, inv_freq).float()
+        kr = apply_rope(K, pos_k, inv_freq).float()
         if self.rope_mult != 1.0:
             qr = torch.cat([qr[..., :a["rope"]] * self.rope_mult, qr[..., a["rope"]:]], -1)
             kr = torch.cat([kr[..., :a["rope"]] * self.rope_mult, kr[..., a["rope"]:]], -1)
         scores = (qr @ kr.transpose(1, 2)) * (self.score_mult / math.sqrt(cfg.head_dim))
-        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, h.device), float("-inf"))
+        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, h.device, ctx), float("-inf"))
         probs = torch.softmax(scores, -1)
         if cap and ctx.store.get("want_attn", True):
             ctx.store.setdefault("attn", {}).setdefault(p, []).append(probs.detach().to(torch.float16).cpu())
@@ -894,12 +987,14 @@ class LLMAdapter:
                               if i in self.model.moe_layers else " · SwiGLU")
                            for i in range(c.n_layers)],
             "hybrid": bool(c.layer_types),
+            "kv_layers": [i for i in range(c.n_layers) if not c.is_linear(i)],
+            "linear_layers": [i for i in range(c.n_layers) if c.is_linear(i)],
             "extra_blocks": list(getattr(self, "extra_blocks", None) or []),     # blocks added by training (adapt.py)
             "vision": bool(c.vision),
             "weights": self.model.W.describe(),
             "capabilities": {"repeat_blocks": True, "reorder_blocks": True, "remove_blocks": True,
                              "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": bool(c.moe)},
-            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out",
+            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_heads", "attn_out",
                       *(["router", "expert_out"] if c.moe else []), "mlp_neurons", "mlp_out", "resid_post", "weights"],
         }
 
@@ -968,6 +1063,114 @@ class LLMAdapter:
         prefill_ids = tok.encode(p["prefill"], add_special=False) if p.get("prefill") else []
         return prompt_ids, prefill_ids
 
+    @staticmethod
+    def apply_kv_override_params(base_p: dict, ov: dict) -> dict:
+        """Apply one per-block prompt/system override operation to prompt parameters."""
+        p = dict(base_p)
+        p["history"] = [dict(m) for m in (base_p.get("history") or [])]
+        op = ov.get("op", "replace_system")
+        txt = str(ov.get("text") or "")
+        sep = "\n" if txt and not txt.startswith((" ", "\n")) else ""
+        if op == "replace_system":
+            p["system"] = txt
+        elif op == "append_system":
+            cur = str(p.get("system") or "")
+            p["system"] = (cur + ("\n" if cur and txt else "") + txt) if cur else txt
+        elif op == "prepend_system":
+            cur = str(p.get("system") or "")
+            p["system"] = (txt + ("\n" if txt and cur else "") + cur) if cur else txt
+        elif op == "replace_user":
+            if p.get("prompt", "") or not p["history"]:
+                p["prompt"] = txt
+            else:
+                for i in range(len(p["history"]) - 1, -1, -1):
+                    if p["history"][i]["role"] == "user":
+                        p["history"][i]["content"] = txt
+                        break
+        elif op == "append_user":
+            if p.get("prompt", "") or not p["history"]:
+                cur = str(p.get("prompt") or "")
+                p["prompt"] = (cur + sep + txt) if cur else txt
+            else:
+                for i in range(len(p["history"]) - 1, -1, -1):
+                    if p["history"][i]["role"] == "user":
+                        cur = p["history"][i]["content"]
+                        p["history"][i]["content"] = (cur + sep + txt) if cur else txt
+                        break
+        elif op == "prepend_user":
+            sep_pre = "\n" if txt and not txt.endswith((" ", "\n")) else ""
+            if p.get("prompt", "") or not p["history"]:
+                cur = str(p.get("prompt") or "")
+                p["prompt"] = (txt + sep_pre + cur) if cur else txt
+            else:
+                for i in range(len(p["history"]) - 1, -1, -1):
+                    if p["history"][i]["role"] == "user":
+                        cur = p["history"][i]["content"]
+                        p["history"][i]["content"] = (txt + sep_pre + cur) if cur else txt
+                        break
+        return p
+
+    @torch.no_grad()
+    def recreate_block_caches(self, plan: Plan, start_pos: float = 0.0, prompt_scale: float = 1.0) -> dict[int, BlockKVCache]:
+        """Recreate clean KV caches per targeted full-attention block slot by running each unique rewritten
+        system/user prompt through the model's stack once. Subsequent prefill & generated tokens append gradually."""
+        overrides = plan.params.get("kv_overrides") or []
+        if not overrides:
+            return {}
+        S_ = len(plan.schedule)
+        slot_cfg: dict[int, list[dict]] = {}
+        for ov in overrides:
+            for s in ov.get("slots") or []:
+                if 0 <= s < S_ and not self.cfg.is_linear(plan.schedule[s]):
+                    slot_cfg.setdefault(s, []).append(ov)
+        if not slot_cfg:
+            return {}
+        # Group slots that share identical sequence of overrides so we run the forward pass only once per unique prompt!
+        by_sig: dict[tuple, list[int]] = {}
+        ov_for_sig: dict[tuple, list[dict]] = {}
+        for s, ovs in slot_cfg.items():
+            sig = tuple((o.get("op"), o.get("text")) for o in ovs)
+            by_sig.setdefault(sig, []).append(s)
+            ov_for_sig[sig] = ovs
+
+        out: dict[int, BlockKVCache] = {}
+        for sig, slots in by_sig.items():
+            ovs = ov_for_sig[sig]
+            mod_p = dict(plan.params)
+            # Clear prefix_cache when recreating a full system/user override unless no chat template issue
+            for o in ovs:
+                mod_p = self.apply_kv_override_params(mod_p, o)
+            # Ensure system prompt overrides work cleanly even if use_chat_template was off or on
+            mod_ids, _ = self.build_ids(mod_p)
+            if not mod_ids:
+                mod_ids = [self.tok.bos_id or 0]
+            positions = [start_pos + i * prompt_scale for i in range(len(mod_ids))]
+            tmp_cache = self.new_cache(S_)
+            ctx = RunContext(interventions=[])
+            self.model.forward(mod_ids, positions, "prompt", tmp_cache, plan.schedule, ctx, 0,
+                               lambda iv, o, n: [])
+            last_ov = ovs[-1]
+            op_summary = " + ".join(o.get("op", "") for o in ovs)
+            text_summary = last_ov.get("text", "")
+            label_summary = last_ov.get("label") or op_summary
+            for s in slots:
+                if tmp_cache.k[s] is None:
+                    continue
+                bc = BlockKVCache(
+                    k=tmp_cache.k[s].detach().to(self.cache_device).clone(),
+                    v=tmp_cache.v[s].detach().to(self.cache_device).clone(),
+                    pos=tmp_cache.pos.detach().clone(),
+                    tokens=list(tmp_cache.tokens),
+                    segments=[s_seg for s_seg in tmp_cache.segments],
+                    op=op_summary,
+                    text=text_summary,
+                    label=label_summary,
+                    n_prompt=len(mod_ids),
+                    device=self.cache_device,
+                )
+                out[s] = bc
+        return out
+
     @torch.no_grad()
     def build_prefix(self, plan: Plan, text: str, as_system: bool) -> tuple[KVCache, dict]:
         """Encode a text once and keep only its KV cache: a 'hidden prompt' that later conversations can attend
@@ -1024,6 +1227,7 @@ class LLMAdapter:
                 "moe_shared": cat(ctx.store.get("moe_shared", {})),
                 "moe_k": dict(ctx.store.get("moe_k") or {}), "moe_temp": dict(ctx.store.get("moe_temp") or {}),
                 "moe_noshared": set(ctx.store.get("moe_noshared") or ()),
+                "rope": dict(ctx.store.get("rope") or {}), "rope_pos": dict(ctx.store.get("rope_pos") or {}),
                 # what the run was edited with, so that analyses which run blocks again (decode through the last
                 # k blocks) run them the way the run did
                 "interventions": list(plan.interventions), "sources": dict(ctx.sources),
@@ -1080,6 +1284,7 @@ class LLMAdapter:
             ctx.store["unit_range"] = dict(cap.get("unit_range") or {})
             ctx.store["moe_k"], ctx.store["moe_temp"] = cap.get("moe_k") or {}, cap.get("moe_temp") or {}
             ctx.store["moe_noshared"] = cap.get("moe_noshared") or ()
+            ctx.store["rope"] = dict(cap.get("rope") or {})
             planned = max([T] + [r.stop for r in rng.values()])
 
             def idx_of(iv):
@@ -1089,7 +1294,29 @@ class LLMAdapter:
                 return [g for g in parse_index_spec(iv.positions, planned, rng) if g < T]
 
             for q in range(start, S):
-                x = self.model.block(q, schedule[q], x, tmp, ctx, idx_of)
+                if q in tmp.block_caches:
+                    # Replay into a recreated block cache: prompt tokens already exist in prefix_only();
+                    # only tokens after prompt_len (prefill + generated) are appended gradually.
+                    n_prompt_main = rng.get("prompt", range(0, T)).stop
+                    bc = tmp.block_caches[q]
+                    if T <= n_prompt_main:
+                        ctx.store["chunk_origin"] = "prompt"
+                        x = self.model.block(q, schedule[q], x, tmp, ctx, idx_of)
+                    else:
+                        ctx.store["chunk_origin"] = "prompt"
+                        x_pre = self.model.block(q, schedule[q], x[:n_prompt_main], tmp, ctx,
+                                                 lambda iv: [i for i in idx_of(iv) if i < n_prompt_main])
+                        tail_len = T - n_prompt_main
+                        base_tail_pos = bc.next_position()
+                        tail_pos = [base_tail_pos + i for i in range(tail_len)]
+                        bc.add_tokens(cap["ids"][n_prompt_main:T], tail_pos, "generated")
+                        ctx.store["chunk_origin"] = "generated"
+                        x_tail = self.model.block(q, schedule[q], x[n_prompt_main:], tmp, ctx,
+                                                  lambda iv: [i - n_prompt_main for i in idx_of(iv) if i >= n_prompt_main])
+                        x = torch.cat([x_pre, x_tail], dim=0)
+                    ctx.store.pop("chunk_origin", None)
+                else:
+                    x = self.model.block(q, schedule[q], x, tmp, ctx, idx_of)
         return self.model.final(x, w_out if w_out is not None else self.model.unembed_weight())
 
     @torch.no_grad()
@@ -1322,11 +1549,24 @@ class LLMAdapter:
             return {"error": "No attention captured for this block (sequence too long for the capture budget)."}
         m = a.float().mean(0) if head is None or head < 0 else a[head].float()
         cache: KVCache = cap["cache"]
+        bc = cache.block_caches.get(pos)
+        r_pos = (cap.get("rope_pos") or {}).get(pos)
+        if bc is not None:
+            k_pos = r_pos[1][: m.shape[1]].tolist() if r_pos is not None and len(r_pos[1]) >= m.shape[1] else bc.pos[: m.shape[1]].tolist()
+            return {"n_heads": a.shape[0], "n_prefix": 0,
+                    "kv_override": {"op": bc.op, "label": bc.label, "n_prompt": bc.n_prompt, "text": bc.text},
+                    "matrix": [[round(float(v), 4) for v in row] for row in m],
+                    "query_tokens": [self.tok.piece(i) for i in cap["ids"][: m.shape[0]]],
+                    "key_tokens": [self.tok.piece(i) for i in bc.tokens[: m.shape[1]]],
+                    "key_positions": [round(float(x), 2) for x in k_pos],
+                    "rope": (cap.get("rope") or {}).get(pos)}
+        k_pos = r_pos[1][: m.shape[1]].tolist() if r_pos is not None and len(r_pos[1]) >= m.shape[1] else cache.pos[: m.shape[1]].tolist()
         return {"n_heads": a.shape[0], "n_prefix": cap["n_prefix"],
                 "matrix": [[round(float(v), 4) for v in row] for row in m],
                 "query_tokens": [self.tok.piece(i) for i in cap["ids"][: m.shape[0]]],
                 "key_tokens": [self.tok.piece(i) for i in cache.tokens[: m.shape[1]]],
-                "key_positions": [round(float(x), 1) for x in cache.pos[: m.shape[1]].tolist()]}
+                "key_positions": [round(float(x), 2) for x in k_pos],
+                "rope": (cap.get("rope") or {}).get(pos)}
 
     def unload(self):
         self.model = None
@@ -1392,8 +1632,10 @@ class Stepper:
         from .blockcode import compile_code
         self.code = {nid: compile_code(c["source"], c["kind"], nid) for nid, c in (p.get("code") or {}).items()}
         ctx.store["code"] = {pos: self.code[nid] for pos, nid in enumerate(plan.schedule_nodes) if nid in self.code}
+        rope_per = p.get("rope") or {}
+        ctx.store["rope"] = {pos: dict(rope_per[nid]) for pos, nid in enumerate(plan.schedule_nodes) if nid in rope_per}
         self.box_code = {c.kind: c for c in self.code.values() if c.kind != "block"}
-        cache, start_pos, spans, hidden = ad.new_cache(S_), 0.0, [], []
+        cache, start_pos, spans = ad.new_cache(S_), 0.0, []
         for c, sp in zip(prefixes, specs):
             # Each prefix gets its own span; prefixes aimed at different blocks may reuse the same positions
             # because no block sees both.
@@ -1406,11 +1648,7 @@ class Stepper:
             slots = None if lay in ("all", "*", "") else (set() if lay == "none" else set(parse_index_spec(lay, S_)))
             spans.append((a, len(cache), slots))
             start_pos = max(start_pos, st)
-            if sp.get("mode") == "overwrite":         # these blocks read the prefix *instead of* the prompt
-                hidden.append(slots)
         cache.prefix_spans = spans
-        n_pre = len(cache)
-        cache.hidden_spans = [(n_pre, n_pre + len(prompt_ids), slots) for slots in hidden]
         # Linear-attention blocks: start from the memory of the prefix visible to that block (zero if none).
         # Two prefixes visible to the same linear block can't both be in its single memory: the later one wins.
         cache.states, self.notes = {}, []
@@ -1421,6 +1659,13 @@ class Stepper:
                         self.notes.append(f"linear block #{slot} sees several prefixes; only the last one's memory is used")
                     cache.states[slot] = {k: v.detach().clone() for k, v in stt.items()}
         cache.init_states = KVCache._clone_states(cache.states)
+        self.prompt_scale = float(p.get("rope_prompt_scale", 1.0))
+        self.step_stride = float(p.get("rope_step_stride", 1.0))
+        if p.get("kv_overrides"):
+            cache.block_caches = ad.recreate_block_caches(plan, start_pos=start_pos, prompt_scale=self.prompt_scale)
+        max_bc_len = max([len(bc) for bc in cache.block_caches.values()], default=0)
+        est = ad.cfg.n_heads * planned * max(planned + sum(len(c) for c in prefixes), max_bc_len + len(prefill_ids) + self.total) * S_ * 2
+        ctx.store["want_attn"] = est < int(p.get("attn_budget_mb", 768)) * 2**20
         self.cache, self.n_prefix = cache, len(cache)
         self.gen = torch.Generator(device="cpu").manual_seed(p["seed"])
         self.eos = set(ad.cfg.eos_ids) | ({ad.tok.eos_id} if ad.tok.eos_id is not None else set())
@@ -1429,6 +1674,7 @@ class Stepper:
         self.seq: list[int] = []
         self.logits_rows: list[torch.Tensor] = []
         self.offset, self.pos_next = 0, start_pos
+        self.last_pos = None
         self.x, self.bp, self.chunk = None, 0, None
         self.n_generated, self.done, self.forced = 0, False, None
         self.trace: list[dict] = []
@@ -1488,8 +1734,21 @@ class Stepper:
             if ch is None:
                 return False
             ids, origin = ch
-            positions = [self.pos_next + i for i in range(len(ids))]
+            if origin == "generated":
+                base_p = (self.last_pos + self.step_stride) if self.last_pos is not None else self.pos_next
+                positions = [base_p + i * self.step_stride for i in range(len(ids))]
+            else:
+                base_p = (self.last_pos + self.prompt_scale) if self.last_pos is not None else self.pos_next
+                positions = [base_p + i * self.prompt_scale for i in range(len(ids))]
+            self._chunk_positions = positions
             self.cache.add_tokens(ids, positions, origin)
+            self.ctx.store["chunk_origin"] = origin
+            if origin != "prompt" and self.cache.block_caches:
+                stride = self.step_stride if origin == "generated" else self.prompt_scale
+                for bc in self.cache.block_caches.values():
+                    b_base = (float(bc.pos[-1]) + stride) if len(bc.pos) else 0.0
+                    b_pos = [b_base + i * stride for i in range(len(ids))]
+                    bc.add_tokens(ids, b_pos, origin)
             if "embed" in self.box_code:
                 from .blockcode import run_embed
                 self.x = run_embed(self.model, self.box_code["embed"], ids, self.ctx)
@@ -1517,12 +1776,15 @@ class Stepper:
             if rows:
                 row = rows[-1][:, -1, :].float().mean(0)          # last token's attention, mean over heads
                 v, i = row.topk(min(5, row.shape[0]))
-                snap["attends_to"] = [[int(j), self.ad.tok.piece(self.cache.tokens[int(j)]), round(float(w), 3)]
+                bc = self.cache.block_caches.get(p)
+                tok_list = bc.tokens if bc is not None else self.cache.tokens
+                snap["attends_to"] = [[int(j), self.ad.tok.piece(tok_list[int(j)]) if int(j) < len(tok_list) else "", round(float(w), 3)]
                                       for w, j in zip(v, i)]
             self.trace.append(snap)
             self.last_lens[p] = snap["top"][0][0]
         self.bp += 1
         if self.bp == len(sched):                 # end of the stack: final norm + unembed
+            self.ctx.store.pop("chunk_origin", None)
             h = self.x
             if "final_norm" in self.box_code or "lm_head" in self.box_code:
                 from .blockcode import run_final_norm, run_lm_head
@@ -1535,7 +1797,9 @@ class Stepper:
             self.logits_rows.append(logits)
             self.seq += ids
             self.offset += len(ids)
-            self.pos_next += len(ids)
+            if getattr(self, "_chunk_positions", None):
+                self.last_pos = float(self._chunk_positions[-1])
+            self.pos_next = (self.last_pos + (self.step_stride if self.chunk[1] == "generated" else self.prompt_scale)) if self.last_pos is not None else (self.pos_next + len(ids))
             self.x = None
         return True
 
@@ -1627,6 +1891,11 @@ class Stepper:
                 "mlp_norm": round(float(torch.cat(st["mlp"]).mean()), 3),
                 "lens_last": lens_last,
                 "pending": bool(inflight) and pp >= self.bp}       # hasn't seen the in-flight token yet
+            bc = self.cache.block_caches.get(pp)
+            if bc is not None:
+                block_stats[plan.schedule_nodes[pp]]["kv_override"] = {
+                    "op": bc.op, "label": bc.label, "n_tokens": len(bc), "n_prompt": bc.n_prompt
+                }
             sel = caps["moe_sel"].get(pp)
             if sel is not None and len(sel):      # mixture of experts: how often each expert was chosen in this run
                 E = self.model.moe_layers[plan.schedule[pp]]["n"]

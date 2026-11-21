@@ -55,8 +55,9 @@ Lessons that work (in this order for newcomers)
                   {"do":"steer","block":6,"vector":<id>,"value":4}. Raise value until the text bends; too much breaks it.
   Neurons         top_neurons on a block → pick one with readable "promotes" words → clamp it:
                   {"do":"clamp","block":4,"neurons":"1021","to":"max","value":5}.
-  Layer prompts   {"do":"layer_prompt","text":"Answer in French.","layers":"8:12","mode":"shift"}: text only some
-                  blocks can read. mode overwrite replaces the prompt in those blocks.
+  Block KV        {"do":"replace_system","text":"You are a pirate.","block":12} (or append_system / replace_user /
+                  append_user / prepend_*): recreate that full-attention block's KV cache from a rewritten
+                  system/user prompt; the cache then grows as tokens are generated.
   Quantization    quant_compare(prompt, bits=[8,4,2]): where does the text start to change?
   Code            block_code shows a block as ~15 lines of Python; an edit {"do":"code","block":2,"source":…} runs
                   the changed lines (e.g. remove `x = x + mlp_out`).
@@ -68,7 +69,9 @@ Edits for run_prompt (list of objects, applied in order to the default flow)
   {"do":"patch","block":7,"source_run":"<id>","hook":"resid_post","positions":"last"}
   {"do":"steer","block":6,"vector":"<id>","value":4}
   {"do":"clamp","block":4,"neurons":"12,40","to":"max"|"min"|"value","value":5}
-  {"do":"layer_prompt","text":"…","layers":"all|none|0:12|3,5","mode":"shift|negative|offset|overwrite"}
+  {"do":"replace_system"|"append_system"|"prepend_system"|"replace_user"|"append_user"|"prepend_user",
+        "text":"…","block":12}   (or "blocks":"12:24"|"all"; recreates per-block KV)
+  {"do":"kv_override","block":12,"op":"replace_system","text":"…"}
   {"do":"code","block":2,"source":"…python…"}   (or "box":"sampler"|"embed"|"final_norm"|"lm_head")
 "block" is the layer number. positions: all | last | prompt | generated | 3 | 2:5.
 
@@ -161,10 +164,16 @@ def build_flow(prompt=None, system=None, prefill=None, chat=None, max_new_tokens
                 fb.quantize_block(blk, **e)
             elif do == "clamp":
                 fb.clamp(blk, e.pop("neurons"), **e)
-            elif do == "layer_prompt":
-                fb.layer_prompt(e.pop("text"), **e)
+            elif do in ("kv_override", "block_kv"):
+                fb.kv_override(blk if blk is not None else e.pop("blocks", e.pop("layers", "all")), **e)
+            elif do in ("replace_system", "append_system", "prepend_system", "replace_user", "append_user", "prepend_user"):
+                getattr(fb, do)(e.pop("text", ""), blocks=blk if blk is not None else e.pop("blocks", e.pop("layers", "all")), **e)
             elif do == "code":
                 fb.code(blk if blk is not None else e["box"], e["source"])
+            elif do == "rope":
+                fb.rope(blk if blk is not None else e.pop("blocks", "all"), **e)
+            elif do == "rope_step":
+                fb.rope_step(**e)
             else:
                 raise AppError(f"Unknown edit '{do}'. See teaching_guide for the list.")
         except (KeyError, TypeError) as ex:

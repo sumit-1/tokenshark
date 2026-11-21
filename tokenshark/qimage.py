@@ -913,6 +913,10 @@ class ImageStepper:
             self.guess = None                          # fp32 [N, z]: the current x̂₀ (after a step, or after a block)
             self.guess_at = None                       # (step, block or None)
         self.edits: list[dict] = []
+        self.active_steers: list[dict] = []
+        self.prompt_changes: list[dict] = []
+        self.word_scales: dict[int, float] = {}
+        self.current_prompt: str = p["prompt"]
         self.rgb_fit = None                            # linear latent → colour map, fitted on exact decodes
         self._fit_key = None                           # which guess_at self.rgb_fit was fitted on
         self._decoded = None                           # (key, PIL image) of the last exact decode of the guess
@@ -958,8 +962,25 @@ class ImageStepper:
         vf = v.float()
         x0 = lf - self.s * vf
         self.last_eps = (lf + (1.0 - self.s) * vf).detach()
+        steered = False
+        if getattr(self, "active_steers", None):
+            s_next = float(self.sig[i + 1])
+            for st_cfg in self.active_steers:
+                k = i - st_cfg["start_step"]
+                n_st = st_cfg["steer_steps"]
+                if 0 <= k < n_st and s_next > 0.04:
+                    # Smooth cosine decay across the steer window, tapering off automatically in late detail steps
+                    prog_decay = 0.5 * (1.0 + math.cos(math.pi * k / max(1, n_st)))
+                    sigma_gate = min(1.0, s_next / 0.30)
+                    alpha = float(st_cfg["pull"]) * prog_decay * sigma_gate
+                    x0 = x0 + alpha * st_cfg["m"] * (st_cfg["z"] - x0)
+                    steered = True
         self.x0s[i] = x0.to(torch.float16).cpu()
-        lf = lf + (self.sig[i + 1] - self.sig[i]).to(lf.device) * vf
+        if steered:
+            s_next = float(self.sig[i + 1])
+            lf = (1.0 - s_next) * x0 + s_next * self.last_eps
+        else:
+            lf = lf + (self.sig[i + 1] - self.sig[i]).to(lf.device) * vf
         if self.lock is not None and i in self.lock["steps"]:
             # region lock — the image version of forced tokens: pull the painted tiles back to the start
             # image, noised to the level of the next step
@@ -1107,42 +1128,73 @@ class ImageStepper:
 
     @torch.no_grad()
     def edit_guess(self, data_url: str, strength: float = 1.0, only_changed: bool = True, mask_url: str = "",
-                   sigma: float | None = None) -> dict:
+                   sigma: float | None = None, edit_noise: float | None = None,
+                   fresh_noise: bool = False, steer_steps: int = 0, steer_pull: float = 0.45) -> dict:
         """Swap the model's current guess x̂₀ for an edited picture, keeping the noise it is working with:
-              x_t = (1 − σ)·x̂₀ + σ·ε̂   →   ε̂ = (x_t − (1 − σ)·x̂₀) / σ   →   x_t' = (1 − σ)·encode(edit) + σ·ε̂
-        Only tiles you changed (or painted in mask_url) are swapped; strength blends."""
+              x_t = (1 − σ)·x̂₀ + σ·ε̂   →   ε̂ = (x_t − (1 − σ)·x̂₀) / σ   →   x_t' = (1 − σ_edit)·encode(edit) + σ_edit·ε̂
+        Only tiles you changed (or painted in mask_url) are swapped; strength blends.
+        The global sigma schedule is left untouched unless `sigma` is explicitly given, so the edit acts as a
+        natural step-level steer that the model can refine or overwrite in subsequent steps.
+        When `steer_steps > 0`, also registers a decaying multi-step trajectory pull over the next `steer_steps`
+        steps so early/mid edits are neither washed out in 1 step nor locked as blurry paint."""
         if self.x is not None:
             raise ValueError("Finish the current step first (▸▸): an edit goes into the input of the next step.")
         ad, h, w = self.ad, *self.hw
         raw = base64.b64decode(data_url.split(",", 1)[-1])
         after_pil = Image.open(io.BytesIO(raw)).convert("RGB").resize((self.Wpx, self.Hpx), Image.LANCZOS)
 
+        if getattr(self, "_base_at", None) != self.i and self._decoded is not None:
+            self._base_pil = self._decoded[1]
+            self._base_at = self.i
+
         if mask_url:
             m = ad._load_mask(mask_url, h, w).to(ad.device)
         elif only_changed and self._decoded is not None:
-            m = _changed_tiles(self._decoded[1], data_url, ad.vae.factor, (h, w)).to(ad.device)
+            ref_pil = getattr(self, "_base_pil", None) if getattr(self, "_base_at", None) == self.i else self._decoded[1]
+            m = _changed_tiles(ref_pil or self._decoded[1], data_url, ad.vae.factor, (h, w)).to(ad.device)
         else:
             m = torch.ones(self.N, 1, device=ad.device)
         m = m * float(strength)
         n_tiles = int((m > 0.01).sum())
 
-        if n_tiles == 0 and sigma is None:
+        if n_tiles == 0 and sigma is None and edit_noise is None and not fresh_noise:
             cur_s = float(self.sig[min(self.i, self.n_steps - 1)])
-            rec = {"step": self.i, "sigma": round(cur_s, 4), "tiles": 0, "of": self.N, "strength": float(strength)}
+            rec = {"step": self.i, "sigma": round(cur_s, 4), "edit_noise": round(cur_s, 4),
+                   "steer_steps": 0, "tiles": 0, "of": self.N, "strength": float(strength)}
             self.edits.append(rec)
             self.ctx.store.setdefault("edits", []).append(rec)
             return rec
 
         if self.done or self.i >= self.n_steps:
-            self.extend_steps(more_steps=4, start_sigma=sigma if sigma is not None else 0.35)
+            ext_s = edit_noise if edit_noise is not None else (sigma if sigma is not None else 0.35)
+            self.extend_steps(more_steps=4, start_sigma=ext_s)
 
         old_sigma = float(getattr(self, "_lat_sigma", float(self.sig[self.i])))
-        if self.guess is not None:
+        if getattr(self, "_eps_step", None) == self.i and getattr(self, "_step_eps", None) is not None:
+            x0 = getattr(self, "_base_x0", self.guess).to(ad.device).float() if self.guess is not None else None
+            eps = self._step_eps
+        elif self.guess is not None:
             x0 = self.guess.to(ad.device).float()
-            eps = (self.lat.float() - (1.0 - old_sigma) * x0) / old_sigma if old_sigma > 1e-4 else self.last_eps
+            eps = (self.lat.float() - (1.0 - old_sigma) * x0) / old_sigma if 1e-4 < old_sigma < 0.999 else self.last_eps
+            self._step_eps = eps.detach()
+            self._eps_step = self.i
+            self._base_x0 = self.guess.clone()
+            if self._decoded is not None:
+                self._base_pil = self._decoded[1]
+                self._base_at = self.i
         else:
             x0 = None
             eps = self.last_eps
+            self._step_eps = eps.detach()
+            self._eps_step = self.i
+
+        if fresh_noise:
+            self.noise_seed = int(getattr(self, "noise_seed", self.p_["seed"])) + 997
+            gen = torch.Generator(device="cpu").manual_seed(self.noise_seed)
+            n = torch.randn((1, 1, ad.vae.z, h, w), generator=gen, dtype=torch.float32)
+            eps_edit = n.view(ad.vae.z, self.N).T.contiguous().to(ad.device)
+        else:
+            eps_edit = eps
 
         if sigma is not None:
             target_s = max(0.02, min(1.0, float(sigma)))
@@ -1154,35 +1206,125 @@ class ImageStepper:
                 self.sig[self.i] = target_s
 
         cur_sigma = float(self.sig[self.i])
+        if edit_noise is not None:
+            mix_sigma = max(0.0, min(1.0, float(edit_noise)))
+        elif self.i == 0 and cur_sigma >= 0.999:
+            mix_sigma = 0.85
+        else:
+            mix_sigma = cur_sigma
+
         z = ad._load_image(data_url, self.Wpx, self.Hpx)[0].reshape(ad.vae.z, self.N).T.to(ad.device).float()
         if x0 is None:
             x0 = z.clone()
 
         new_x0 = x0 + m * (z - x0)
-        new_lat = (1.0 - cur_sigma) * z + cur_sigma * eps
+        new_lat = (1.0 - mix_sigma) * z + mix_sigma * eps_edit
         if sigma is not None:
-            self.lat = ((1.0 - cur_sigma) * new_x0 + cur_sigma * eps).to(ad.dit.dtype)
+            base_lat = (1.0 - cur_sigma) * x0 + cur_sigma * eps
+            self.lat = (base_lat + m * (new_lat - base_lat)).to(ad.dit.dtype)
         else:
             self.lat = (self.lat.float() + m * (new_lat - self.lat.float())).to(ad.dit.dtype)
         self._lat_sigma = cur_sigma
         self.last_eps = eps.detach()
         self.guess = new_x0.cpu()
         self.guess_at = (self.i - 1, None)
-        if (self.i - 1) >= 0:
-            self.x0s[self.i - 1] = self.guess.to(torch.float16)
 
-        rec = {"step": self.i, "sigma": round(cur_sigma, 4), "tiles": n_tiles, "of": self.N,
+        steer_n = max(0, int(steer_steps or 0))
+        if not hasattr(self, "active_steers"):
+            self.active_steers = []
+        # Replace any previous steer started at this exact step
+        self.active_steers = [s for s in self.active_steers if s["start_step"] != self.i]
+        if steer_n > 0 and n_tiles > 0:
+            self.active_steers.append({
+                "start_step": self.i,
+                "steer_steps": steer_n,
+                "pull": max(0.05, min(1.0, float(steer_pull))),
+                "m": m.detach(),
+                "z": z.detach(),
+            })
+
+        rec = {"step": self.i, "sigma": round(cur_sigma, 4), "edit_noise": round(mix_sigma, 4),
+               "fresh_noise": bool(fresh_noise), "steer_steps": steer_n, "tiles": n_tiles, "of": self.N,
                "strength": float(strength)}
         self.edits.append(rec)
         self.ctx.store.setdefault("edits", []).append(rec)
 
-        # Keep the user's edited picture directly as the decoded view so saving is instant and exact
+        # Keep the user's edited picture directly as the decoded view for this exact (guess_at, edits) state
         key = (self.guess_at, len(self.edits))
         self._decoded = (key, after_pil)
         img_t = torch.from_numpy(np.asarray(after_pil, dtype=np.float32) / 127.5 - 1.0).permute(2, 0, 1)
         self.rgb_fit = _fit_preview(self.guess.float(), img_t, ad.vae.factor)
         self._fit_key = key
         return rec
+
+    @torch.no_grad()
+    def set_prompt(self, prompt: str, blocks: str = "all", progress=None) -> dict:
+        """Steer the generation mid-run by switching the prompt that all (or chosen) DiT blocks read
+        from the current step onward."""
+        if self.x is not None:
+            raise ValueError("Finish the current step first (▸▸) before changing the prompt.")
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise ValueError("Provide a non-empty prompt.")
+        if self.done or self.i >= self.n_steps:
+            self.extend_steps(more_steps=4, start_sigma=0.35)
+        ad, dit = self.ad, self.ad.dit
+        prog = progress or self.prog
+        mod0 = dit.modulation(dit.temb(torch.zeros(1, device=ad.device)))
+        slots = set(parse_index_spec(blocks or "all", self.nb))
+        if not slots:
+            raise ValueError(f"No blocks matched '{blocks}'.")
+        if len(slots) == self.nb:
+            self.text = ad._build_text(prompt, self.plan, mod0, self.boxes, prog, 0.0, 1.0, "steered prompt")
+            self.current_prompt = prompt
+        else:
+            tl = ad.text.cfg.n_layers
+            emb, toks = ad._te(prompt, lambda l: prog(0.7 * (l + 1) / tl, f"text encoder {l + 1}/{tl}"))
+            L2 = emb.shape[0]
+            frame = max(self.text["frame"], L2)
+            kv2 = ad._text_pass(emb, self.plan, mod0, torch.arange(L2) + frame - L2, None,
+                                lambda q: prog(0.7 + 0.3 * (q + 1) / self.nb, f"DiT text pass {q + 1}/{self.nb}"))
+            new_kv = list(self.text["kv"])
+            new_layout = [dict(l) for l in self.text["layout"]]
+            short = prompt if len(prompt) <= 28 else prompt[:25] + "…"
+            for p_idx in slots:
+                new_kv[p_idx] = kv2[p_idx]
+                new_layout[p_idx] = {"pos": p_idx, "reads": short, "off": 0, "n": L2, "prefix": []}
+            self.text = {**self.text, "kv": new_kv, "layout": new_layout, "frame": frame, "tokens": toks, "L": L2}
+            self.current_prompt = prompt
+        if self.switch is not None and self.i >= self.switch:
+            self.text2 = self.text
+        cur_s = float(self.sig[min(self.i, self.n_steps - 1)])
+        rec = {"step": self.i, "sigma": round(cur_s, 4), "prompt": prompt,
+               "blocks": blocks or "all", "n_blocks": len(slots)}
+        if not hasattr(self, "prompt_changes"):
+            self.prompt_changes = []
+        self.prompt_changes.append(rec)
+        self.ctx.store.setdefault("prompt_changes", []).append(rec)
+        return rec
+
+    @torch.no_grad()
+    def set_word_weight(self, token: int, scale: float = 1.0, blocks: str = "all") -> dict:
+        """Scale how strongly image tiles attend to prompt token `token` from the current step onward."""
+        from .flow import Intervention
+        if not hasattr(self, "word_scales"):
+            self.word_scales = {}
+        token = int(token)
+        scale = float(scale)
+        tag = f"dbg_word_{token}"
+        self.word_ivs = [iv for iv in self.word_ivs if getattr(iv, "node_id", "") != tag]
+        if abs(scale - 1.0) < 1e-3:
+            self.word_scales.pop(token, None)
+        else:
+            self.word_scales[token] = round(scale, 2)
+            slots = parse_index_spec(blocks or "all", self.nb)
+            op = "zero" if scale <= 0.0 else "scale"
+            for p_idx in slots:
+                self.word_ivs.append(Intervention(
+                    node_id=tag, pos=p_idx, hook="word", op=op, value=scale,
+                    steps=f"{self.i}:{self.n_steps}", positions=str(token),
+                ))
+        return {"token": token, "scale": scale, "word_scales": dict(self.word_scales)}
 
     def guess_png(self, exact: bool = True) -> bytes:
         """The current guess as a picture. Exact = VAE decode (also refits the fast colour map)."""
@@ -1234,6 +1376,9 @@ class ImageStepper:
                 "trace": self.trace, "steps": self.steps, "step": self.i, "n_steps": self.n_steps, "start": self.start,
                 "sigma": round(float(self.sig[self.i]), 4) if self.i < self.n_steps else 0.0,
                 "n_generated": self.n_generated, "guess_at": self.guess_at, "edits": self.edits,
+                "prompt_changes": getattr(self, "prompt_changes", []),
+                "current_prompt": getattr(self, "current_prompt", ""),
+                "word_scales": getattr(self, "word_scales", {}),
                 "can_edit": self.x is None,
                 "tokens": self.text["tokens"], "forced": None, "chunk": [], "n_in": 0, "text": ""}
 
@@ -1260,7 +1405,7 @@ class ImageStepper:
             self._decoded[1].save(buf, format="PNG")
             img_bytes = buf.getvalue()
             img_b64 = "data:image/png;base64," + base64.b64encode(img_bytes).decode()
-        elif self.guess is not None and self.rgb_fit is not None and self._fit_key == key:
+        elif self.guess is not None and self.rgb_fit is not None:
             buf = io.BytesIO()
             _lin_pil(self.guess, self.rgb_fit, (h, w), 4).save(buf, format="PNG")
             img_bytes = buf.getvalue()
@@ -1277,6 +1422,8 @@ class ImageStepper:
             note += f" Prompt-KV boxes changed what {nb - n_main} of the {nb} blocks read."
         if self.edits:
             note += " Edited by hand at step " + ", ".join(f"{e['step']} ({e['tiles']} tiles)" for e in self.edits) + "."
+        if getattr(self, "prompt_changes", None):
+            note += " Prompt steered at step " + ", ".join(f"{c['step']} (blocks {c['blocks']})" for c in self.prompt_changes) + "."
         g = run.store.get("guide")
         guide_note = (f"Sketch guide: started from pure noise; {g['tiles']} of {g['of']} tiles (the drawn ones) were steered "
                       f"towards your picture during the first {g['steps']} steps, everything else was free.") if g else ""
@@ -1342,6 +1489,8 @@ class ImageStepper:
             note += f" Prompt-KV boxes changed what {nb - n_main} of the {nb} blocks read."
         if self.edits:
             note += " Edited by hand at step " + ", ".join(f"{e['step']} ({e['tiles']} tiles)" for e in self.edits) + "."
+        if getattr(self, "prompt_changes", None):
+            note += " Prompt steered at step " + ", ".join(f"{c['step']} (blocks {c['blocks']})" for c in self.prompt_changes) + "."
         g = run.store.get("guide")
         guide_note = (f"Sketch guide: started from pure noise; {g['tiles']} of {g['of']} tiles (the drawn ones) were steered "
                       f"towards your picture during the first {g['steps']} steps, everything else was free.") if g else ""

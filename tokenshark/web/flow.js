@@ -22,8 +22,8 @@ const HANDLES = {
   vae_decode: [['in', 'target', 'left'], ['out', 'source', 'right']],
   output_image: [['in', 'target', 'left']],
   intervention: [['out', 'source', 'right']],
+  block_kv: [['out', 'source', 'right']],
   kv_import: [['out', 'source', 'right']],
-  kv_text: [['out', 'source', 'right']],
   prompt_kv: [['out', 'source', 'right']],
   init_image: [['out', 'source', 'right']],
 }
@@ -31,6 +31,9 @@ const HANDLES = {
 function handlesFor(node) {
   const k = node.data.kind
   let hs = (HANDLES[k] || [['in', 'target', 'left'], ['out', 'source', 'right']]).map(h => ({ id: h[0], type: h[1], side: h[2], label: h[3] }))
+  if (k === 'block' && node.data.has_kv !== false) {
+    hs.push({ id: 'kv', type: 'target', side: 'top', label: 'KV' })
+  }
   if (k === 'unet_block') {
     if (node.id.startsWith('down')) hs.push({ id: 'skip', type: 'source', side: 'bottom' })
     if (node.id.startsWith('up')) hs.push({ id: 'skip', type: 'target', side: 'bottom' })
@@ -61,12 +64,37 @@ export class FlowEditor {
     el.innerHTML = `<div class="fe-viewport"><svg class="fe-edges"><defs>
       <marker id="fe-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><g class="fe-edge-layer"></g><path class="fe-temp" /></svg>
-      <div class="fe-nodes"></div></div><div class="fe-hint">Drag from ● to ○ to connect · click an arrow, then Delete to remove · wheel to zoom</div>`
+      <div class="fe-nodes"></div></div>
+      <div class="fe-hint">Drag ● → ○ to connect · click arrow + Del to remove · Ctrl+Enter to Run</div>
+      <div class="fe-zoombar">
+        <button type="button" class="mini ghost" data-z="out" title="Zoom out">−</button>
+        <span class="fe-zoom-val">100%</span>
+        <button type="button" class="mini ghost" data-z="in" title="Zoom in">+</button>
+        <button type="button" class="mini ghost" data-z="fit" title="Fit graph to screen">Fit</button>
+      </div>`
     this.vp = el.querySelector('.fe-viewport')
     this.svg = el.querySelector('.fe-edges')
     this.edgeLayer = el.querySelector('.fe-edge-layer')
     this.temp = el.querySelector('.fe-temp')
     this.nodeLayer = el.querySelector('.fe-nodes')
+    this.zoomVal = el.querySelector('.fe-zoom-val')
+    el.querySelectorAll('.fe-zoombar button').forEach(b => {
+      b.addEventListener('mousedown', ev => ev.stopPropagation())
+      b.addEventListener('click', ev => {
+        ev.stopPropagation()
+        const z = b.dataset.z
+        if (z === 'fit') this.fit()
+        else {
+          const factor = z === 'in' ? 1.2 : 1 / 1.2
+          const r = this.el.getBoundingClientRect()
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2
+          const before = this.toWorld(cx, cy)
+          this.zoom = Math.max(0.2, Math.min(2, this.zoom * factor))
+          this.pan = { x: cx - r.left - before.x * this.zoom, y: cy - r.top - before.y * this.zoom }
+          this.applyTransform()
+        }
+      })
+    })
     this._bind()
   }
 
@@ -129,14 +157,18 @@ export class FlowEditor {
     const d = this.nodeLayer.querySelector(`.fe-node[data-id="${CSS.escape(n.id)}"]`)
     if (!d) return
     const k = n.data.kind
-    d.className = `fe-node kind-${k}${this.selected?.type === 'node' && this.selected.id === n.id ? ' sel' : ''}${this.errors.has(n.id) ? ' err' : ''}${n.data.enabled === false ? ' off' : ''}${n.data.bypass ? ' bypassed' : ''}${(n.data.code || '').trim() ? ' coded' : ''}${this.active === n.id ? ' active' : ''}${this.doneNodes.has(n.id) ? ' ran' : ''}${n.data.moe ? ' moe' : ''}`
+    d.className = `fe-node kind-${k}${this.selected?.type === 'node' && this.selected.id === n.id ? ' sel' : ''}${this.errors.has(n.id) ? ' err' : ''}${n.data.enabled === false ? ' off' : ''}${n.data.bypass ? ' bypassed' : ''}${(n.data.code || '').trim() ? ' coded' : ''}${this.active === n.id ? ' active' : ''}${this.doneNodes.has(n.id) ? ' ran' : ''}${n.data.moe ? ' moe' : ''}${k === 'block' && n.data.has_kv === false ? ' linear-block' : ''}`
     d.style.left = n.position.x + 'px'
     d.style.top = n.position.y + 'px'
     d.style.width = NODE_W + 'px'
     const badge = this.badges[n.id]
+    const bkvOpLabel = {
+      replace_system: 'replace system', append_system: 'append system', prepend_system: 'prepend system',
+      replace_user: 'replace user', append_user: 'append user', prepend_user: 'prepend user',
+    }
     const sub = n.data.bypass ? 'bypassed — the stream skips this block' : k === 'intervention' ? ivSummary(n.data)
+      : k === 'block_kv' ? `${bkvOpLabel[n.data.op] || n.data.op || 'replace system'}${n.data.layers ? ` · blocks ${n.data.layers}` : ''} · “${(n.data.text || '').slice(0, 26)}”`
       : k === 'kv_import' ? `${n.data.cache_id ? n.data.mode || 'shift' : 'no cache chosen'} · blocks ${n.data.layers || 'all'}`
-      : k === 'kv_text' ? `${n.data.mode || 'shift'} · blocks ${n.data.layers || 'all'} · “${(n.data.text || '').slice(0, 26)}”`
       : (n.data.code || '').trim() ? `✎ edited code${n.data.sub ? ' · ' + n.data.sub : ''}`
       : k === 'init_image' ? (n.data.image ? `${n.data.guide ? 'sketch guide · ' : ''}strength ${Number(n.data.strength ?? 0.6).toFixed(2)}${n.data.mask ? ` · region ${n.data.mask_mode || 'keep'}` : ''} · click to edit` : 'no picture yet — click to add one')
       : k === 'prompt_kv' ? `${n.data.role === 'prepend' ? `hidden · ${n.data.mode || 'shift'}` : 'replaces the prompt'} · blocks ${n.data.blocks || 'all'} · “${(n.data.prompt || '').slice(0, 28)}”`
@@ -190,7 +222,8 @@ export class FlowEditor {
       if (e.data?.loop) cls.push('loop')
       if (e.data?.skip) cls.push('skip')
       if (e.targetHandle === 'mod') cls.push('mod')
-      if (e.targetHandle === 'cache' || e.targetHandle === 'init' || e.targetHandle === 'kv') cls.push('aux')
+      if (e.targetHandle === 'kv') cls.push('kv')
+      if (e.targetHandle === 'cache' || e.targetHandle === 'init') cls.push('aux')
       if (this.selected?.type === 'edge' && this.selected.id === e.id) cls.push('sel')
       const label = e.data?.label ? `<text class="fe-edge-label" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 6 + (e.data?.loop ? 46 : 0)}">${esc(e.data.label)}</text>` : ''
       parts.push(`<g class="${cls.join(' ')}" data-id="${esc(e.id)}"><path class="hit" d="${d}"/><path class="line" d="${d}" marker-end="url(#fe-arrow)"/>${label}</g>`)
@@ -200,6 +233,7 @@ export class FlowEditor {
 
   applyTransform() {
     this.vp.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.zoom})`
+    if (this.zoomVal) this.zoomVal.textContent = `${Math.round(this.zoom * 100)}%`
   }
 
   fit() {

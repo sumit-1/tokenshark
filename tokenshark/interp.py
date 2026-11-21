@@ -36,7 +36,8 @@ def activation(cap: dict, hook: str, pos: int) -> torch.Tensor:
         cache: KVCache | None = cap.get("cache")
         if cache is None or pos >= len(cache.k):
             raise ValueError(f"That run has no KV cache at schedule position {pos}.")
-        kv = cache.k[pos] if hook == "kv_k" else cache.v[pos]
+        k_t, v_t = cache.slot_kv(pos)
+        kv = k_t if hook == "kv_k" else v_t
         if kv is None:
             raise ValueError(f"Block #{pos} is a linear-attention block (no per-token KV cache).")
         # kv is [n_kv, T, hd] -> transpose to [T, n_kv, hd] so token_dim = 0 matches the block hook
@@ -180,42 +181,31 @@ def resolve_sources(plan, get_caps) -> dict:
 
 
 # ======================================================================================
-# KV prefixes of a plan: saved caches and layer prompts (text → KV for chosen blocks)
+# KV prefixes of a plan: saved caches wired into Embed
 # ======================================================================================
-
-_TEXT_PREFIX: dict = {}
 
 
 def load_prefixes(plan, adapter, state_key: str = "") -> list[KVCache]:
-    """Every KV prefix the flow prepends, in order. A layer prompt (text typed into a box) is pushed through all
-    blocks once and its keys/values are kept; which blocks then see them is decided per box."""
+    """Every saved KV cache the flow prepends, in order. Which blocks see each prefix is decided per box."""
     specs = plan.params.get("prefixes") or [{"cache_id": plan.params["prefix_cache"]}]
     out, system = [], None
     for d in specs:
-        if d.get("text"):
-            key = (adapter.spec.get("id"), id(adapter), state_key, d["text"], bool(d.get("as_system")), tuple(plan.schedule))
-            if key not in _TEXT_PREFIX:
-                if len(_TEXT_PREFIX) > 24:
-                    _TEXT_PREFIX.clear()
-                _TEXT_PREFIX[key] = adapter.build_prefix(plan, d["text"], bool(d.get("as_system")))
-            c, extra = _TEXT_PREFIX[key]
-        else:
-            try:
-                c, extra = LIBRARY.load(d["cache_id"])
-            except KeyError:
-                raise ValueError("The selected KV cache no longer exists.") from None
-            fp = adapter.fingerprint()
-            for k in ("hidden_size", "n_kv_heads", "head_dim"):
-                if c.fingerprint.get(k) != fp.get(k):
-                    raise ValueError(f"The KV cache comes from a different model ({c.fingerprint.get('model_id')}).")
-            if c.n_slots != len(plan.schedule):
-                raise ValueError(f"The KV cache has {c.n_slots} block slots but this flow runs {len(plan.schedule)} "
-                                 f"blocks. Bypassed or repeated blocks change the count: use the flow the cache was "
-                                 f"made with, or rebuild the cache with this flow.")
-            if extra.get("schedule") and list(extra["schedule"]) != list(plan.schedule):
-                raise ValueError(f"The KV cache was made with blocks {extra['schedule']} but this flow runs "
-                                 f"{plan.schedule}. Each slot holds keys from a specific block; rebuild the cache "
-                                 f"with this flow.")
+        try:
+            c, extra = LIBRARY.load(d["cache_id"])
+        except KeyError:
+            raise ValueError("The selected KV cache no longer exists.") from None
+        fp = adapter.fingerprint()
+        for k in ("hidden_size", "n_kv_heads", "head_dim"):
+            if c.fingerprint.get(k) != fp.get(k):
+                raise ValueError(f"The KV cache comes from a different model ({c.fingerprint.get('model_id')}).")
+        if c.n_slots != len(plan.schedule):
+            raise ValueError(f"The KV cache has {c.n_slots} block slots but this flow runs {len(plan.schedule)} "
+                             f"blocks. Bypassed or repeated blocks change the count: use the flow the cache was "
+                             f"made with, or rebuild the cache with this flow.")
+        if extra.get("schedule") and list(extra["schedule"]) != list(plan.schedule):
+            raise ValueError(f"The KV cache was made with blocks {extra['schedule']} but this flow runs "
+                             f"{plan.schedule}. Each slot holds keys from a specific block; rebuild the cache "
+                             f"with this flow.")
         out.append(c)
         system = system or extra.get("system_text")
     plan.params["prefix_system"] = system
@@ -313,21 +303,207 @@ def final_logits(adapter, cap: dict, schedule: list[int], position: int = -1, to
 
 
 # ======================================================================================
-# Tokenizer explorer
+# Tokenizer explorer & Word -> Token Dictionary
 # ======================================================================================
 
-def tokenize(adapter, text: str, chat: bool = False, system: str = "") -> dict:
+def _build_word_map(ids: list[int], pieces: list[str]) -> list[dict]:
+    """Group a sequence of token pieces and IDs into a human-readable Word -> Tokens dictionary."""
+    import re as _re
+    groups: list[dict] = []
+
+    def _kind_of(p: str) -> str:
+        s = p.strip()
+        if (s.startswith("<|") and s.endswith("|>")) or (s.startswith("<") and s.endswith(">") and len(s) > 2):
+            return "special"
+        if "\\n" in p or "\\t" in p or not s:
+            return "whitespace"
+        if _re.match(r"^[\w\u0080-\uffff]+$", s):
+            return "word"
+        return "punct"
+
+    for idx, (tid, piece) in enumerate(zip(ids, pieces)):
+        k = _kind_of(piece)
+        starts_with_space = piece.startswith(" ")
+        # Merge into the previous word entry if this piece has no leading space and continues a word
+        if (
+            groups
+            and not starts_with_space
+            and k == "word"
+            and groups[-1]["kind"] == "word"
+        ):
+            g = groups[-1]
+            g["word"] += piece
+            g["pieces"].append(piece)
+            g["ids"].append(int(tid))
+            g["positions"].append(idx)
+            g["n_tokens"] = len(g["ids"])
+            g["split"] = True
+        else:
+            groups.append({
+                "word": piece,
+                "pieces": [piece],
+                "ids": [int(tid)],
+                "positions": [idx],
+                "n_tokens": 1,
+                "split": False,
+                "kind": k,
+            })
+    return groups
+
+
+def tokenize(adapter, text: str, chat: bool = False, system: str = "",
+             history: list[dict] | None = None, prefill: str = "", add_bos: bool = False) -> dict:
     tok = adapter.tok
-    rendered = text
+    turns = [{"role": m["role"], "content": m["content"]} for m in (history or []) if m.get("content")]
+    if text or not turns:
+        turns.append({"role": "user", "content": text})
     if chat and tok.chat_template:
-        msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": text}]
+        msgs = ([{"role": "system", "content": system}] if system else []) + turns
         rendered = tok.apply_chat(msgs, True)
-    ids = tok.encode(rendered, add_special=False)
+        ids = tok.encode(rendered, add_special=False)
+    else:
+        earlier = "".join(f"{m['role'].capitalize()}: {m['content']}\n" for m in (history or []) if m.get("content"))
+        rendered = (system + "\n\n" if system else "") + earlier + text
+        ids = tok.encode(rendered, add_special=bool(add_bos))
+    if prefill:
+        prefill_ids = tok.encode(prefill, add_special=False)
+        ids = ids + prefill_ids
+        rendered = rendered + prefill
     pieces = [tok.piece(i) for i in ids]
     nbytes = len(rendered.encode("utf-8"))
-    return {"ids": ids, "pieces": pieces, "rendered": rendered if chat else None, "n_tokens": len(ids),
-            "n_chars": len(rendered), "n_bytes": nbytes, "vocab": tok.vocab_size,
-            "chars_per_token": round(len(rendered) / max(1, len(ids)), 2)}
+    word_map = _build_word_map(ids, pieces)
+    n_split = sum(1 for g in word_map if g["split"])
+    return {"ids": ids, "pieces": pieces, "rendered": rendered if (chat or history or prefill or system) else None,
+            "n_tokens": len(ids), "n_chars": len(rendered), "n_bytes": nbytes, "vocab": tok.vocab_size,
+            "chars_per_token": round(len(rendered) / max(1, len(ids)), 2),
+            "word_map": word_map, "n_words": len(word_map), "n_split_words": n_split}
+
+
+# ======================================================================================
+# KV Cache Analysis (per-block & per-token K/V norms, GQA savings, attention sinks)
+# ======================================================================================
+
+def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[str]) -> dict:
+    """Analyze a run's KV cache across blocks and token positions: memory breakdown, GQA compression,
+    per-block and per-token Key/Value L2 norms, and attention-sink identification."""
+    cache: KVCache | None = cap.get("cache")
+    if cache is None:
+        raise ValueError("This run has no KV cache.")
+    cfg = adapter.cfg
+    summary = cache.summary(adapter.tok.piece)
+    T = len(cache)
+    S = len(schedule)
+    n_heads = cfg.n_heads
+    n_kv = cfg.n_kv
+    hd = cfg.head_dim
+    gqa_ratio = round(n_heads / max(1, n_kv), 2)
+    gqa_saving_pct = round((1.0 - n_kv / max(1, n_heads)) * 100.0, 1)
+    bytes_total = summary["bytes"]
+    bytes_per_token = round(bytes_total / max(1, T), 1)
+    mha_bytes_total = int(round(bytes_total * (n_heads / max(1, n_kv))))
+
+    origins = cache._origins()
+    attn_map = cap.get("attn") or {}
+    blocks = []
+    tok_k_norms = torch.zeros(T, dtype=torch.float32)
+    tok_v_norms = torch.zeros(T, dtype=torch.float32)
+    tok_attn_in = torch.zeros(T, dtype=torch.float32)
+    n_full_blocks = 0
+    n_attn_blocks = 0
+
+    for p in range(S):
+        l = schedule[p]
+        nid = schedule_nodes[p] if p < len(schedule_nodes) else f"block_{l}"
+        bc = cache.block_caches.get(p)
+        k_t, v_t = cache.slot_kv(p)
+        if k_t is None or v_t is None:
+            blocks.append({
+                "pos": p, "layer": l, "node": nid, "label": f"#{p} · L{l}",
+                "linear": True, "override": None, "n_tokens": 0,
+                "k_norm_mean": None, "v_norm_mean": None,
+                "k_norm_max": None, "v_norm_max": None,
+                "sink_token": None, "sink_piece": None, "sink_attn": None, "bytes": 0,
+            })
+            continue
+        T_b = k_t.shape[1]
+        tok_list = bc.tokens if bc is not None else cache.tokens
+        # k_t, v_t: [n_kv, T_b, hd] -> L2 norm over head_dim, averaged across KV heads -> [T_b]
+        kn = k_t.float().norm(dim=-1).mean(0).cpu()[:T_b]
+        vn = v_t.float().norm(dim=-1).mean(0).cpu()[:T_b]
+        if bc is None:
+            tok_k_norms[:min(T, len(kn))] += kn[:T]
+            tok_v_norms[:min(T, len(vn))] += vn[:T]
+            n_full_blocks += 1
+
+        sink_tok, sink_piece, sink_attn = None, None, None
+        a = attn_map.get(p)
+        if a is not None and a.numel() > 0:
+            # a: [n_heads, n_q, n_k] -> mean attention received by each key token across heads & queries
+            col_mean = a.float().mean(dim=(0, 1)).cpu()[:T_b]
+            if bc is None:
+                tok_attn_in[:min(T, len(col_mean))] += col_mean[:T]
+                n_attn_blocks += 1
+            sink_tok = int(col_mean.argmax().item())
+            sink_piece = adapter.tok.piece(tok_list[sink_tok]) if sink_tok < len(tok_list) else ""
+            sink_attn = round(float(col_mean[sink_tok].item()), 4)
+
+        b_bytes = int(k_t.numel() * k_t.element_size() + v_t.numel() * v_t.element_size())
+        blocks.append({
+            "pos": p, "layer": l, "node": nid, "label": f"#{p} · L{l}",
+            "linear": False,
+            "n_tokens": T_b,
+            "override": bc.summary(adapter.tok.piece) if bc is not None else None,
+            "k_norm_mean": round(float(kn.mean().item()), 3) if len(kn) else 0.0,
+            "v_norm_mean": round(float(vn.mean().item()), 3) if len(vn) else 0.0,
+            "k_norm_max": round(float(kn.max().item()), 3) if len(kn) else 0.0,
+            "v_norm_max": round(float(vn.max().item()), 3) if len(vn) else 0.0,
+            "sink_token": sink_tok, "sink_piece": sink_piece, "sink_attn": sink_attn,
+            "bytes": b_bytes,
+        })
+
+    if n_full_blocks > 0:
+        tok_k_norms /= n_full_blocks
+        tok_v_norms /= n_full_blocks
+    if n_attn_blocks > 0:
+        tok_attn_in /= n_attn_blocks
+
+    top_sink_idx = int(tok_attn_in.argmax().item()) if T > 0 and n_attn_blocks > 0 else None
+    tokens = []
+    for t in range(T):
+        tid = int(cache.tokens[t])
+        orig, lab = origins[t] if t < len(origins) else ("prompt", "")
+        attn_val = round(float(tok_attn_in[t].item()), 4) if n_attn_blocks > 0 else None
+        is_sink = bool(top_sink_idx == t and attn_val is not None and attn_val > (1.5 / max(1, T)))
+        tokens.append({
+            "index": t,
+            "id": tid,
+            "piece": adapter.tok.piece(tid),
+            "position": round(float(cache.pos[t].item()), 2),
+            "origin": orig,
+            "label": lab,
+            "k_norm": round(float(tok_k_norms[t].item()), 3),
+            "v_norm": round(float(tok_v_norms[t].item()), 3),
+            "attn_received": attn_val,
+            "is_sink": is_sink,
+        })
+
+    return {
+        "n_tokens": T,
+        "n_slots": S,
+        "n_heads": n_heads,
+        "n_kv_heads": n_kv,
+        "head_dim": hd,
+        "gqa_ratio": gqa_ratio,
+        "gqa_saving_pct": gqa_saving_pct,
+        "bytes_total": bytes_total,
+        "bytes_per_token": bytes_per_token,
+        "mha_bytes_total": mha_bytes_total,
+        "segments": summary["segments"],
+        "linear_slots": summary["linear_slots"],
+        "block_overrides": summary.get("block_overrides") or {},
+        "tokens": tokens,
+        "blocks": blocks,
+    }
 
 
 def _pieces(adapter) -> list[str]:

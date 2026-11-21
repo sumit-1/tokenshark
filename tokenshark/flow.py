@@ -23,7 +23,7 @@ from typing import Any
 # Plan data model (serialisable — stored in every run manifest)
 # --------------------------------------------------------------------------------------
 
-LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_heads", "attn_out", "router", "expert_out", "mlp_neurons",
+LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_heads", "attn_out", "router", "expert_out", "mlp_neurons",
              "mlp_out", "resid_post", "weights"]
 MOE_HOOKS = ["router", "expert_out"]     # only on mixture-of-experts blocks: the router's scores · one expert's output
 UNET_HOOKS = ["out", "skip", "both", "word"]
@@ -40,7 +40,15 @@ OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
 LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "ban", "only", "route"]
 PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "router", "mlp_out", "resid_post"]
 CODE_KINDS = ["embed", "block", "final_norm", "lm_head", "sampler"]     # boxes whose Python can be edited
-PREFIX_MODES = ["shift", "negative", "offset", "overwrite"]
+PREFIX_MODES = ["shift", "negative", "offset"]
+KV_OVERRIDE_OPS = [
+    "replace_system",
+    "append_system",
+    "prepend_system",
+    "replace_user",
+    "append_user",
+    "prepend_user",
+]
 
 
 @dataclass
@@ -127,12 +135,14 @@ def default_llm_flow(info: dict) -> dict:
     blocks = [f"block_{i}" for i in order]
     moe = info.get("moe") or {}
     moe_layers, moe_n = set(moe.get("layers") or []), moe.get("n_experts")      # these boxes show their experts
+    kv_layers = set(info.get("kv_layers")) if info.get("kv_layers") is not None else set(range(n))
     for nid, x, y in _snake(blocks, 0, 210, dy=140 if not moe else 170):
         i = int(nid.split("_")[1])
         subs = info.get("block_subs") or []
         nodes.append(_node(nid, "block", f"Block {i} · new" if i in extra else f"Block {i}", x, y,
                            (f"added after block {extra[i]['after']} · " if i in extra else "")
                            + (subs[i] if i < len(subs) else info.get("block_sub", "")), layer=i,
+                           has_kv=(i in kv_layers),
                            **({"moe": moe_n} if i in moe_layers else {})))
     rows = (n + 5) // 6
     yb = 210 + rows * (140 if not moe else 170) + 10
@@ -213,6 +223,8 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
         temperature=max(0.0, _num(s.get("temperature"), 0.0)), top_k=max(0, _num(s.get("top_k"), 0, int)),
         top_p=min(1.0, max(0.0, _num(s.get("top_p"), 1.0))) or 1.0,
         seed=_num(s.get("seed"), 0, int), add_bos=bool(p.get("add_bos", True)),
+        rope_step_stride=_num(s.get("rope_step_stride"), 1.0, float) if s.get("rope_step_stride") not in (None, "") else 1.0,
+        rope_prompt_scale=_num(s.get("rope_prompt_scale"), 1.0, float) if s.get("rope_prompt_scale") not in (None, "") else 1.0,
     )
     # Earlier turns of the conversation (the Prompt box's list): [{"role": "user" | "assistant", "content": …}].
     hist = []
@@ -224,8 +236,8 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
             hist.append({"role": role, "content": content})
     if hist:
         params["history"] = hist
-    # KV prefixes: a saved cache (kv_import), or text typed straight into a box (kv_text, a "layer prompt").
-    kv = [nid for nid in find_kind("kv_import") + find_kind("kv_text")
+    # KV prefixes: a saved cache (kv_import) wired into Embed's "cache" port.
+    kv = [nid for nid in find_kind("kv_import")
           if any(e["source"] == nid and e["target"] in find_kind("embed") and e.get("targetHandle") == "cache"
                  for e in edges)]
     kv.sort(key=lambda nid: (nodes[nid]["position"]["x"], nodes[nid]["position"]["y"]))   # left box first
@@ -241,19 +253,70 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
             parse_index_spec(str(d.get("layers") or "all"), 10_000)
         except ValueError as ex:
             raise FlowError([{"message": str(ex), "node": nid}])
-        pre = {"cache_id": "", "mode": mode, "node": nid, "layers": str(d.get("layers") or "all"),
-               "offset": _num(d.get("offset"), 0.0), "label": d.get("label") or "imported"}
-        if d.get("kind") == "kv_text":
-            if not str(d.get("text") or "").strip():
-                raise FlowError([{"message": "A layer-prompt box has no text.", "node": nid}])
-            pre.update(text=str(d["text"]), as_system=bool(d.get("as_system", False)))
-        elif not d.get("cache_id"):
+        if not d.get("cache_id"):
             raise FlowError([{"message": "A KV-cache box has no cache selected.", "node": nid}])
-        else:
-            pre["cache_id"] = d["cache_id"]
-        prefixes.append(pre)
+        prefixes.append({"cache_id": d["cache_id"], "mode": mode, "node": nid,
+                         "layers": str(d.get("layers") or "all"),
+                         "offset": _num(d.get("offset"), 0.0), "label": d.get("label") or "imported"})
     if prefixes:
-        params.update(prefixes=prefixes, prefix_cache=prefixes[0]["cache_id"] or "text")
+        params.update(prefixes=prefixes, prefix_cache=prefixes[0]["cache_id"])
+    # Per-block KV cache overrides: block_kv boxes wired directly into one or more full-attention blocks' "kv" port.
+    # Instead of positional hacks, each targeted block recreates its KV cache from the modified system/user prompt
+    # and keeps growing gradually as new tokens are generated.
+    kv_layers = set(caps.get("_kv_layers") or range(100_000))
+    pos_of_node = {nid: i for i, nid in enumerate(chain)}
+    bkv_nodes = find_kind("block_kv")
+    bkv_nodes.sort(key=lambda nid: (nodes[nid]["position"]["x"], nodes[nid]["position"]["y"]))
+    kv_overrides = []
+    for nid in bkv_nodes:
+        d = nodes[nid]["data"]
+        if d.get("enabled") is False:
+            continue
+        op = str(d.get("op") or "replace_system").strip()
+        if op not in KV_OVERRIDE_OPS:
+            raise FlowError([{"message": f"KV override op must be one of {', '.join(KV_OVERRIDE_OPS)}.", "node": nid}])
+        text = str(d.get("text") or "")
+        if not text.strip() and op not in ("replace_system", "replace_user"):
+            raise FlowError([{"message": "A Block KV override box needs text to append/prepend.", "node": nid}])
+        # Determine target schedule positions: explicit edges to block 'kv' handles, plus optional 'layers' slice
+        edge_targets = [e["target"] for e in edges
+                        if e["source"] == nid and e.get("targetHandle") == "kv" and e["target"] in nodes]
+        slots: list[int] = []
+        for t_id in edge_targets:
+            if t_id not in pos_of_node:
+                if nodes[t_id]["data"].get("bypass"):
+                    continue
+                raise FlowError([{"message": f"Block KV override '{d.get('label')}' points at a block not on the active path.", "node": nid}])
+            lay_idx = int(nodes[t_id]["data"].get("layer", -1))
+            if lay_idx not in kv_layers:
+                raise FlowError([{"message": f"'{nodes[t_id]['data'].get('label')}' uses linear attention (no per-token KV cache) and cannot receive a KV cache override.", "node": nid}])
+            slots.append(pos_of_node[t_id])
+        lay_spec = str(d.get("layers") or "").strip()
+        if lay_spec:
+            try:
+                spec_slots = parse_index_spec(lay_spec, len(chain))
+            except ValueError as ex:
+                raise FlowError([{"message": str(ex), "node": nid}])
+            for s_pos in spec_slots:
+                lay_idx = int(nodes[chain[s_pos]]["data"].get("layer", -1))
+                if lay_idx in kv_layers:
+                    slots.append(s_pos)
+            if spec_slots and not any(int(nodes[chain[s]]["data"].get("layer", -1)) in kv_layers for s in spec_slots):
+                raise FlowError([{"message": f"Blocks '{lay_spec}' only cover linear-attention layers, which have no KV cache.", "node": nid}])
+        slots = sorted(set(slots))
+        if not slots and not edge_targets and not lay_spec:
+            raise FlowError([{"message": f"Connect '{d.get('label') or 'Block KV'}' to a block's KV port (or specify Blocks).", "node": nid}])
+        if slots:
+            kv_overrides.append({
+                "node": nid,
+                "op": op,
+                "text": text,
+                "slots": slots,
+                "layers": lay_spec,
+                "label": d.get("label") or op.replace("_", " "),
+            })
+    if kv_overrides:
+        params["kv_overrides"] = kv_overrides
     # Edited Python for boxes (see blockcode.py): {box id: source}. Keyed by box, so a repeated block can run
     # different code from the original.
     code = {}
@@ -271,6 +334,27 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
             moe[nid] = {"k": max(0, k), "temp": max(0.0, temp), "shared": d.get("moe_shared") is not False}
     if moe:
         params["moe"] = moe
+    # Per-block RoPE settings typed into a block box: position scale (0 = off), base theta override, query shift.
+    rope = {}
+    for nid in chain:
+        d = nodes[nid]["data"]
+        r_entry = {}
+        if d.get("rope_scale") not in (None, ""):
+            sc_val = _num(d.get("rope_scale"), 1.0, float)
+            if sc_val != 1.0:
+                r_entry["scale"] = sc_val
+        if d.get("rope_theta") not in (None, ""):
+            th_val = _num(d.get("rope_theta"), 0.0, float)
+            if th_val > 0:
+                r_entry["theta"] = th_val
+        if d.get("rope_q_offset") not in (None, ""):
+            qo_val = _num(d.get("rope_q_offset"), 0.0, float)
+            if qo_val != 0.0:
+                r_entry["q_offset"] = qo_val
+        if r_entry:
+            rope[nid] = r_entry
+    if rope:
+        params["rope"] = rope
     return params
 
 
@@ -376,7 +460,9 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         errors.append({"message": msg, "node": node})
 
     shape = flow_shape(info)
-    caps = info.get("capabilities", {})
+    caps = dict(info.get("capabilities", {}))
+    if info.get("kv_layers") is not None:
+        caps["_kv_layers"] = list(info["kv_layers"])
     start_k, end_k, block_k = shape.start, shape.end, shape.block
 
     for k in shape.required:
@@ -468,6 +554,14 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if hook == "weights" and op not in ("quantize", "scale", "zero", "add_noise"):
             err("Hook 'weights' supports quantize, scale, zero or add_noise.", e["source"])
             continue
+        if hook == "rope" and op not in ("zero", "scale", "add_noise", "clamp"):
+            err("Hook 'rope' supports zero (no RoPE), scale (stretch/compress positions), add_noise or clamp.", e["source"])
+            continue
+        kv_layers = set(info.get("kv_layers")) if info.get("kv_layers") is not None else None
+        target_layer = int(nodes[e["target"]]["data"].get("layer", -1))
+        if kv_layers is not None and target_layer not in kv_layers and hook in ("kv_k", "kv_v", "q", "k", "v", "rope"):
+            err(f"'{nodes[e['target']]['data'].get('label')}' is a linear-attention block (fixed recurrent state, no per-token KV cache or RoPE): hook '{hook}' only applies to KV-cache blocks.", e["source"])
+            continue
         moe_layers = (info.get("moe") or {}).get("layers") or []
         on_moe = int(nodes[e["target"]]["data"].get("layer", -1)) in moe_layers
         if (hook in MOE_HOOKS or op in ("ban", "only", "route")) and not on_moe:
@@ -504,7 +598,7 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if op in ("steer", "project_out") and not src.get("ref"):
             err("Choose a steering vector (make one in the Steering tab).", e["source"])
             continue
-        if op in ("steer", "project_out") and hook in ("attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v", "router"):
+        if op in ("steer", "project_out") and hook in ("attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v", "rope", "router"):
             err("A steering vector lives in the residual stream: use resid_pre, attn_out, mlp_out or resid_post.",
                 e["source"])
             continue

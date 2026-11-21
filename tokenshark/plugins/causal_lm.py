@@ -159,7 +159,7 @@ class CausalLMPlugin(ModelPlugin):
     ui_schema = {
         "tabs": ["output_text", "debug_text", "lens", "cloud", "attn", "experts", "patch", "steer", "introspect", "neurons", "tokenizer",
                  "sampler", "kv", "lora", "quant", "train", "runs"],
-        "palette_actions": ["intervention", "duplicate_block", "bypass_block", "kv_prefix", "kv_prefill", "code"],
+        "palette_actions": ["intervention", "block_kv", "duplicate_block", "bypass_block", "kv_prefix", "code"],
         "train": ["tiny_text", "adapt"],
         "modality": "text",
         "texts": "lm",

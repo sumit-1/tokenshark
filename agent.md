@@ -126,9 +126,11 @@ flow.project_out(14, vec, positions="all") # Erase direction from residual strea
 flow.clamp(21, neurons="3752,1712", to="value", value=30.0, positions="4")
 flow.clamp(21, neurons="4090,1001", to="value", value=0.0, positions="4")
 
-# Per-layer hidden prompts (KV cache prefill visible only to chosen blocks)
-# modes: "shift" | "negative" | "offset" | "overwrite"
-flow.layer_prompt("Always answer in French.", layers="12:24", mode="shift")
+# Per-block KV rewrite: recreate that layer's cache from a modified system/user prompt
+# (full-attention layers only; cache then grows as tokens are generated)
+flow.replace_system("You are a pirate. Always answer in pirate speak.", blocks="12:24")
+flow.append_system("Always answer in French.", blocks=18)
+flow.replace_user("The capital of Japan is", blocks="all")
 
 # Mixture-of-Experts (MoE) routing interventions
 flow.ban_experts(5, "3,7", positions="all")
@@ -216,7 +218,7 @@ You can generate complete coursework or CTF challenges across any of these 10 to
 | **Lab 03** | **Causal Tracing & Activation Patching** | `Patching` tab (`lab.patch_sweep()`, `flow.patch()`) | Run clean (`"The capital of France is"`) vs. corrupted (`"The capital of Japan is"`); sweep `resid_post`, `attn_out`, and `mlp_out` to localize factual recall to middle-layer MLPs at the subject token. |
 | **Lab 04** | **Inside the MLP: Neuron Hunting & Surgical Clamping** | `Neurons` tab, `+ Interceptor` (`run.top_neurons()`, `flow.clamp()`) | Hunt late-layer neurons whose `down_proj` column promotes `"Tokyo"` vs `"Paris"` (`Block 21`), mute Paris neurons and clamp Tokyo neurons so France's capital outputs `"Tokyo"` (see `demos/01_clamp_capital_to_tokyo/`). |
 | **Lab 05** | **Contrastive Steering & Refusal/Concept Vectors** | `Steering` tab (`lab.vector_from_runs()`, `lab.vector_from_word()`, `flow.steer()`, `flow.project_out()`) | Extract a sentiment, style, or refusal vector from contrasting runs (`Run A − Run B`) and sweep steering strength from `-10` to `+10`. |
-| **Lab 06** | **Pre-RoPE KV Caches, Context Injection & Hybrid Memory** | `KV caches` tab, `+ Layer KV prefill`, Multi-turn history (`flow.layer_prompt()`, `flow.say()`) | Plant false assistant turns in conversation history; inject a hidden prompt (`"Answer in French"`) into only blocks `12:24` using `shift` vs `overwrite` pre-RoPE position modes. |
+| **Lab 06** | **Pre-RoPE KV Caches, Context Injection & Hybrid Memory** | `KV caches` tab, `+ Rewrite prompt (KV)`, Multi-turn history (`flow.replace_system()`, `flow.say()`) | Plant false assistant turns in conversation history; recreate middle-block KV caches with `replace_system("Answer in French.", blocks="12:24")` and compare against untouched early/late blocks. |
 | **Lab 07** | **Mixture-of-Experts: Router Telemetry & Custom Routing** | `Experts` tab, Block Inspector (`run.expert_sweep()`, `flow.ban_experts()`, `flow.route()`) | Inspect router entropy and per-expert DLA; run a knock-out sweep to find critical experts; hand-craft a custom route (`{3: 0.7, 5: 0.3}`) or negative expert weights. |
 | **Lab 08** | **Model Forensics, LoRA Auditing & Quantization Drift** | `LoRA / Fine-tune` tab, `Quantize` tab, `Train` tab (`lab.load_lora()`, `lab.quant_compare()`) | Train a tiny LLM or adapt the loaded model (`lora`, `ia3`, `norms`, `adapter`, `new_block`); audit Frobenius weight diffs `‖ΔW‖/‖W‖` to find modified blocks; measure KL drift across 8/4/3/2-bit RTN quantization. |
 | **Lab 09** | **Introspection & Natural Language Autoencoders** | `Introspection` tab (`lab.concept_injection()`, `lab.concept_meter()`, `lab.nla_roundtrip()`) | Inject concept vectors into the residual stream while asking `"Do you detect an injected thought?"` with control trials; decode an activation into English and re-encode it. |

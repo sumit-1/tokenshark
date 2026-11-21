@@ -3,7 +3,6 @@ import { esc } from '../flow.js'
 import { editCode, hasCode } from './codeedit.js'
 import { renderInspector } from './inspector.js'
 import { renderTab } from './tabs.js'
-import { addLayerPrompt } from '../tabs/kv.js'
 
 export async function resetFlow() {
   const g = await GET('/api/flow/default')
@@ -28,8 +27,12 @@ export async function validate() {
     flow.setErrors([])
     $('#plan').innerHTML = `<span class="ok-dot"></span> ${p.schedule.length} blocks: [${p.schedule.join(', ')}]` +
       (p.interventions.length ? ` · ${p.interventions.length} interceptor(s)` : '') +
+      (p.params.kv_overrides?.length ? ` · ${p.params.kv_overrides.length} block KV override(s)` : '') +
       (p.params.prefixes?.length ? ` · ${p.params.prefixes.length} KV prefix${p.params.prefixes.length > 1 ? 'es' : ''} (${p.params.prefixes.map(x => `blocks ${x.layers}`).join(' / ')})` : '') +
+      (p.params.rope ? ` · RoPE modified in ${Object.keys(p.params.rope).length} block(s)` : '') +
+      (p.params.rope_step_stride != null && p.params.rope_step_stride !== 1 ? ` · RoPE step stride ${p.params.rope_step_stride}` : '') +
       (p.params.code ? ` · ✎ edited code in ${Object.keys(p.params.code).length} box${Object.keys(p.params.code).length > 1 ? 'es' : ''}` : '')
+    hooks.refreshBadges?.()
     return true
   } catch (e) {
     const errs = e.data?.errors || [{ message: e.message }]
@@ -70,6 +73,36 @@ export function bypassBlock(b) {
   renderInspector()
 }
 
+export function addBlockKV(target, op = 'replace_system', text = 'You are a pirate. Always answer in pirate speak.', layers = '') {
+  if (target && target.data?.kind === 'block' && target.data.has_kv === false) {
+    return toast(`Block ${target.data.layer} is a linear-attention block (Gated DeltaNet) and has no per-token KV cache.`, 'error')
+  }
+  const existing = flow.nodes.filter(x => x.data.kind === 'block_kv')
+  const anchor = target || flow.nodes.find(x => x.data.kind === 'block' && x.data.has_kv !== false) || flow.nodes.find(x => x.data.kind === 'embed')
+  const at = anchor ? { x: anchor.position.x + 12 + (existing.length % 4) * 32, y: anchor.position.y - 122 } : flow.center()
+  const opLabels = {
+    replace_system: 'Replace system', append_system: 'Append system', prepend_system: 'Prepend system',
+    replace_user: 'Replace user', append_user: 'Append user', prepend_user: 'Prepend user',
+  }
+  const n = flow.addNode({
+    id: newId('bkv'), type: 'box', position: at,
+    data: {
+      kind: 'block_kv',
+      label: opLabels[op] || 'KV override',
+      op,
+      text,
+      layers: target ? '' : (layers || 'all'),
+      enabled: true,
+    },
+  })
+  if (target && target.data?.kind === 'block') {
+    flow.addEdge({ source: n.id, sourceHandle: 'out', target: target.id, targetHandle: 'kv' })
+  }
+  flow.select({ type: 'node', id: n.id })
+  hooks.refreshBadges?.()
+  return n
+}
+
 export function addKV(cacheId) {
   // Each KV-prefix box is one prefix. Several boxes can feed Embed, each visible to its own blocks.
   const embed = flow.nodes.find(n => n.data.kind === 'embed')
@@ -99,13 +132,17 @@ export function addInitImage() {
 
 $('#btn-iv').onclick = () => addIntervention(isBlock(selectedNode()) ? selectedNode() : null)
 
+$('#btn-bkv').onclick = () => {
+  const b = selectedNode()
+  addBlockKV(b?.data.kind === 'block' ? b : null)
+  if (S.tab === 'kv') renderTab()
+}
+
 $('#btn-dup').onclick = () => duplicateBlock(selectedNode())
 
 $('#btn-bypass').onclick = () => bypassBlock(selectedNode())
 
 $('#btn-kv').onclick = () => addKV()
-
-$('#btn-kvt').onclick = () => { const b = selectedNode(); addLayerPrompt(b?.data.kind === 'block' ? schedPos(b) : 'all'); if (S.tab === 'kv') renderTab() }
 
 $('#btn-code').onclick = () => { const b = selectedNode(); if (b && hasCode(b.data.kind)) editCode(b); else toast('Select a block (or Embed, Final norm, LM head, Sampler) to see its code.', 'error') }
 

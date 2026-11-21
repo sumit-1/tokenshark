@@ -3,6 +3,46 @@ import { esc } from '../flow.js'
 
 S.tk = { text: 'The capital of France is Paris. Tokenization isn’t word-splitting!', chat: false, q: '', picked: null }
 
+export function renderWordDictionary(box, r, st, nb) {
+  box.innerHTML = ''
+  const wm = r.word_map || []
+  if (!wm.length) return
+  const head = el('div', { className: 'small', style: 'margin:8px 0 4px' },
+    `<b>Word → Token Dictionary</b> (${r.n_words ?? wm.length} segments → <b>${r.n_tokens}</b> tokens` +
+    (r.n_split_words ? ` · <span style="color:var(--warn)">${r.n_split_words} split into sub-words</span>` : ' · 1 token per word') + ')')
+  const t = el('table', { className: 'grid', style: 'font-size:12px' })
+  t.innerHTML = '<tr><th>Word / Segment</th><th>Token Piece(s)</th><th>Token ID(s)</th><th>Pos</th></tr>'
+  wm.forEach(g => {
+    const tr = el('tr', { style: g.split ? 'background:rgba(245,184,74,0.07)' : '' })
+    const disp = g.word.replace(/^ /, '␣')
+    const tdWord = el('td', { style: 'font-family:ui-monospace,monospace;white-space:pre' },
+      `${esc(disp)}${g.split ? ` <span class="chip" style="font-size:10px">${g.n_tokens} pcs</span>` : ''}`)
+    const tdPieces = el('td')
+    g.pieces.forEach((p, idx) => {
+      const tid = g.ids[idx], pos = g.positions[idx]
+      const s = el('span', {
+        className: `tok c${pos % 5}${st.picked === tid ? ' on' : ''}`,
+        title: `pos #${pos} · id ${tid} (click for embedding neighbors)`,
+        style: 'margin-right:3px',
+      }, `${esc(p === '' ? '∅' : p.replace(/^ /, '␣'))}<sub>${tid}</sub>`)
+      if (nb) {
+        s.onclick = () => {
+          st.picked = tid
+          neighbors(nb, tid)
+          box.querySelectorAll('.tok').forEach(x => x.classList.remove('on'))
+          s.classList.add('on')
+        }
+      }
+      tdPieces.appendChild(s)
+    })
+    const tdIds = el('td', { style: 'font-family:ui-monospace,monospace;color:var(--muted)' }, g.ids.join(', '))
+    const tdPos = el('td', { className: 'small' }, g.positions.length === 1 ? `#${g.positions[0]}` : `#${g.positions[0]}–${g.positions[g.positions.length - 1]}`)
+    tr.append(tdWord, tdPieces, tdIds, tdPos)
+    t.appendChild(tr)
+  })
+  box.append(head, t)
+}
+
 export function renderTokenizer(p) {
   const st = S.tk
   p.appendChild(el('div', { className: 'small' }, `<b>Tokenizer.</b> The model never sees letters or words, only token ids from a fixed vocabulary of ${S.info.vocab ?? '?'} pieces.
@@ -10,24 +50,25 @@ export function renderTokenizer(p) {
   const ta = el('textarea', { rows: 3, value: st.text })
   const chat = el('input', { type: 'checkbox', checked: st.chat })
   const cl = el('label', { className: 'field check' }); cl.append(chat, el('span', { textContent: 'wrap in the chat template (see the hidden tokens every chat message costs)' }))
-  const stats = el('div', { className: 'small' }), toks = el('div', { className: 'tokens big' }), nb = el('div')
+  const stats = el('div', { className: 'small' }), toks = el('div', { className: 'tokens big' }), dictBox = el('div'), nb = el('div')
   let timer = null
   const run = async () => {
     st.text = ta.value; st.chat = chat.checked
     try {
       const r = await POST('/api/tokenize', { text: ta.value, chat: chat.checked })
-      stats.innerHTML = `<b>${r.n_tokens}</b> tokens · ${r.n_chars} characters · ${r.n_bytes} bytes · <b>${r.chars_per_token}</b> characters per token`
+      stats.innerHTML = `<b>${r.n_tokens}</b> tokens · <b>${r.n_words ?? r.word_map?.length ?? 0}</b> words/segments (${r.n_split_words ?? 0} split) · ${r.n_chars} chars · ${r.n_bytes} bytes · <b>${r.chars_per_token}</b> chars/token`
       toks.innerHTML = ''
       r.pieces.forEach((t, i) => {
         const s = el('span', { className: `tok c${i % 5}${st.picked === r.ids[i] ? ' on' : ''}`, title: `id ${r.ids[i]}` }, `${esc(t === '' ? '∅' : t)}<sub>${r.ids[i]}</sub>`)
         s.onclick = () => { st.picked = r.ids[i]; neighbors(nb, r.ids[i]); toks.querySelectorAll('.tok').forEach(x => x.classList.remove('on')); s.classList.add('on') }
         toks.appendChild(s)
       })
+      renderWordDictionary(dictBox, r, st, nb)
     } catch (e) { stats.innerHTML = `<span class="bad">${esc(e.message)}</span>` }
   }
   ta.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 200) }
   chat.onchange = run
-  p.append(ta, cl, stats, toks, nb)
+  p.append(ta, cl, stats, toks, nb, dictBox)
   // vocabulary search
   const vb = el('div', { className: 'kvbox' }, '<h4>Search the vocabulary</h4>')
   const q = el('input', { placeholder: 'letters inside a token, e.g. ing', value: st.q, style: 'width:240px' })

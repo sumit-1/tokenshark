@@ -199,15 +199,25 @@ class TokenizeReq(BaseModel):
     text: str
     chat: bool = False
     system: str = ""
+    history: list[dict] | None = None
+    prefill: str = ""
+    add_bos: bool = False
 
 
 @app.post("/api/tokenize")
 def tokenize(req: TokenizeReq):
     adapter, _ = _llm()
     try:
-        return interp.tokenize(adapter, req.text, req.chat, req.system)
+        return interp.tokenize(adapter, req.text, req.chat, req.system, req.history, req.prefill, req.add_bos)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/runs/{run_id}/kv_analysis")
+def run_kv_analysis(run_id: str):
+    """Per-block & per-token KV cache analysis for a finished or stepping run."""
+    r, cap = _llm_run(run_id)
+    return _guard(interp.kv_analysis, LOADED.adapter, cap, r.plan.schedule, r.plan.schedule_nodes)
 
 
 @app.get("/api/tokens/search")

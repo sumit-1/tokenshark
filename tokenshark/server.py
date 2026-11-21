@@ -1108,6 +1108,21 @@ class EditReq(BaseModel):
     only_changed: bool = True
     mask: str = ""
     sigma: float | None = None
+    edit_noise: float | None = None
+    fresh_noise: bool = False
+    steer_steps: int = 0
+    steer_pull: float = 0.45
+
+
+class PromptSteerReq(BaseModel):
+    prompt: str
+    blocks: str = "all"
+
+
+class WordScaleReq(BaseModel):
+    token: int
+    scale: float = 1.0
+    blocks: str = "all"
 
 
 def _image_debug():
@@ -1145,11 +1160,51 @@ def debug_edit(req: EditReq):
         raise HTTPException(409, "Still computing a step; wait or press ■.")
     with LOADED.lock:
         try:
-            rec = st.edit_guess(req.image, max(0.0, min(1.0, req.strength)), req.only_changed, req.mask, sigma=req.sigma)
+            rec = st.edit_guess(
+                req.image,
+                max(0.0, min(1.0, req.strength)),
+                req.only_changed,
+                req.mask,
+                sigma=req.sigma,
+                edit_noise=req.edit_noise,
+                fresh_noise=req.fresh_noise,
+                steer_steps=req.steer_steps,
+                steer_pull=req.steer_pull,
+            )
         except ValueError as e:
             raise HTTPException(400, str(e))
     state = _publish(st)
     return {**state, "edit": rec}
+
+
+@app.post("/api/debug/prompt")
+def debug_prompt(req: PromptSteerReq):
+    """Switch the prompt that all (or chosen) DiT blocks read from the current step onward."""
+    st = _image_debug()
+    if DEBUG.get("busy"):
+        raise HTTPException(409, "Still computing a step; wait or press ■.")
+    with LOADED.lock:
+        try:
+            rec = st.set_prompt(req.prompt, req.blocks)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    state = _publish(st)
+    return {**state, "prompt_change": rec}
+
+
+@app.post("/api/debug/word")
+def debug_word(req: WordScaleReq):
+    """Scale how strongly image tiles attend to a prompt token from the current step onward."""
+    st = _image_debug()
+    if DEBUG.get("busy"):
+        raise HTTPException(409, "Still computing a step; wait or press ■.")
+    with LOADED.lock:
+        try:
+            rec = st.set_word_weight(req.token, req.scale, req.blocks)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    state = _publish(st)
+    return {**state, "word": rec}
 
 
 @app.post("/api/debug/stop")

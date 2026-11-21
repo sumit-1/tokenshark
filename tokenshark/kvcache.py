@@ -8,8 +8,10 @@ the cache can be re-positioned without recomputation:
                mode "shift":    imported keeps 0..m-1, new tokens continue at m, m+1, ...
                mode "negative": imported moves to -m..-1, new tokens start at 0 (as if fresh)
                mode "offset":   imported positions + offset (any integer), new tokens start at 0
-               mode "overwrite": imported at 0..m-1 *in place of* the prompt, for the blocks that see it
     truncate / drop a span / shift a span's positions by Δ / export to and import from a file.
+
+Per-block recreated caches (`block_caches`) let chosen full-attention blocks own a KV sequence built
+from a rewritten system/user prompt, then grow gradually as tokens are generated.
 
 One K/V tensor pair per *schedule position* (a block repeated twice owns two slots).
 Files are safetensors with the segment table and model fingerprint in the metadata.
@@ -35,6 +37,94 @@ class Segment:
 
 
 @dataclass
+class BlockKVCache:
+    """Dedicated per-block KV cache for a block whose prompt/system context was recreated and grows gradually."""
+    k: torch.Tensor | None = None       # [n_kv, T_b, head_dim]
+    v: torch.Tensor | None = None       # [n_kv, T_b, head_dim]
+    pos: torch.Tensor = field(default_factory=lambda: torch.zeros(0, dtype=torch.float32))
+    tokens: list[int] = field(default_factory=list)
+    segments: list[Segment] = field(default_factory=list)
+    op: str = ""
+    text: str = ""
+    label: str = ""
+    n_prompt: int = 0                   # number of recreated prompt tokens before prefill/generated growth
+    device: str = "cpu"
+
+    def __len__(self):
+        return len(self.tokens)
+
+    def add_tokens(self, ids: list[int], positions: list[float], origin: str, label: str = ""):
+        start = len(self.tokens)
+        self.tokens += list(ids)
+        self.pos = torch.cat([self.pos, torch.tensor(positions, dtype=torch.float32)])
+        if self.segments and self.segments[-1].origin == origin and self.segments[-1].end == start:
+            self.segments[-1].end = len(self.tokens)
+        else:
+            self.segments.append(Segment(start, len(self.tokens), origin, label))
+
+    def append(self, k: torch.Tensor, v: torch.Tensor):
+        k = k.detach().to(self.device)
+        v = v.detach().to(self.device)
+        if self.k is None:
+            self.k, self.v = k, v
+        else:
+            self.k = torch.cat([self.k, k], dim=1)
+            self.v = torch.cat([self.v, v], dim=1)
+
+    def next_position(self) -> float:
+        return float(self.pos.max()) + 1 if len(self.pos) else 0.0
+
+    def clone(self) -> "BlockKVCache":
+        out = BlockKVCache(
+            k=self.k.detach().clone() if self.k is not None else None,
+            v=self.v.detach().clone() if self.v is not None else None,
+            pos=self.pos.detach().clone(),
+            tokens=list(self.tokens),
+            segments=[Segment(s.start, s.end, s.origin, s.label) for s in self.segments],
+            op=self.op,
+            text=self.text,
+            label=self.label,
+            n_prompt=self.n_prompt,
+            device=self.device,
+        )
+        return out
+
+    def prefix_only(self) -> "BlockKVCache":
+        """Return only the recreated prompt tokens (up to n_prompt) so through-k lens can replay growth cleanly."""
+        m = min(self.n_prompt, len(self.tokens))
+        out = BlockKVCache(
+            k=self.k[:, :m].detach().clone() if self.k is not None else None,
+            v=self.v[:, :m].detach().clone() if self.v is not None else None,
+            pos=self.pos[:m].detach().clone(),
+            tokens=list(self.tokens[:m]),
+            segments=[],
+            op=self.op,
+            text=self.text,
+            label=self.label,
+            n_prompt=m,
+            device=self.device,
+        )
+        for s in self.segments:
+            if s.start < m:
+                out.segments.append(Segment(s.start, min(s.end, m), s.origin, s.label))
+        return out
+
+    def summary(self, piece=None) -> dict:
+        return {
+            "n_tokens": len(self.tokens),
+            "n_prompt": self.n_prompt,
+            "op": self.op,
+            "text": self.text,
+            "label": self.label,
+            "positions": [round(float(p), 2) for p in self.pos.tolist()],
+            "tokens": [piece(t) if piece else t for t in self.tokens],
+            "segments": [s.to_dict() for s in self.segments],
+            "bytes": int((self.k.numel() * self.k.element_size() if self.k is not None else 0)
+                         + (self.v.numel() * self.v.element_size() if self.v is not None else 0)),
+        }
+
+
+@dataclass
 class KVCache:
     fingerprint: dict
     n_slots: int
@@ -47,14 +137,14 @@ class KVCache:
     # imported prefixes: [(start, end, slots)] — tokens start..end-1 came from a prefix cache and only the schedule
     # positions in `slots` may attend to them (None = every block). Several prefixes can each target other blocks.
     prefix_spans: list = field(default_factory=list)
-    # "overwrite" prefixes: [(start, end, slots)] — in the schedule positions in `slots` (None = all) tokens
-    # start..end-1 (the prompt) are hidden from every other token, so those blocks read the prefix instead.
-    hidden_spans: list = field(default_factory=list)
     # Hybrid models (Qwen3.5/3.6): linear-attention (Gated DeltaNet) blocks keep no per-token K/V, only a running
     # memory per slot: {"conv": last K-1 inputs, "rec": [heads, dk, dv] matrix}. It summarises the whole sequence in
     # order, so it can be used whole as a prefix but not cut, reordered or re-positioned.
     states: dict = field(default_factory=dict)
     init_states: dict = field(default_factory=dict)     # memory right after the imported prefixes
+    # Per-block recreated KV caches: {slot: BlockKVCache}. When present for a full-attention slot, that block owns
+    # its own recreated K/V sequence (e.g. replaced/appended system or user prompt) and grows gradually per token.
+    block_caches: dict[int, BlockKVCache] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.k:
@@ -145,7 +235,7 @@ class KVCache:
         """The first n tokens (the imported prefix) with the linear-attention memory as it was right after them."""
         out = self.select(list(range(n)), _prefix_states=True)
         out.prefix_spans = list(self.prefix_spans)
-        out.hidden_spans = list(self.hidden_spans)
+        out.block_caches = {s: bc.prefix_only() for s, bc in self.block_caches.items()}
         return out
 
     def truncate(self, n: int) -> "KVCache":
@@ -164,9 +254,34 @@ class KVCache:
         """Modify K and/or V tensors at specific block slots and token range [start:end] (zero, scale, quantize)."""
         from .quant import quantize
         out = self.select(list(range(len(self))))
+        out.block_caches = {s: bc.clone() for s, bc in self.block_caches.items()}
         s_set = set(slots)
         for s in range(self.n_slots):
-            if s not in s_set or out.k[s] is None:
+            if s not in s_set:
+                continue
+            if s in out.block_caches:
+                bc = out.block_caches[s]
+                bs = max(0, min(start, len(bc)))
+                be = len(bc) if end >= len(self) or end <= 0 else min(end, len(bc))
+                for name in ("k", "v"):
+                    if part not in ("both", name):
+                        continue
+                    t = getattr(bc, name)
+                    if t is None:
+                        continue
+                    t = t.clone()
+                    sub = t[:, bs:be]
+                    if op == "zero":
+                        sub = torch.zeros_like(sub)
+                    elif op == "scale":
+                        sub = sub * float(value)
+                    elif op == "quantize":
+                        bits = max(1, min(16, int(round(value or 4))))
+                        sub = quantize(sub.reshape(-1, sub.shape[-1]), bits).reshape(sub.shape)
+                    t[:, bs:be] = sub
+                    setattr(bc, name, t)
+                continue
+            if out.k[s] is None:
                 continue
             for name, arr in (("k", out.k), ("v", out.v)):
                 if part not in ("both", name):
@@ -230,12 +345,7 @@ class KVCache:
         if mode == "offset":
             out.pos = out.pos - out.pos.min() + offset
             return out, max(0.0, float(out.pos.max()) + 1) if offset >= 0 else 0.0
-        if mode == "overwrite":
-            # Sits on the same positions as the prompt (0..m-1) and takes its place: the blocks that see this
-            # prefix don't see the prompt's own keys (the caller hides them, see KVCache.hidden_spans).
-            out.pos = out.pos - out.pos.min()
-            return out, 0.0
-        raise ValueError(f"Unknown prepend mode '{mode}' (shift | negative | offset | overwrite).")
+        raise ValueError(f"Unknown prepend mode '{mode}' (shift | negative | offset).")
 
     # ---------------------------------------------------------------- files
     def save(self, path: Path, extra: dict | None = None):
@@ -248,9 +358,22 @@ class KVCache:
         for s, st in self.states.items():
             tensors[f"s.{s}.conv"] = st["conv"].detach().float().cpu().contiguous()
             tensors[f"s.{s}.rec"] = st["rec"].detach().float().cpu().contiguous()
+        bc_meta = {}
+        for s, bc in self.block_caches.items():
+            tensors[f"bc.{s}.pos"] = bc.pos.detach().float().cpu().contiguous()
+            tensors[f"bc.{s}.tokens"] = torch.tensor(bc.tokens, dtype=torch.int64)
+            if bc.k is not None:
+                tensors[f"bc.{s}.k"] = bc.k.detach().cpu().contiguous()
+                tensors[f"bc.{s}.v"] = bc.v.detach().cpu().contiguous()
+            bc_meta[str(s)] = {
+                "op": bc.op, "text": bc.text, "label": bc.label, "n_prompt": bc.n_prompt,
+                "segments": [seg.to_dict() for seg in bc.segments],
+            }
         meta = {"format": "tokenshark-kv/1", "fingerprint": json.dumps(self.fingerprint),
                 "n_slots": str(self.n_slots), "segments": json.dumps([s.to_dict() for s in self.segments]),
                 "extra": json.dumps(extra or {})}
+        if bc_meta:
+            meta["block_caches"] = json.dumps(bc_meta)
         save_file(tensors, str(path), metadata=meta)
 
     @staticmethod
@@ -264,23 +387,57 @@ class KVCache:
             c = KVCache(json.loads(meta["fingerprint"]), n, device=device)
             c.pos = f.get_tensor("positions").float()
             c.tokens = f.get_tensor("tokens").tolist()
+            keys = set(f.keys())
             for s in range(n):
-                if f"k.{s}" in f.keys():
+                if f"k.{s}" in keys:
                     c.k[s] = f.get_tensor(f"k.{s}").to(device)
                     c.v[s] = f.get_tensor(f"v.{s}").to(device)
-                if f"s.{s}.rec" in f.keys():
+                if f"s.{s}.rec" in keys:
                     c.states[s] = {"conv": f.get_tensor(f"s.{s}.conv").to(device),
                                    "rec": f.get_tensor(f"s.{s}.rec").to(device)}
+            for s_str, bcm in json.loads(meta.get("block_caches", "{}")).items():
+                s = int(s_str)
+                bc = BlockKVCache(
+                    k=f.get_tensor(f"bc.{s}.k").to(device) if f"bc.{s}.k" in keys else None,
+                    v=f.get_tensor(f"bc.{s}.v").to(device) if f"bc.{s}.v" in keys else None,
+                    pos=f.get_tensor(f"bc.{s}.pos").float() if f"bc.{s}.pos" in keys else torch.zeros(0),
+                    tokens=f.get_tensor(f"bc.{s}.tokens").tolist() if f"bc.{s}.tokens" in keys else [],
+                    segments=[Segment(**d) for d in bcm.get("segments", [])],
+                    op=bcm.get("op", ""),
+                    text=bcm.get("text", ""),
+                    label=bcm.get("label", ""),
+                    n_prompt=int(bcm.get("n_prompt", 0)),
+                    device=device,
+                )
+                c.block_caches[s] = bc
             c.segments = [Segment(**d) for d in json.loads(meta.get("segments", "[]"))]
         return c, json.loads(meta.get("extra", "{}"))
 
+    def slot_kv(self, s: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Return (K, V) for slot s — from its per-block recreated cache if overridden, else main cache."""
+        if s in self.block_caches:
+            bc = self.block_caches[s]
+            return bc.k, bc.v
+        return (self.k[s] if s < len(self.k) else None), (self.v[s] if s < len(self.v) else None)
+
     def summary(self, piece=None) -> dict:
+        bc_bytes = sum(
+            (bc.k.numel() * bc.k.element_size() if bc.k is not None else 0)
+            + (bc.v.numel() * bc.v.element_size() if bc.v is not None else 0)
+            for bc in self.block_caches.values()
+        )
+        main_bytes = sum(
+            (self.k[s].numel() * self.k[s].element_size() + self.v[s].numel() * self.v[s].element_size())
+            for s in range(self.n_slots)
+            if s not in self.block_caches and self.k[s] is not None and self.v[s] is not None
+        )
+        state_bytes = sum(t.numel() * t.element_size() for st in self.states.values() for t in st.values())
         return {
             "n_tokens": len(self), "n_slots": self.n_slots,
             "segments": [s.to_dict() for s in self.segments],
             "positions": [round(float(p), 2) for p in self.pos.tolist()],
             "tokens": [piece(t) if piece else t for t in self.tokens],
-            "bytes": int(sum(t.numel() * t.element_size() for t in self.k + self.v if t is not None)
-                         + sum(t.numel() * t.element_size() for st in self.states.values() for t in st.values())),
+            "bytes": int(main_bytes + bc_bytes + state_bytes),
             "linear_slots": sorted(self.states.keys()),
+            "block_overrides": {s: bc.summary(piece) for s, bc in sorted(self.block_caches.items())},
         }

@@ -286,12 +286,27 @@ def test_image_stepper_and_editing_the_guess(qi):
     rec = st.edit_guess(url)                                    # the guess, unedited → no tile changes
     assert rec["tiles"] == 0 and torch.equal(st.lat, lat0)
     sigma = float(st.sig[st.i])
+    sig_before = st.sig.clone()
+    x0_step0 = st.x0s[0].clone()
     x0 = st.guess.clone()
     red = _png_url(np.tile(np.array([255, 0, 0], np.uint8), (96, 128, 1)))
     st.edit_guess(red, only_changed=False)                      # everywhere: x_t' = (1-σ)·enc(edit) + σ·ε̂
+    assert torch.equal(st.sig, sig_before)                      # schedule is not overwritten by edit
+    assert torch.equal(st.x0s[0], x0_step0)                     # previous step's x0 history is preserved
     z = ad._load_image(red, 128, 96)[0].reshape(8, -1).T
     eps = (lat0.float() - (1 - sigma) * x0) / sigma
     assert torch.allclose(st.lat.float(), (1 - sigma) * z + sigma * eps, atol=1e-5)
+
+    # Custom edit_noise & fresh_noise steer without changing schedule sigmas
+    st.edit_guess(red, only_changed=False, edit_noise=0.70, fresh_noise=False)
+    assert torch.equal(st.sig, sig_before)
+    assert torch.allclose(st.lat.float(), 0.30 * z + 0.70 * eps, atol=1e-5)
+
+    snap_at_edit = st.snapshot()["outputs"]["image"]
+    st.step_token()                                             # advance one denoising step
+    snap_after_step = st.snapshot()["outputs"]["image"]
+    assert snap_after_step != snap_at_edit                      # snapshot updates to new step's guess, not stale edit
+
     while st.step_block():
         pass
     out = st.finish()
