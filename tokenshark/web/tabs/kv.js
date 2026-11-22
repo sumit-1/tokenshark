@@ -7,14 +7,14 @@ import { startRun } from '../ui/run.js'
 import { renderTab, setTab, tabAvailable } from '../ui/tabs.js'
 
 const BLOCK_KV_OPS = [
-  ['replace_system', 'replace_system — Replace system prompt'],
-  ['append_system', 'append_system — Append to system prompt'],
-  ['prepend_system', 'prepend_system — Prepend to system prompt'],
-  ['replace_user', 'replace_user — Replace user’s prompt'],
-  ['append_user', 'append_user — Append to user’s prompt'],
-  ['prepend_user', 'prepend_user — Prepend to user’s prompt'],
+  ['replace_system', 'replace_system · Replace system prompt'],
+  ['append_system', 'append_system · Append to system prompt'],
+  ['prepend_system', 'prepend_system · Prepend to system prompt'],
+  ['replace_user', 'replace_user · Replace user’s prompt'],
+  ['append_user', 'append_user · Append to user’s prompt'],
+  ['prepend_user', 'prepend_user · Prepend to user’s prompt'],
 ]
-const BKV_NICE = Object.fromEntries(BLOCK_KV_OPS.map(([k, lab]) => [k, lab.split(' — ')[1] || k]))
+const BKV_NICE = Object.fromEntries(BLOCK_KV_OPS.map(([k, lab]) => [k, lab.split(' · ')[1] || k]))
 
 function blockAtSchedulePos(b) {
   const nid = S.planNodes?.[b]
@@ -50,7 +50,7 @@ export async function renderKV(p) {
   head.append(btn('Save current run’s cache', saveRunCache), el('span', { className: 'small', textContent: 'Import a .safetensors KV file:' }), up)
   if (can('block_kv')) p.appendChild(blockKVEditor())
   p.appendChild(el('div', { className: 'sechead', textContent: 'Saved KV caches (files)' }))
-  p.appendChild(el('div', { className: 'small', textContent: 'A KV cache can also be kept as a file — saved from a finished run, built from text below, or imported — and prepended with a “KV-cache prefix” box (shift / negative / offset). Use file prefixes to reuse a whole conversation; use Rewrite prompt (KV) above to change what individual blocks remember.' }))
+  p.appendChild(el('div', { className: 'small', textContent: 'A KV cache can also be kept as a file · saved from a finished run, built from text below, or imported · and prepended with a “KV-cache prefix” box (shift / negative / offset). Use file prefixes to reuse a whole conversation; use Rewrite prompt (KV) above to change what individual blocks remember.' }))
   // build a cache file from text
   const hp = el('details', { className: 'kvbox' }, `<summary>Build a cache file from text</summary><div class="small">The text is run through the current flow’s blocks once and its keys and values are saved as a cache file, which is then added to the flow as a KV-cache prefix box (choose its blocks and position there).</div>`)
   const ta = el('textarea', { rows: 3, placeholder: 'You are a pirate. Always answer in pirate speak.', value: S.hpText || '' })
@@ -91,7 +91,7 @@ export async function renderKV(p) {
 
 export async function inspectCache(cid) {
   const c = await GET(`/api/caches/${cid}`)
-  const box = el('div', { className: 'kvbox' }, `<h4>${esc(c.name)} — ${c.n_tokens} tokens · ${c.n_slots} block slots · positions are RoPE positions (editable)</h4>`)
+  const box = el('div', { className: 'kvbox' }, `<h4>${esc(c.name)} · ${c.n_tokens} tokens · ${c.n_slots} block slots · positions are RoPE positions (editable)</h4>`)
   const toks = el('div', { className: 'tokens' })
   const segOf = i => c.segments.find(s => i >= s.start && i < s.end)?.origin || 'prompt'
   let a = null, b = null
@@ -185,7 +185,7 @@ export function blockKVEditor() {
       const node = blockAtSchedulePos(b)
       const lay = node?.data?.layer ?? b
       const hasKv = node?.data?.has_kv !== false && (kvLayers == null || kvLayers.has(lay))
-      const cell = el('div', { className: 'pfcell' + (hasKv ? '' : ' off'), title: hasKv ? `block at position ${b} (layer ${lay})` : `block ${b}: linear attention — no KV cache` })
+      const cell = el('div', { className: 'pfcell' + (hasKv ? '' : ' off'), title: hasKv ? `block at position ${b} (layer ${lay})` : `block ${b}: linear attention · no KV cache` })
       cell.appendChild(el('span', { className: 'pfn', textContent: b }))
       rows.forEach((r, i) => {
         if (r.data.enabled !== false && targetsOf(r).includes(b)) {
@@ -252,7 +252,7 @@ export async function renderLiveKVAnalysis(box) {
       ? `<span class="chip" style="border-color:var(--ok)">GQA ${a.n_heads}Q / ${a.n_kv_heads}KV → <b>${a.gqa_ratio}× smaller</b> (${a.gqa_saving_pct}% saved vs ${mhaKb} KB MHA)</span>`
       : `<span class="chip">MHA ${a.n_heads}Q / ${a.n_kv_heads}KV</span>`
     box.appendChild(el('div', { className: 'small' },
-      `<b>Active Run KV Cache Analysis</b> — <b>${a.n_tokens}</b> tokens × <b>${a.n_slots}</b> block slots × <b>${a.n_kv_heads}</b> KV heads × <b>${a.head_dim}</b> head_dim = <b>${kb} KB</b> (${a.bytes_per_token} B/token) · ${gqaText}`))
+      `<b>Active Run KV Cache Analysis</b> · <b>${a.n_tokens}</b> tokens × <b>${a.n_slots}</b> block slots × <b>${a.n_kv_heads}</b> KV heads × <b>${a.head_dim}</b> head_dim = <b>${kb} KB</b> (${a.bytes_per_token} B/token) · ${gqaText}`))
 
     // Per-token strip with RoPE position, K/V norms, and Attention Sink indicator
     const tokWrap = el('div', { className: 'tokens', style: 'margin:8px 0' })
@@ -285,7 +285,7 @@ export async function renderLiveKVAnalysis(box) {
         <td style="font-family:ui-monospace,monospace"><b>${t.position}</b></td>
         <td><span class="pbar"><i style="width:${kw}%"></i></span> ${t.k_norm}</td>
         <td><span class="pbar"><i style="width:${vw}%"></i></span> ${t.v_norm}</td>
-        <td>${t.attn_received != null ? `${(t.attn_received * 100).toFixed(1)}%${t.is_sink ? ' <span class="chip" style="background:#3a2f12;border-color:var(--warn)">⚡ Attention Sink</span>' : ''}` : '—'}</td>`
+        <td>${t.attn_received != null ? `${(t.attn_received * 100).toFixed(1)}%${t.is_sink ? ' <span class="chip" style="background:#3a2f12;border-color:var(--warn)">⚡ Attention Sink</span>' : ''}` : '-'}</td>`
       tt.appendChild(tr)
     })
     det.appendChild(tt)
@@ -320,18 +320,18 @@ export async function renderLiveKVAnalysis(box) {
     a.blocks.forEach(b => {
       const tr = el('tr')
       if (b.linear) {
-        tr.innerHTML = `<td>${esc(b.label)}</td><td colspan="7" class="small">Linear attention (Gated DeltaNet) — fixed-size recurrent state matrix S, no per-token KV cache</td>`
+        tr.innerHTML = `<td>${esc(b.label)}</td><td colspan="7" class="small">Linear attention (Gated DeltaNet) · fixed-size recurrent state matrix S, no per-token KV cache</td>`
         bt.appendChild(tr)
         return
       }
       const ov = b.override
         ? `<span class="chip" style="border-color:var(--kv)" title="${esc(b.override.text || '')}">${esc(b.override.op || 'override')} · ${b.n_tokens} tok</span>`
-        : '<span class="small">—</span>'
+        : '<span class="small">-</span>'
       tr.innerHTML = `<td><b>${esc(b.label)}</b></td>
         <td>${ov}</td>
         <td>${b.k_norm_mean}</td><td class="small">${b.k_norm_max}</td>
         <td>${b.v_norm_mean}</td><td class="small">${b.v_norm_max}</td>
-        <td>${b.sink_token != null ? `#${b.sink_token} “${esc(b.sink_piece)}” (${(b.sink_attn * 100).toFixed(0)}%)` : '—'}</td>`
+        <td>${b.sink_token != null ? `#${b.sink_token} “${esc(b.sink_piece)}” (${(b.sink_attn * 100).toFixed(0)}%)` : '-'}</td>`
       const tdAct = el('td')
       if (!b.linear) {
         tdAct.append(

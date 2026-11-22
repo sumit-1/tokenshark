@@ -14,7 +14,7 @@ export const selectOf = (options, value) => { const s = el('select'); options.fo
 
 export const runsWithCaps = () => S.runs.filter(r => r.has_captures && r.model_id === S.info?.model_id && r.status !== 'error')
 
-export const runLabel = r => `${r.id}${r.label ? ' · ' + r.label : ''} — ${(r.preview || '').slice(0, 40)}`
+export const runLabel = r => `${r.id}${r.label ? ' · ' + r.label : ''} · ${(r.preview || '').slice(0, 40)}`
 
 export const blockNode = pos => S.run?.plan?.schedule_nodes?.[pos]
 

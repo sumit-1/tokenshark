@@ -3,7 +3,7 @@ import { esc } from '../flow.js'
 import { maskPreview, openPaint } from '../paint.js'
 import { codeSection } from './codeedit.js'
 import { debugRunTo } from './debugger.js'
-import { addBlockKV, addIntervention, bypassBlock, duplicateBlock, selectedNode } from './flowedit.js'
+import { addBlockKV, addForkHead, addIntervention, bypassBlock, duplicateBlock, selectedNode } from './flowedit.js'
 import { setTab, tabAvailable } from './tabs.js'
 import { saveRunCache } from '../tabs/kv.js'
 import { stepStrip } from '../tabs/output_image.js'
@@ -11,30 +11,30 @@ import { renderTokens } from '../tabs/output_text.js'
 import { neighbors, renderWordDictionary } from '../tabs/tokenizer.js'
 
 export const LLM_HOOK_LABELS = [
-  ['resid_pre', 'resid_pre — the stream entering the block'],
-  ['q', 'q — query heads (where tokens look)'],
-  ['k', 'k — new key heads (written to KV cache)'],
-  ['v', 'v — new value heads (written to KV cache)'],
-  ['kv_k', 'kv_k — all cached keys in this block’s KV cache'],
-  ['kv_v', 'kv_v — all cached values in this block’s KV cache'],
-  ['rope', 'rope — rotary position angles (zero / scale / jitter token positions)'],
-  ['attn_heads', 'attn_heads — each attention head’s output'],
-  ['attn_out', 'attn_out — what attention writes to the stream'],
-  ['router', 'router — MoE: the router’s score for each expert (ban / force experts, patch the routing)'],
-  ['expert_out', 'expert_out — MoE: what the chosen experts write, before it is weighted and summed'],
-  ['mlp_neurons', 'mlp_neurons — the MLP’s hidden neurons (MoE: of the experts you name)'],
-  ['mlp_out', 'mlp_out — what the MLP writes to the stream'],
-  ['resid_post', 'resid_post — the stream leaving the block'],
-  ['weights', 'weights — this block’s weight matrices (per-block quantize / scale)'],
+  ['resid_pre', 'resid_pre · the stream entering the block'],
+  ['q', 'q · query heads (where tokens look)'],
+  ['k', 'k · new key heads (written to KV cache)'],
+  ['v', 'v · new value heads (written to KV cache)'],
+  ['kv_k', 'kv_k · all cached keys in this block\'s KV cache'],
+  ['kv_v', 'kv_v · all cached values in this block\'s KV cache'],
+  ['rope', 'rope · rotary position angles (zero / scale / jitter token positions)'],
+  ['attn_heads', 'attn_heads · each attention head\'s output'],
+  ['attn_out', 'attn_out · what attention writes to the stream'],
+  ['router', 'router · MoE: the router\'s score for each expert (ban / force experts, patch the routing)'],
+  ['expert_out', 'expert_out · MoE: what the chosen experts write, before it is weighted and summed'],
+  ['mlp_neurons', 'mlp_neurons · the MLP\'s hidden neurons (MoE: of the experts you name)'],
+  ['mlp_out', 'mlp_out · what the MLP writes to the stream'],
+  ['resid_post', 'resid_post · the stream leaving the block'],
+  ['weights', 'weights · this block\'s weight matrices (per-block quantize / scale)'],
 ]
 
 export const BLOCK_KV_OPS = [
-  ['replace_system', 'replace_system — Replace system prompt'],
-  ['append_system', 'append_system — Append to system prompt'],
-  ['prepend_system', 'prepend_system — Prepend to system prompt'],
-  ['replace_user', 'replace_user — Replace user’s prompt'],
-  ['append_user', 'append_user — Append to user’s prompt'],
-  ['prepend_user', 'prepend_user — Prepend to user’s prompt'],
+  ['replace_system', 'replace_system · Replace system prompt'],
+  ['append_system', 'append_system · Append to system prompt'],
+  ['prepend_system', 'prepend_system · Prepend to system prompt'],
+  ['replace_user', 'replace_user · Replace user\'s prompt'],
+  ['append_user', 'append_user · Append to user\'s prompt'],
+  ['prepend_user', 'prepend_user · Prepend to user\'s prompt'],
 ]
 
 const BLOCK_KV_OP_LABELS = {
@@ -42,8 +42,8 @@ const BLOCK_KV_OP_LABELS = {
   replace_user: 'Replace user', append_user: 'Append user', prepend_user: 'Prepend user',
 }
 
-export const PREFIX_MODES = [['shift', 'shift: prefix at 0..m−1, the prompt continues at m (like real context — use for a hidden system prompt)'],
-  ['negative', 'negative: prefix at −m..−1, the prompt starts at 0 (as if fresh)'], ['offset', 'offset: prefix starts at the offset below']]
+export const PREFIX_MODES = [['shift', 'shift: prefix at 0..m-1, the prompt continues at m (use for a hidden system prompt)'],
+  ['negative', 'negative: prefix at -m..-1, the prompt starts at 0 (as if fresh)'], ['offset', 'offset: prefix starts at the offset below']]
 
 export const FIELDS = {
   input_prompt: modality => modality === 'image'
@@ -72,26 +72,26 @@ export const FIELDS = {
       ['value', 'Value (scale factor / noise σ / bits)', 'number'], ['steps', 'Steps (all | 0:4 | 2,5)', 'text'],
       ['positions', 'Prompt tokens for hook “word” (token #, see the Tokenizer box: 1 | 2:4)', 'text'], ['seed', 'Noise seed', 'number']]
     const op = n?.data.op || 'zero', hook = n?.data.hook
-    const runs = S.runs.filter(r => r.has_captures && r.model_id === S.info?.model_id).map(r => [r.id, `${r.id}${r.label ? ' · ' + r.label : ''} — ${(r.preview || '').slice(0, 30)}`])
+    const runs = S.runs.filter(r => r.has_captures && r.model_id === S.info?.model_id).map(r => [r.id, `${r.id}${r.label ? ' · ' + r.label : ''} · ${(r.preview || '').slice(0, 30)}`])
     const keepRef = (list, v) => v && !list.find(x => x[0] === v) ? [[v, `${v} (no longer in memory)`], ...list] : list
     const f = [['label', 'Label', 'text'], ['enabled', 'Enabled', 'checkbox'], ['hook', 'Where (hook)', 'select', LLM_HOOK_LABELS.filter(h => (S.info?.hooks || []).includes(h[0]))],
-      ['op', 'Operation', 'select', [['zero', 'zero — remove it'], ['scale', 'scale — multiply by the value'], ['add_noise', 'add_noise — add random noise'],
-        ['mean', 'mean — replace by the average over tokens'], ['quantize', 'quantize — round to N bits (1..16)'],
-        ['patch', 'patch — copy it from another run'], ['steer', 'steer — add a steering vector'],
-        ['project_out', 'project_out — erase / project out a direction'], ['clamp', 'clamp — pin units to a fixed value'],
-        ['wire', 'wire — wire detector neuron(s) into writer neuron(s)'],
-        ...(S.info?.moe ? [['ban', 'ban — MoE router: these experts can never be chosen'], ['only', 'only — MoE router: only these experts can be chosen'],
-          ['route', 'route — MoE router: use exactly the experts and weights you write']] : [])]]]
+      ['op', 'Operation', 'select', [['zero', 'zero · remove it'], ['scale', 'scale · multiply by the value'], ['add_noise', 'add_noise · add random noise'],
+        ['mean', 'mean · replace by the average over tokens'], ['quantize', 'quantize · round to N bits (1..16)'],
+        ['patch', 'patch · copy it from another run'], ['steer', 'steer · add a steering vector'],
+        ['project_out', 'project_out · erase / project out a direction'], ['clamp', 'clamp · pin units to a fixed value'],
+        ['wire', 'wire · wire detector neuron(s) into writer neuron(s)'],
+        ...(S.info?.moe ? [['ban', 'ban · MoE router: these experts can never be chosen'], ['only', 'only · MoE router: only these experts can be chosen'],
+          ['route', 'route · MoE router: use exactly the experts and weights you write']] : [])]]]
     if (['router', 'expert_out', 'mlp_neurons'].includes(hook) && S.info?.moe) f.push(['experts', op === 'route'
-      ? 'Experts and their weights (3=0.6, 17=0.4 — a name without a weight keeps the router’s own score)'
+      ? 'Experts and their weights (3=0.6, 17=0.4 · a name without a weight keeps the router\'s own score)'
       : `Experts (all | 3 | 0:8 | 1,5${S.info.moe.shared ? ' | shared' : ''})`, 'text'])
-    if (op === 'patch') f.push(['ref', 'Copy from run (the “clean” run)', 'select', [['', '— choose a run —'], ...keepRef(runs, n.data.ref)]],
-      ['src_positions', 'Take the source run’s token (empty = same token index; or last, or a number)', 'text'])
-    if (op === 'steer' || op === 'project_out') f.push(['ref', 'Vector direction', 'select', [['', '— choose a vector —'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
+    if (op === 'patch') f.push(['ref', 'Copy from run (the "clean" run)', 'select', [['', '- choose a run -'], ...keepRef(runs, n.data.ref)]],
+      ['src_positions', 'Take the source run\'s token (empty = same token index; or last, or a number)', 'text'])
+    if (op === 'steer' || op === 'project_out') f.push(['ref', 'Vector direction', 'select', [['', '- choose a vector -'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
       ['value', op === 'project_out' ? 'Projection strength (1 = erase completely, 2 = reflect)' : 'Strength (multiplies the vector; negative pushes the other way)', 'number'])
-    if (op === 'clamp') f.push(['clamp', 'Pin to', 'select', [['max', 'max — the largest value it reached'], ['min', 'min — the smallest value it reached'], ['value', 'value — the number below']]],
+    if (op === 'clamp') f.push(['clamp', 'Pin to', 'select', [['max', 'max · the largest value it reached'], ['min', 'min · the smallest value it reached'], ['value', 'value · the number below']]],
       ['value', n.data.clamp === 'value' ? 'Value' : 'Multiplier (1 = exactly its max / min, 5 = five times that)', 'number'],
-      ['ref', 'Max / min measured in run (empty = this run so far)', 'select', [['', '— this run so far —'], ...keepRef(runs, n.data.ref)]])
+      ['ref', 'Max / min measured in run (empty = this run so far)', 'select', [['', '- this run so far -'], ...keepRef(runs, n.data.ref)]])
     if (op === 'wire') f.push(
       ['source_neurons', 'Source / detector neuron(s) (e.g. 2751 or 1431)', 'text'],
       ['neurons', 'Target / writer neuron(s) (e.g. 2282 or 836,10,1871)', 'text'],
@@ -122,6 +122,16 @@ export const FIELDS = {
     ['offset', 'Offset (mode = offset)', 'number']],
   init_image: () => [['mask_mode', 'Painted area', 'select', [['keep', 'keep: locked to the start image (like forced tokens)'], ['regenerate', 'regenerate: only the painted area changes']]],
     ['lock_steps', 'Lock during steps (all | 0:10 | 0,1,2)', 'text'], ['lock_strength', 'Lock strength (1 = hard, 0.3 = soft pull)', 'number']],
+  fork_head: () => [
+    ['label', 'Label', 'text'],
+    ['enabled', 'Enabled', 'checkbox'],
+    ['ref', 'Classifier Head ID (e.g. powershell_detector)', 'text'],
+    ['mode', 'Execution Mode', 'select', [['monitor', 'monitor · record per-token category probabilities'], ['gate', 'gate · halt / redirect generation when triggered']]],
+    ['hook', 'Source Block Hook', 'select', [['resid_post', 'resid_post · after block'], ['resid_pre', 'resid_pre · before block'], ['mlp_out', 'mlp_out · MLP output'], ['attn_out', 'attn_out · attention output']]],
+    ['threshold', 'Trigger Threshold (0..1)', 'number'],
+    ['trigger_category', 'Trigger Category (e.g. PowerShell)', 'text'],
+    ['halt_message', 'Custom Halt / Redirect Message (for gate mode)', 'text'],
+  ],
 }
 
 export const KIND_HELP = {
@@ -142,16 +152,17 @@ export const KIND_HELP = {
   vae_decode: 'Turns the 4-channel latent back into pixels.',
   intervention: 'Intercepts and modifies a block’s activations, KV cache, or weights while the model runs. Wire it into the top port of one or more blocks. Supports zero, scale, noise, quantize (per-block weight or KV-cache bits), patch, steer, project_out, and clamp.',
   block_kv: 'Rewrites what a KV-capable block remembers. The system or user prompt is changed (replace / append / prepend), then that block’s KV cache is recreated from the rewritten prompt and grows as new tokens are generated. Wire into the block’s top KV port (linear-attention / Gated DeltaNet blocks have no KV port).',
-  kv_import: 'Prepends a saved KV cache: the new prompt attends to it without recomputing it. Keys are stored before RoPE, so positions can be moved freely. Add several boxes (each wired into Embed’s KV port) to give different blocks different prefixes; each box’s “Blocks that can see it” decides which blocks read it. With the chat template on, the Prompt box’s System field is ignored — the prefix plays that role.',
-  prompt_kv: 'A second prompt for chosen blocks. Qwen-Image pushes the prompt through the blocks once and keeps its keys/values — a KV cache — so each block can read a different one. replace: those blocks see this prompt instead (e.g. layout blocks “a cat”, detail blocks “a dog”). prepend: a hidden prompt the main prompt and the image both attend to in those blocks, like the hidden system prompt of the language models.',
-  init_image: 'Image prefill. Strength sets how much noise is added before denoising starts (low = stay close to the image). Paint a region to lock it: at every locked step that region is reset to the start image at the current noise level — the image version of forced tokens. “regenerate” flips it: only the painted area changes (inpainting).',
+  kv_import: 'Prepends a saved KV cache: the new prompt attends to it without recomputing it. Keys are stored before RoPE, so positions can be moved freely. Add several boxes (each wired into Embed\'s KV port) to give different blocks different prefixes; each box\'s "Blocks that can see it" decides which blocks read it. With the chat template on, the Prompt box\'s System field is ignored - the prefix plays that role.',
+  prompt_kv: 'A second prompt for chosen blocks. Qwen-Image pushes the prompt through the blocks once and keeps its keys/values (a KV cache) so each block can read a different one. replace: those blocks see this prompt instead (e.g. layout blocks "a cat", detail blocks "a dog"). prepend: a hidden prompt the main prompt and the image both attend to in those blocks, like the hidden system prompt of the language models.',
+  init_image: 'Image prefill. Strength sets how much noise is added before denoising starts (low = stay close to the image). Paint a region to lock it: at every locked step that region is reset to the start image at the current noise level. "regenerate" flips it: only the painted area changes (inpainting).',
+  fork_head: 'Side-branch classifier or guardrail head wired to a transformer block\'s bottom fork port. Runs a lightweight linear probe, 2-layer MLP guard, or SwiGLU branch on that block\'s activations in monitor mode (live probabilities) or gate mode (halts generation mid-network when triggered).',
 }
 
 // Help text that differs by architecture; the plugin names its set (ui_schema.texts).
 export const DIT_HELP = {
-  text_encoder: 'Qwen3-VL language model (36 blocks). The prompt is wrapped in a fixed chat turn; the last block\'s hidden states — before its final norm — become the text tokens of the DiT.',
-  scheduler: 'Flow matching: the latent moves in a straight line from noise (σ = 1) to the image (σ = 0). Each step: x ← x + (σ_next − σ)·v. σ values are shifted toward the noisy end for bigger images. Guidance > 1 with a negative prompt runs the image tokens twice.',
-  denoiser_in: 'One sequence: [prompt tokens | image tokens]. The prompt tokens went through all blocks once (at t = 0) and their keys/values are cached — the same trick as an LLM KV cache — so each step only computes the image tokens.',
+  text_encoder: 'Qwen3-VL language model (36 blocks). The prompt is wrapped in a fixed chat turn; the last block\'s hidden states - before its final norm - become the text tokens of the DiT.',
+  scheduler: 'Flow matching: the latent moves in a straight line from noise (σ = 1) to the image (σ = 0). Each step: x <- x + (σ_next - σ)·v. σ values are shifted toward the noisy end for bigger images. Guidance > 1 with a negative prompt runs the image tokens twice.',
+  denoiser_in: 'One sequence: [prompt tokens | image tokens]. The prompt tokens went through all blocks once (at t = 0) and their keys/values are cached - the same trick as an LLM KV cache - so each step only computes the image tokens.',
   unet_block: 'Single-stream DiT block: LayerNorm·(1+scale) → attention (prompt tokens: causal; image tokens: see the whole prompt and every patch) → add ×tanh(gate) → LayerNorm·(1+scale) → SwiGLU → add. One shared modulation for all blocks. Blocks can be bypassed, repeated or reordered; hook out scales/zeroes what the block leaves in the image tokens, hook word re-weights how much the image reads chosen prompt tokens.',
   denoiser_out: 'Final norm + projection → velocity v (≈ noise − image). Euler step → next latent. Loops for every step.',
   vae_decode: 'Turns the 64-channel latent (one vector per 16×16 tile) back into RGBA pixels.',
@@ -170,7 +181,7 @@ export function field(n, [key, label, type, options]) {
   if (type === 'textarea') input = el('textarea', { rows: 3, value: n.data[key] ?? '' })
   else if (type === 'select') {
     input = el('select')
-    if (key === 'cache_id') input.appendChild(el('option', { value: '', textContent: '— choose —' }))
+    if (key === 'cache_id') input.appendChild(el('option', { value: '', textContent: '- choose -' }))
     for (const o of options) { const [v, t] = Array.isArray(o) ? o : [o, o]; input.appendChild(el('option', { value: v, textContent: t })) }
     input.value = n.data[key] ?? ''
   } else if (type === 'checkbox') input = el('input', { type: 'checkbox', checked: n.data[key] !== false && !!(n.data[key] ?? (key === 'add_bos' || key === 'enabled' || key === 'moe_shared')) })
@@ -256,10 +267,20 @@ export function renderInspector() {
         hooks.refreshBadges?.()
         renderInspector()
       }),
-      btn('+ Interceptor', () => addIntervention(n)), btn('Debug: run to here', () => debugRunTo(n)))
+      btn('+ Interceptor', () => addIntervention(n)),
+      btn('+ Fork Head', () => addForkHead(n)),
+      btn('Debug: run to here', () => debugRunTo(n)))
     if (n.data.has_kv !== false && can('block_kv')) {
       actions.append(btn('+ Rewrite prompt (KV)', () => addBlockKV(n)))
     }
+  }
+  if (k === 'fork_head') {
+    actions.append(
+      btn(n.data.enabled === false ? 'Enable' : 'Disable', () => {
+        flow.updateNodeData(n.id, { enabled: n.data.enabled === false }); renderInspector(); hooks.refreshBadges?.()
+      }),
+      btn('Open Guardrail Fork tab', () => setTab('guardrail')),
+    )
   }
   if (k === 'block_kv') {
     actions.append(
@@ -361,7 +382,7 @@ export function startImageEditor(n) {
     const sl = el('input', { type: 'range', min: 0, max: 1, step: 0.05, value: n.data.strength ?? 0.6 })
     const show = () => {
       const v = +sl.value, k = Math.min(steps - 1, Math.round(steps * (1 - v)))
-      lab.innerHTML = `<b>Noise level ${v.toFixed(2)}</b> — starts at step ${k} of ${steps} with ` +
+      lab.innerHTML = `<b>Noise level ${v.toFixed(2)}</b> · starts at step ${k} of ${steps} with ` +
         (sig ? `<b>${Math.round((1 - sig[k]) * 100)}% your picture + ${Math.round(sig[k] * 100)}% noise</b>. ` : 'your picture mixed with noise. ') +
         (v < 0.45 ? 'Low noise: keeps your picture closely and refines details.'
           : v < 0.8 ? 'Medium noise: keeps your layout and colours; the model renders surfaces and details.'

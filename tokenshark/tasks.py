@@ -1,11 +1,11 @@
 """Task manager: every piece of work that needs the model (runs, debugger steps, logit lens, word clouds, word
-tracking) is a Task. Work is done in small units — one block of a run, one layer of a word cloud — and before
+tracking) is a Task. Work is done in small units - one block of a run, one layer of a word cloud - and before
 each unit the task asks for the model with `TASKS.slot(task)`. The model goes to the first waiting task in
 the queue order, so the user can move a task up, pause it or stop it, and the change takes effect at the
 next unit boundary (one block: seconds even for a 27B model streamed from disk).
 
 Order: new analysis tasks (what you just clicked) go to the front, debugger steps after them, runs last.
-Tasks with the same `group` replace each other: clicking another token in the word cloud stops the old cloud.
+All queued and finished tasks are preserved without artificial count caps or automatic cancellation.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from .engine import Cancelled
 from .registry import LOADED
 
 _RANK = {"analysis": 0, "debug": 1, "run": 2}
-KEEP_FINISHED = 30
 
 
 class Task:
@@ -62,17 +61,12 @@ class TaskManager:
     def new(self, kind: str, label: str, group: str | None = None, run_id: str | None = None) -> Task:
         t = Task(kind, label, group, run_id)
         with self.cond:
-            if group:
-                for o in self.tasks.values():
-                    if o.group == group and o.live:
-                        self._cancel(o)
             self.tasks[t.id] = t
             # front of its kind: after live tasks of a more urgent kind, before the rest
             i = 0
             while i < len(self.order) and _RANK[self.tasks[self.order[i]].kind] < _RANK[kind]:
                 i += 1
             self.order.insert(i, t.id)
-            self._trim()
             self.cond.notify_all()
         return t
 
@@ -88,11 +82,6 @@ class TaskManager:
             if t.id in self.order:
                 self.order.remove(t.id)
             self.cond.notify_all()
-
-    def _trim(self):
-        done = [x for x in self.tasks.values() if not x.live]
-        for x in sorted(done, key=lambda x: x.finished or 0)[:-KEEP_FINISHED]:
-            self.tasks.pop(x.id, None)
 
     # ---------------------------------------------------------------- the model slot
     @contextlib.contextmanager
@@ -140,7 +129,6 @@ class TaskManager:
             except Exception:
                 pass
         if t.status == "queued" and t.started is None and not t.active:
-            # never started: nothing will notice the flag, so close it here
             t.status, t.finished = "cancelled", time.time()
             if t.id in self.order:
                 self.order.remove(t.id)
@@ -174,7 +162,7 @@ class TaskManager:
             for n, s in enumerate(live):
                 s["queue"] = n + 1
             done = sorted((x for x in self.tasks.values() if not x.live), key=lambda x: -(x.finished or 0))
-            return live + [x.summary() for x in done[:10]]
+            return live + [x.summary() for x in done]
 
     # ---------------------------------------------------------------- generator tasks
     def run_steps(self, t: Task, gen_fn, weights=None):

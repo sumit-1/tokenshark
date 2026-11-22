@@ -34,7 +34,7 @@ export async function renderContrib(p) {
     range.oninput = () => { S.mapStep = maps.steps[+range.value]; renderTab() }
     ctl.append(el('span', { className: 'small', textContent: `denoising step ${maps.step} of ${o.steps}` }), range)
     secA.appendChild(ctl)
-    secA.appendChild(el('div', { className: 'small', innerHTML: 'Top: size of the stage’s residual writes per pixel, over the final image (bright = writes a lot here). Bottom: the stage’s output features squeezed to 3 colours with PCA — patches with similar colours carry similar features, so you can watch objects separate from background deeper in the network.' }))
+    secA.appendChild(el('div', { className: 'small', innerHTML: 'Top: size of the stage’s residual writes per pixel, over the final image (bright = writes a lot here). Bottom: the stage’s output features squeezed to 3 colours with PCA · patches with similar colours carry similar features, so you can watch objects separate from background deeper in the network.' }))
     const total = Math.max(...maps.stages.map(s => s.total))
     const grid = el('div', { className: 'stagegrid' })
     maps.stages.forEach(st => {
@@ -53,7 +53,7 @@ export async function renderContrib(p) {
   const secB = el('div', { className: 'sec' }, '<h4>2 · Which stage matters most? (remove it and compare)</h4>')
   p.appendChild(secB)
   if (S.info?.capabilities?.contributions === false) {
-    secB.appendChild(el('div', { className: 'small', innerHTML: 'Measuring every block would re-run the whole generation once per block — too slow for this model. Do it by hand: <b>Bypass</b> a block (right-click it), press Run, and compare the two runs in the Runs tab. <b>Branch here</b> on a late step makes it cheap: only the remaining steps are recomputed.' }))
+    secB.appendChild(el('div', { className: 'small', innerHTML: 'Measuring every block would re-run the whole generation once per block · too slow for this model. Do it by hand: <b>Bypass</b> a block (right-click it), press Run, and compare the two runs in the Runs tab. <b>Branch here</b> on a late step makes it cheap: only the remaining steps are recomputed.' }))
   } else {
   const ctlB = el('div', { className: 'row' })
   const stepsIn = el('input', { value: S.contribSteps, style: 'width:90px', title: 'steps to remove the stage in: all | 0:2 | 3' })

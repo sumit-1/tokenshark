@@ -30,7 +30,7 @@ export function conversationOf(run) {
 function conversationBox(p) {
   if (S.run.status && !['done', 'cancelled'].includes(S.run.status)) return
   const turns = conversationOf(S.run)
-  const box = el('div', { className: 'kvbox' }, `<h4>Conversation (${turns.length} turns)${S.run.plan?.params?.use_chat_template ? '' : ' <span class="small">— chat template is off: earlier turns are fed as plain “User: … / Assistant: …” lines</span>'}</h4>`)
+  const box = el('div', { className: 'kvbox' }, `<h4>Conversation (${turns.length} turns)${S.run.plan?.params?.use_chat_template ? '' : ' <span class="small">- chat template is off: earlier turns are fed as plain “User: … / Assistant: …” lines</span>'}</h4>`)
   turns.forEach(m => box.appendChild(el('div', { className: `turn ${m.role}${m.answer ? ' answer' : ''}` }, `<b>${m.role}</b> ${esc(m.content) || '<i class="small">(empty)</i>'}`)))
   const ta = el('textarea', { rows: 2, placeholder: 'Your next message…', value: S.followup || '' })
   ta.oninput = () => { S.followup = ta.value }
@@ -98,7 +98,7 @@ export async function exportScript() {
     const text = await r.text()
     if (!r.ok) throw new Error(JSON.parse(text).detail || r.statusText)
     download(`run_${S.run.id}.py`, text)
-    toast(`Saved run_${S.run.id}.py — run it with “python run_${S.run.id}.py” from the app’s folder.`)
+    toast(`Saved run_${S.run.id}.py · run it with “python run_${S.run.id}.py” from the app’s folder.`)
   } catch (e) { toast(e.message, 'error') }
 }
 

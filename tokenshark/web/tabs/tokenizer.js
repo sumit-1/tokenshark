@@ -95,7 +95,7 @@ export async function neighbors(box, id) {
   box.innerHTML = spinner()
   try {
     const r = await GET(`/api/tokens/${id}/neighbors?k=14`)
-    box.innerHTML = `<div class="kvbox"><h4>Token ${r.id} “${esc(r.piece)}” — nearest tokens by embedding direction</h4>
+    box.innerHTML = `<div class="kvbox"><h4>Token ${r.id} “${esc(r.piece)}” · nearest tokens by embedding direction</h4>
       <div class="small">Before any block runs, these are the tokens the model treats most alike (cosine similarity).</div>
       <div>${r.neighbors.map(([t, i, s]) => `<span class="chip" title="id ${i}">${esc(t)} <span class="small">${s}</span></span>`).join(' ')}</div></div>`
   } catch (e) { box.innerHTML = `<div class="bad">${esc(e.message)}</div>` }

@@ -19,7 +19,7 @@ export async function renderCloud(p) {
   let pos = S.cloudPos < 0 ? Math.max(0, Math.min(T - 2, T + S.cloudPos)) : S.cloudPos
   let layers = S.cloudLayers
   if (follow) {
-    // Stepping: the newest token, one cloud per block it has passed so far — newest block first.
+    // Stepping: the newest token, one cloud per block it has passed so far · newest block first.
     pos = T - 1
     const done = o.live.phase === 'block' ? o.live.next_pos : n
     layers = [-1, ...Array(done).keys()].reverse()
@@ -67,13 +67,13 @@ export async function renderCloud(p) {
   const showCombined = el('label', { className: 'field check' })
   const cbC = el('input', { type: 'checkbox', checked: !!S.cloudCombined })
   cbC.onchange = () => { S.cloudCombined = cbC.checked; renderTab() }
-  showCombined.append(cbC, el('span', { textContent: 'also show the average of the chosen layers (mixes layers — not a real prediction)' }))
+  showCombined.append(cbC, el('span', { textContent: 'also show the average of the chosen layers (mixes layers · not a real prediction)' }))
   if (!follow) p.appendChild(showCombined)
 
   const W = S.info?.weights, streamed = W?.policy === 'disk'
   const perBlock = W?.total_gb && S.info.n_layers ? W.total_gb / S.info.n_layers : 0
   const wait = streamed && S.through > 0
-    ? `Decoding… each chosen layer is pushed through the last ${S.through} block(s). With weights streamed from disk those blocks are read once for this request (~${(perBlock * S.through).toFixed(1)} GB), then reused for every layer — expect a while on a large model.`
+    ? `Decoding… each chosen layer is pushed through the last ${S.through} block(s). With weights streamed from disk those blocks are read once for this request (~${(perBlock * S.through).toFixed(1)} GB), then reused for every layer · expect a while on a large model.`
     : 'Decoding…'
   const wrap = el('div', { className: 'clouds' }, `<div class="empty">${spinner(wait)}</div>`)
   p.appendChild(wrap)
@@ -85,7 +85,7 @@ export async function renderCloud(p) {
     wrap.innerHTML = ''
     const nxt = c.next_token != null
       ? (c.next_generated ? `next token generated: “${esc(c.next_token)}”` : `next token in your text: “${esc(c.next_token)}” (you typed it; the model’s own choice was “${esc(c.model_choice ?? '?')}”)`)
-      : 'last token — nothing follows yet'
+      : 'last token · nothing follows yet'
     const chat = flow.nodes.find(n => n.data.kind === 'input_prompt')?.data.use_chat_template
     if (!head) {
       head = el('div', { className: 'cloudhead', innerHTML: `Position #${c.position}: predicting what comes after “<b>${esc(c.token)}</b>” · ${nxt}` +
@@ -111,7 +111,7 @@ export async function renderCloud(p) {
         `<h4>${esc(title)}</h4><div class="words">${spinner(i === 0 && task?.status === 'running' ? 'decoding…' : task?.status === 'queued' ? 'waiting for the model (see Tasks)' : 'queued')}</div>`))
     })
     if (c.combined && S.cloudCombined && !follow) wrap.appendChild(cloudCard(`Average of ${c.layers.length} layers`, c.combined, 'a blend for overview, not something the model computes', c.next_token))
-    if (c.pending?.length) wrap.appendChild(el('div', { className: 'cloud pendingcard' }, `<h4>Not reached yet</h4><div class="small">${c.pending.map(esc).join(', ')} — the token hasn't flowed through these blocks yet. Press Block ▸.</div>`))
+    if (c.pending?.length) wrap.appendChild(el('div', { className: 'cloud pendingcard' }, `<h4>Not reached yet</h4><div class="small">${c.pending.map(esc).join(', ')} · the token hasn't flowed through these blocks yet. Press Block ▸.</div>`))
   }
   try {
     const c = await streamAnalysis(`/api/runs/${S.run.id}/cloud?position=${pos}&layers=${req.join(',')}&through=${S.through}&top=40`,
@@ -140,11 +140,11 @@ export async function renderTrack(box, pos) {
     const maxPush = Math.max(1e-6, ...r.rows.map(x => Math.abs(x.push)))
     const lbl = x => esc(x.pos < 0 ? 'Embed' : `${flow.node(x.node)?.data.label || x.label}`)
     const verdict = r.same
-      ? `The model chose “${esc(r.choice)}” — the word you expected.`
+      ? `The model chose “${esc(r.choice)}” · the word you expected.`
       : `The model chose “${esc(r.choice)}”, not “${esc(r.target)}”. Look for where “${esc(r.target)}” loses its lead and which blocks push against it (red).`
     const firstRow = r.first_top_layer == null ? null : r.rows.find(x => x.pos === r.first_top_layer)
     const firstTop = firstRow == null ? `“${esc(r.target)}” is never the top word${partial ? ' so far' : ''}.` : `“${esc(r.target)}” first becomes the top word at ${lbl(firstRow)}.`
-    let h = `<div class="trackbox"><div>${partial ? spinner(`${Math.round((r._progress || 0) * 100)}%`) + ' ' : ''}<b>${verdict}</b> ${firstTop} <span class="small">(tracking token “${esc(r.target)}”${r.pieces > 1 ? ` — “${esc(r.word)}” is split into ${r.pieces} tokens here, so only its first piece is tracked` : ''}${r.candidates.length > 1 ? `; other spelling: ${r.candidates.slice(1).map(x => `“${esc(x)}”`).join(', ')}` : ''})</span></div>
+    let h = `<div class="trackbox"><div>${partial ? spinner(`${Math.round((r._progress || 0) * 100)}%`) + ' ' : ''}<b>${verdict}</b> ${firstTop} <span class="small">(tracking token “${esc(r.target)}”${r.pieces > 1 ? ` · “${esc(r.word)}” is split into ${r.pieces} tokens here, so only its first piece is tracked` : ''}${r.candidates.length > 1 ? `; other spelling: ${r.candidates.slice(1).map(x => `“${esc(x)}”`).join(', ')}` : ''})</span></div>
       <table class="grid track"><tr><th>Layer</th><th>would say</th><th>P(“${esc(r.target)}”)</th><th>rank</th>${r.same ? '' : `<th>P(“${esc(r.choice)}”)</th><th>rank</th>`}
       <th title="How much this block's own write moves the final logit of “${esc(r.target)}” relative to “${esc(r.versus)}” (direct logit attribution)">push: “${esc(r.target)}” vs “${esc(r.versus)}”${r.same ? ' (runner-up)' : ''}</th></tr>`
     r.rows.forEach(x => {

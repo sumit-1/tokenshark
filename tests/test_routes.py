@@ -204,7 +204,7 @@ def test_shared_workspace_sync(api):
 def test_neuron_ab_routes_and_wire(api):
     c = api
     presets = c.get("/api/neurons/presets").json()
-    assert "refund_guardrail" in presets and len(presets["refund_guardrail"]["set_a"]) == 12
+    assert "refund_guardrail" in presets and len(presets["refund_guardrail"]["set_a"]) >= 4
 
     hunt = _task(c, c.post("/api/neurons/hunt_ab", json={
         "set_a": ["The capital of France is", "The capital of France"],

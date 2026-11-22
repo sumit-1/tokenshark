@@ -113,6 +113,15 @@ class RunResult:
         """Analyze this run's KV cache: GQA memory savings, per-block & per-token K/V norms, and attention sinks."""
         return interp.kv_analysis(self.lab.adapter, self.captures, self.plan.schedule, self.plan.schedule_nodes)
 
+    def trace_attention(self, query_token: int = -1, key_token: int | None = None,
+                        target_word: str = "", top_k: int = 30) -> dict:
+        """Rank `(block, head)` pairs across the model that attend to and copy from `key_token` into `query_token`."""
+        from .extensions.attn_traceback import trace_previous_tokens
+        return trace_previous_tokens(
+            self.lab.adapter, self.captures, self.plan.schedule, self.plan.schedule_nodes,
+            query_token=query_token, key_token=key_token, target_word=target_word, top_k=top_k,
+        )
+
     # ---------------------------------------------------------------- conversations
     @property
     def conversation(self) -> list[dict]:
@@ -423,6 +432,40 @@ class Lab:
         if not d["editable"]:
             raise ValueError(d["reason"])
         return d["code"]
+
+    # ---------------------------------------------------------------- guardrail fork & attention traceback
+    @torch.no_grad()
+    def train_guardrail_fork(self, preset: str = "powershell_detector",
+                             categories: dict[str, list[str]] | None = None,
+                             block: int = -1, head_type: str = "linear_probe",
+                             steps: int = 80, lr: float = 0.05, name: str = "powershell_detector",
+                             trigger_category: str = "", threshold: float = 0.65,
+                             halt_message: str = "", pooling: str = "mean") -> dict:
+        """Train a center-layer guardrail fork classifier (`linear_probe`, `mlp_guard`, or `block_branch`)."""
+        from .extensions.guardrail_fork import PRESETS, train_fork_classifier
+        cats = categories
+        trig = trigger_category
+        h_msg = halt_message
+        if preset and preset in PRESETS and not cats:
+            p = PRESETS[preset]
+            cats = p["categories"]
+            trig = trig or p["trigger_category"]
+            h_msg = h_msg or p["halt_message"]
+        if not cats:
+            raise ValueError("Provide `categories` or a valid `preset` (e.g. 'powershell_detector').")
+        return train_fork_classifier(
+            self.adapter,
+            categories=cats,
+            pos=block if block >= 0 else None,
+            head_type=head_type,
+            steps=steps,
+            lr=lr,
+            name=name,
+            trigger_category=trig,
+            threshold=threshold,
+            halt_message=h_msg,
+            pooling=pooling,
+        )
 
     def __repr__(self):
         return f"<Lab {self.model_id} on {self.device}>"

@@ -29,15 +29,15 @@ export function renderImageDebug(p) {
     return
   }
   const v = `${st.steps}-${st.edits.length}-${st.sigma}`
-  const where = st.done ? 'all steps completed — you can still <b>edit the image</b>, <b>switch the prompt</b>, <b>adjust noise σ</b>, or <b>add more steps</b> to continue refining'
-    : st.phase === 'idle' ? `between steps — step ${st.step} starts from the input on the left (σ ${st.sigma})`
+  const where = st.done ? 'all steps completed · you can still <b>edit the image</b>, <b>switch the prompt</b>, <b>adjust noise σ</b>, or <b>add more steps</b> to continue refining'
+    : st.phase === 'idle' ? `between steps · step ${st.step} starts from the input on the left (σ ${st.sigma})`
       : `inside step ${st.step}: next is ${esc(flow.node(st.active_node)?.data.label || '#' + st.next_pos)}`
   const ga = st.guess_at
-  const guessLbl = !ga ? 'starting canvas (edit before step 0, or press Step ▸▸)' : ga[1] == null ? `after step ${ga[0]} — the picture the next step aims for` : `after block ${ga[1]} of step ${ga[0]} (if the model stopped here)`
+  const guessLbl = !ga ? 'starting canvas (edit before step 0, or press Step ▸▸)' : ga[1] == null ? `after step ${ga[0]} · the picture the next step aims for` : `after block ${ga[1]} of step ${ga[0]} (if the model stopped here)`
   p.appendChild(el('div', { className: 'small', innerHTML: `Step <b>${Math.min(st.step, st.n_steps)}</b> of ${st.n_steps} · ${where}` }))
   const row = el('div', { className: 'dbgimgs' })
-  const fIn = el('figure', {}, `<figcaption><b>Input xₜ</b> ≈ — what the model is given: ${Math.round((1 - st.sigma) * 100)}% picture + ${Math.round(st.sigma * 100)}% noise</figcaption>`)
-  const fG = el('figure', {}, `<figcaption><b>Current image x̂₀</b> (exact) — ${esc(guessLbl)}</figcaption>`)
+  const fIn = el('figure', {}, `<figcaption><b>Input xₜ</b> ≈ · what the model is given: ${Math.round((1 - st.sigma) * 100)}% picture + ${Math.round(st.sigma * 100)}% noise</figcaption>`)
+  const fG = el('figure', {}, `<figcaption><b>Current image x̂₀</b> (exact) · ${esc(guessLbl)}</figcaption>`)
   const imIn = el('img'), imG = el('img'), wait = el('div', { className: 'small', innerHTML: spinner('decoding the image…') })
   fIn.prepend(imIn); fG.prepend(imG, wait)
   row.append(fIn, fG)
@@ -67,7 +67,7 @@ export function renderImageDebug(p) {
   const addMore = btn('+ 4 steps', async () => {
     try {
       const r = await POST('/api/debug/extend', { add: 4 })
-      toast(`Extended schedule to ${r.n_steps} steps — press Step ▸▸ or Run to end ▶| to continue.`)
+      toast(`Extended schedule to ${r.n_steps} steps · press Step ▸▸ or Run to end ▶| to continue.`)
       showDebug(r)
     } catch (e) { toast(e.message, 'error') }
   })
@@ -144,7 +144,7 @@ export function renderImageDebug(p) {
   // Live Mid-Step Prompt & Block-Split Steering + Word Attention Boosting
   const pBox = el('div', { className: 'sec', style: 'margin-top:8px;padding-top:8px;border-top:1px solid var(--line)' })
   pBox.appendChild(el('h4', { textContent: 'Mid-Step Prompt & Attention Steering' }))
-  pBox.appendChild(el('div', { className: 'small', innerHTML: '<b>Lab experiment — When does a DiT commit to layout vs. identity vs. texture?</b><br>• Switch the prompt at <b>steps 2–5 (σ ≈ 0.90)</b> to morph the subject while keeping the pose/composition.<br>• Switch at <b>steps 10–14 (σ ≈ 0.60)</b> or target only <b>late blocks (16:32)</b> to keep the 3D geometry and repaint only surface material/lighting.' }))
+  pBox.appendChild(el('div', { className: 'small', innerHTML: '<b>Lab experiment · When does a DiT commit to layout vs. identity vs. texture?</b><br>• Switch the prompt at <b>steps 2–5 (σ ≈ 0.90)</b> to morph the subject while keeping the pose/composition.<br>• Switch at <b>steps 10–14 (σ ≈ 0.60)</b> or target only <b>late blocks (16:32)</b> to keep the 3D geometry and repaint only surface material/lighting.' }))
   const pRow = el('div', { className: 'row', style: 'margin-top:6px' })
   const curPrompt = st.current_prompt || flow.nodes.find(n => n.data.kind === 'input_prompt')?.data.prompt || ''
   const pInp = el('input', { type: 'text', value: curPrompt, placeholder: 'New prompt from this step onward…', style: 'flex:1;min-width:240px', disabled: !st.can_edit || !!st.busy })
@@ -159,7 +159,7 @@ export function renderImageDebug(p) {
     $('#progress-msg').textContent = 'encoding new prompt into DiT KV cache…'
     try {
       const r = await POST('/api/debug/prompt', { prompt: text, blocks: bSel.value })
-      toast(`Switched prompt on blocks ${r.prompt_change.blocks} from step ${r.prompt_change.step} — press Step ▸▸ or Run to end ▶|.`)
+      toast(`Switched prompt on blocks ${r.prompt_change.blocks} from step ${r.prompt_change.step} · press Step ▸▸ or Run to end ▶|.`)
       showDebug(r)
     } catch (e) { toast(e.message, 'error') }
     finally { $('#progress').classList.remove('indet'); $('#progress').style.width = '0%'; $('#progress-msg').textContent = '' }
@@ -198,7 +198,7 @@ export function renderImageDebug(p) {
   }
   p.appendChild(pBox)
 
-  p.appendChild(el('div', { className: 'small note', innerHTML: `<b>Why single-step edits get overwritten or blurred (and how to fix it):</b> in flow matching, one step only moves the latent by ~4%, while the remaining 20 steps are driven by the text prompt's velocity. With <b>steer: 5 steps (recommended)</b> selected above, saving a painted edit gently nudges x̂₀ toward your painted shape over the next 5 steps (while structure forms) and then releases it so final steps render sharp detail — or combine your paint edit with a <b>Mid-Step Prompt Switch</b> so the text velocity actively reinforces what you drew!` }))
+  p.appendChild(el('div', { className: 'small note', innerHTML: `<b>Why single-step edits get overwritten or blurred (and how to fix it):</b> in flow matching, one step only moves the latent by ~4%, while the remaining 20 steps are driven by the text prompt's velocity. With <b>steer: 5 steps (recommended)</b> selected above, saving a painted edit gently nudges x̂₀ toward your painted shape over the next 5 steps (while structure forms) and then releases it so final steps render sharp detail · or combine your paint edit with a <b>Mid-Step Prompt Switch</b> so the text velocity actively reinforces what you drew!` }))
   if (st.edits.length) p.appendChild(el('div', { className: 'small', textContent: 'Edits: ' + st.edits.map(e => `step ${e.step} (σ_edit ${e.edit_noise ?? e.sigma}${e.steer_steps ? `, steer ${e.steer_steps} steps` : ''}, ${e.tiles}/${e.of} tiles)`).join(' · ') }))
   if (st.prompt_changes?.length) p.appendChild(el('div', { className: 'small', textContent: 'Prompt switches: ' + st.prompt_changes.map(c => `step ${c.step} [blocks ${c.blocks}] → "${c.prompt}"`).join(' · ') }))
   if (st.trace.length) {
@@ -246,7 +246,7 @@ export async function editGuess() {
           steer_pull: S.editSteerPull,
         })
         S.lastGuessUrl = img; S.lastGuessKey = `${r.run_id}:${r.steps}:${r.edits.length}`
-        toast(r.edit.tiles ? `Edited ${r.edit.tiles} of ${r.edit.of} tiles (σ_edit = ${r.edit.edit_noise ?? r.edit.sigma}, steer = ${r.edit.steer_steps || 1} steps) — press Step ▸▸ or ▶ Continue.` : 'Saved image.')
+        toast(r.edit.tiles ? `Edited ${r.edit.tiles} of ${r.edit.of} tiles (σ_edit = ${r.edit.edit_noise ?? r.edit.sigma}, steer = ${r.edit.steer_steps || 1} steps) · press Step ▸▸ or ▶ Continue.` : 'Saved image.')
         showDebug(r)
       } catch (e) { toast(e.message, 'error') }
       finally { $('#progress').classList.remove('indet'); $('#progress').style.width = '0%'; $('#progress-msg').textContent = '' }

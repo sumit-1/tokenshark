@@ -183,25 +183,82 @@ ANIMALS = [("dog", "barks"), ("cat", "purrs"), ("cow", "moos"), ("duck", "quacks
            ("bee", "buzzes"), ("frog", "croaks")]
 
 
-def synthetic_corpus(kind: str = "mixed", n_lines: int = 6000, seed: int = 0) -> str:
-    """A small made-up language with rules a tiny model can learn completely — so that afterwards you can look
-    for *where* it stores each rule. facts: capitals and animal sounds · counting: sequences and sums."""
+def synthetic_rows(kind: str = "mixed", n_lines: int = 1000, seed: int = 0) -> list[dict[str, str]]:
+    """Return structured `{question, answer}` rows for any built-in corpus or registered dataset."""
+    from .sdk import get_dataset
+    from .extensions.datasets import split_qa_example
+    ds = get_dataset(kind)
+    if ds is not None and (ds.rows or ds.examples):
+        rnd = random.Random(seed)
+        base_rows = list(ds.rows) if ds.rows else [split_qa_example(x) for x in ds.examples]
+        if n_lines <= len(base_rows):
+            return base_rows[:n_lines]
+        return [base_rows[i % len(base_rows)] if i < len(base_rows) else rnd.choice(base_rows) for i in range(n_lines)]
+
     rnd = random.Random(seed)
-    lines = []
+    rows: list[dict[str, str]] = []
     for _ in range(n_lines):
         r = rnd.random()
         if kind in ("facts", "mixed") and (kind == "facts" or r < 0.55):
             c, cap = rnd.choice(COUNTRIES)
             a, snd = rnd.choice(ANIMALS)
-            lines.append(rnd.choice([f"The capital of {c} is {cap}.", f"{cap} is the capital of {c}.",
-                                     f"Q: What is the capital of {c}? A: {cap}.", f"The {a} {snd}.",
-                                     f"Q: What does the {a} do? A: It {snd}."]))
+            q, ans = rnd.choice([
+                (f"The capital of {c} is", f"{cap}."),
+                (f"{cap} is the capital of", f"{c}."),
+                (f"Q: What is the capital of {c}?", f"A: {cap}."),
+                (f"The {a}", f"{snd}."),
+                (f"Q: What does the {a} do?", f"A: It {snd}."),
+            ])
+            rows.append({"question": q, "answer": ans})
         else:
             a, b = rnd.randint(0, 9), rnd.randint(0, 9)
             start = rnd.randint(0, 20)
             step = rnd.choice([1, 1, 2, 5])
-            lines.append(rnd.choice([f"{a} + {b} = {a + b}.", " ".join(str(start + i * step) for i in range(6)) + ".",
-                                     f"After {start} comes {start + 1}."]))
+            seq = [str(start + i * step) for i in range(6)]
+            q, ans = rnd.choice([
+                (f"{a} + {b} =", f"{a + b}."),
+                (" ".join(seq[:3]), " ".join(seq[3:]) + "."),
+                (f"After {start} comes", f"{start + 1}."),
+            ])
+            rows.append({"question": q, "answer": ans})
+    return rows
+
+
+def synthetic_corpus(kind: str = "mixed", n_lines: int = 6000, seed: int = 0, system_prompt: str = "") -> str:
+    """A small made-up language with rules a tiny model can learn completely - so that afterwards you can look
+    for *where* it stores each rule. facts: capitals and animal sounds · counting: sequences and sums ·
+    or any registered dataset id (e.g. 'multiarith_cot')."""
+    from .sdk import get_dataset
+    from .extensions.datasets import format_row_for_tiny
+    ds = get_dataset(kind)
+    if ds is not None and (ds.rows or ds.examples):
+        rows = synthetic_rows(kind, n_lines=max(1, n_lines), seed=seed)
+        lines = [format_row_for_tiny(r, system_prompt=system_prompt) for r in rows]
+        # Repeat if tiny corpus is very small so tokenizer/context has enough tokens
+        while sum(len(x) for x in lines) < 4000 and lines:
+            lines = lines + lines
+        return "\n\n".join(lines) + "\n"
+    rnd = random.Random(seed)
+    sys_prefix = f"System: {system_prompt.strip()}\n" if (system_prompt or "").strip() else ""
+    lines = []
+    for _ in range(max(1, n_lines)):
+        r = rnd.random()
+        if kind in ("facts", "mixed") and (kind == "facts" or r < 0.55):
+            c, cap = rnd.choice(COUNTRIES)
+            a, snd = rnd.choice(ANIMALS)
+            line = rnd.choice([f"The capital of {c} is {cap}.", f"{cap} is the capital of {c}.",
+                               f"Q: What is the capital of {c}? A: {cap}.", f"The {a} {snd}.",
+                               f"Q: What does the {a} do? A: It {snd}."])
+            lines.append(sys_prefix + line if sys_prefix else line)
+        else:
+            a, b = rnd.randint(0, 9), rnd.randint(0, 9)
+            start = rnd.randint(0, 20)
+            step = rnd.choice([1, 1, 2, 5])
+            line = rnd.choice([f"{a} + {b} = {a + b}.", " ".join(str(start + i * step) for i in range(6)) + ".",
+                               f"After {start} comes {start + 1}."])
+            lines.append(sys_prefix + line if sys_prefix else line)
+    while sum(len(x) for x in lines) < 3500 and lines:
+        lines = lines + lines
     return "\n".join(lines) + "\n"
 
 
@@ -211,14 +268,25 @@ class TinyJob(Job):
     def __init__(self, name: str, out_dir: Path, text: str = "", corpus: str = "mixed", d_model: int = 96,
                  n_layers: int = 3, n_heads: int = 4, context: int = 64, vocab: int = 300, steps: int = 1500,
                  batch: int = 32, lr: float = 3e-3, seed: int = 0, sample_prompt: str = "The capital of France is",
-                 n_experts: int = 0, experts_per_token: int = 2, balance: float = 0.01):
+                 n_experts: int = 0, experts_per_token: int = 2, balance: float = 0.01,
+                 n_questions: int = 1000, system_prompt: str = ""):
         super().__init__()
         if n_experts and not 1 <= experts_per_token <= n_experts:
             raise ValueError("Experts per token must be between 1 and the number of experts.")
         if d_model % n_heads or (d_model // n_heads) % 2:
             raise ValueError("d_model must divide by the number of heads, and the head size must be even (RoPE pairs).")
         self.name, self.out = name, Path(out_dir)
-        self.text = text if text.strip() else synthetic_corpus(corpus, seed=seed)
+        self.n_questions = max(1, int(n_questions or 1000))
+        self.system_prompt = (system_prompt or "").strip()
+        if text.strip():
+            if self.system_prompt:
+                blocks = [b.strip() for b in text.split("\n\n") if b.strip()] if "\n\n" in text else [l.strip() for l in text.splitlines() if l.strip()]
+                blocks = blocks[: self.n_questions]
+                self.text = "\n\n".join(f"System: {self.system_prompt}\n{b}" for b in blocks) + "\n"
+            else:
+                self.text = text
+        else:
+            self.text = synthetic_corpus(corpus, n_lines=self.n_questions, seed=seed, system_prompt=self.system_prompt)
         self.corpus = "your text" if text.strip() else corpus
         self.cfg = {"d": int(d_model), "L": int(n_layers), "H": int(n_heads), "ctx": int(context), "vocab": int(vocab),
                     "ff": 2 * int(d_model)}
@@ -234,7 +302,8 @@ class TinyJob(Job):
 
     def extra(self):
         return {"name": self.name, "config": self.cfg, "n_params": self.n_params, "corpus": self.corpus,
-                "corpus_chars": len(self.text), "moe": self.moe, "expert_usage": self.usage}
+                "corpus_chars": len(self.text), "n_questions": self.n_questions, "system_prompt": self.system_prompt,
+                "moe": self.moe, "expert_usage": self.usage}
 
     # the parameters, under the names every other model uses
     def init_params(self, V: int) -> dict[str, torch.Tensor]:
@@ -377,11 +446,16 @@ class LoRAJob(Job):
 
     def __init__(self, loaded, tasks, out_dir: Path, name: str, examples: list[str], rank: int = 8, alpha: float = 16.0,
                  targets: tuple = ("q_proj", "v_proj"), steps: int = 60, lr: float = 1e-3, max_tokens: int = 96,
-                 seed: int = 0, probe: str = "", attach: bool = True, layers: str = "all"):
+                 seed: int = 0, probe: str = "", attach: bool = True, layers: str = "all",
+                 system_prompt: str = "", n_questions: int = 0):
         super().__init__()
         self.layers = str(layers or "all")          # which blocks get an add-on: all | 2 | 0:4 | 1,5
         self.loaded, self.tasks, self.out, self.name = loaded, tasks, Path(out_dir), name
-        self.examples = [e for e in (x.strip() for x in examples) if e]
+        clean_ex = [e for e in (x.strip() for x in examples) if e]
+        if n_questions and int(n_questions) > 0:
+            clean_ex = clean_ex[: int(n_questions)]
+        self.examples = clean_ex
+        self.system_prompt = (system_prompt or "").strip()
         if not self.examples:
             raise ValueError("Give at least one training example.")
         self.rank, self.alpha, self.targets = int(rank), float(alpha), tuple(targets)
@@ -399,7 +473,8 @@ class LoRAJob(Job):
 
     def extra(self):
         return {"name": self.name, "rank": self.rank, "alpha": self.alpha, "targets": list(self.targets),
-                "layers": self.layers, "n_params": self.n_params, "n_examples": len(self.examples)}
+                "layers": self.layers, "n_params": self.n_params, "n_examples": len(self.examples),
+                "system_prompt": self.system_prompt}
 
     def encode(self, ad, text: str):
         """ids and a 0/1 weight per token. 'question => answer' goes through the chat template and only the answer
@@ -407,11 +482,22 @@ class LoRAJob(Job):
         tok = ad.tok
         if " => " in text and tok.chat_template:
             q, a = text.split(" => ", 1)
-            head = tok.encode(tok.apply_chat([{"role": "user", "content": q.strip()}], True), add_special=False)
+            msgs = []
+            if self.system_prompt:
+                msgs.append({"role": "system", "content": self.system_prompt})
+            msgs.append({"role": "user", "content": q.strip()})
+            head = tok.encode(tok.apply_chat(msgs, True), add_special=False)
+            tail = tok.encode(a.strip(), add_special=False) + ([tok.eos_id] if tok.eos_id is not None else [])
+            ids, w = head + tail, [0] * len(head) + [1] * len(tail)
+        elif " => " in text:
+            q, a = text.split(" => ", 1)
+            prefix = f"System: {self.system_prompt}\nQuestion: {q.strip()}\nAnswer: " if self.system_prompt else f"Question: {q.strip()}\nAnswer: "
+            head = tok.encode(prefix, add_special=True)
             tail = tok.encode(a.strip(), add_special=False) + ([tok.eos_id] if tok.eos_id is not None else [])
             ids, w = head + tail, [0] * len(head) + [1] * len(tail)
         else:
-            ids = tok.encode(text, add_special=True)
+            full = f"System: {self.system_prompt}\n{text}" if self.system_prompt else text
+            ids = tok.encode(full, add_special=True)
             w = [1] * len(ids)
         return ids[: self.max_tokens], w[: self.max_tokens]
 
@@ -419,7 +505,7 @@ class LoRAJob(Job):
         from .flow import compile_flow, default_llm_flow
         from .flowbuild import FlowBuilder
         info = {**ad.info(), "model_id": ad.spec.get("id")}
-        fb = FlowBuilder(default_llm_flow(info)).prompt(prompt=prompt).sampler(max_new_tokens=n, temperature=0.0)
+        fb = FlowBuilder(default_llm_flow(info)).prompt(prompt=prompt, system=self.system_prompt).sampler(max_new_tokens=n, temperature=0.0)
         with torch.no_grad():
             return ad.run(compile_flow(fb.to_dict(), info))["outputs"]["text"]
 

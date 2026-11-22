@@ -223,4 +223,8 @@ def _op(part, iv, ctx, token_dim, idx, nsel, x, full_part=None):
             stat = stat[nsel]
         mult = iv.value if iv.value not in (0, 1) else 1.0
         return (stat * mult).expand_as(part).clone()
+    from .sdk import get_op
+    custom = get_op(iv.op)
+    if custom is not None:
+        return custom.fn(part, iv, ctx, token_dim, idx, nsel, x, full_part)
     return None

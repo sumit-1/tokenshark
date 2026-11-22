@@ -5,6 +5,7 @@ import './tabs/contrib.js'
 import './tabs/debug_image.js'
 import './tabs/debug_text.js'
 import './tabs/experts.js'
+import './tabs/guardrail.js'
 import './tabs/ilens.js'
 import './tabs/kv.js'
 import './tabs/lens.js'
@@ -32,16 +33,18 @@ import './ui/tasks.js'
 import { $, GET, S, emit } from './core.js'
 import { renderInspector } from './ui/inspector.js'
 import { pollStatus, refreshModels, syncWorkspace } from './ui/models.js'
+import { refreshExtensions } from './ui/tabs.js'
 
 ;
 (async () => {
+  await refreshExtensions()
   await refreshModels()
   await pollStatus()
   // Live shared workspace sync: all browser tabs and MCP agents see the exact same flow, active run, and tab.
   setInterval(() => { syncWorkspace(false) }, 1000)
-  setInterval(async () => {          // catches a server that keeps running old code after an update
+  setInterval(async () => {
     try { const st = await GET('/api/status'); $('#stale').style.display = st.stale ? '' : 'none' } catch { }
   }, 15000)
-  if (!S.info) emit('model', null)          // nothing loaded: build the tab row for the start screen
+  if (!S.info) emit('model', null)
   renderInspector()
 })()

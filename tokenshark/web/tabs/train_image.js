@@ -11,7 +11,7 @@ function imageTrainer(st, running) {
   const c = el('div')
   c.appendChild(el('div', { className: 'small' }, `<b>Train a tiny image model from scratch.</b> The pictures are 16×16 coloured shapes; the “prompt” is two words, a colour and a shape.
     It is trained exactly like the big image models (flow matching): mix a picture with noise, <code>x = (1−σ)·picture + σ·noise</code>, and teach the model to output <code>noise − picture</code>.
-    To draw, start from noise and step the other way. Takes about a minute. One combination — the <b>yellow triangle</b> — is never shown in training.
+    To draw, start from noise and step the other way. Takes about a minute. One combination · the <b>yellow triangle</b> · is never shown in training.
     <span class="small">Training a LoRA on a full-size image model needs a strong GPU and hours; this shows the same recipe at a size you can watch.</span>`))
   const g = el('div', { className: 'formgrid' })
   const steps = el('input', { type: 'number', value: f.steps, style: 'width:80px' }); steps.oninput = () => { f.steps = +steps.value }
@@ -37,7 +37,7 @@ function imageTrainer(st, running) {
   }
   const show = () => {
     const r = s.result; if (!r) return
-    out.innerHTML = `<div class="imggrid"><figure><img src="${r.strip}"><figcaption>${esc(r.color)} ${esc(r.shape)}${r.held_out ? ' — <b>never seen in training</b>' : ''} · ${r.steps} steps, shown: ${r.steps_shown.join(', ')} · noise level σ from ${r.sigmas[0]} to ${r.sigmas[r.sigmas.length - 1]}</figcaption></figure>
+    out.innerHTML = `<div class="imggrid"><figure><img src="${r.strip}"><figcaption>${esc(r.color)} ${esc(r.shape)}${r.held_out ? ' · <b>never seen in training</b>' : ''} · ${r.steps} steps, shown: ${r.steps_shown.join(', ')} · noise level σ from ${r.sigmas[0]} to ${r.sigmas[r.sigmas.length - 1]}</figcaption></figure>
       <figure><img src="${r.final}"><figcaption>the finished picture</figcaption></figure>
       <figure><img src="${r.grid}"><figcaption>every colour (columns: ${j.colors.join(', ')}) × shape (rows: ${j.shapes.join(', ')}) at this guidance and seed</figcaption></figure></div>`
   }
@@ -53,4 +53,4 @@ function imageTrainer(st, running) {
   return c
 }
 
-registerTrainSection('tiny_image', { heading: 'Image models — learn from pictures', render: imageTrainer })
+registerTrainSection('tiny_image', { heading: 'Image models · learn from pictures', render: imageTrainer })

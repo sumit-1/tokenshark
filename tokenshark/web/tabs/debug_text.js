@@ -10,7 +10,7 @@ export function renderDebug(p) {
       <b>Token ▸▸</b> (F11) runs to the next prediction. The highlighted box is the one about to run.</div>`
     return
   }
-  const where = st.done ? 'finished' : st.phase === 'idle' ? 'prediction ready — choose the next token, or press Block ▸ / Token ▸▸ to sample it'
+  const where = st.done ? 'finished' : st.phase === 'idle' ? 'prediction ready · choose the next token, or press Block ▸ / Token ▸▸ to sample it'
     : `next: ${flow.node(st.active_node)?.data.label || st.active_node} (schedule #${st.next_pos})`
   p.innerHTML = `<div class="small">Every other tab (Output, Logit lens, Word cloud, Attention, KV caches) and the badges on the boxes update live after each step.</div><div class="small">Processing <b>${esc(st.chunk_origin || '')}</b> chunk “${esc(st.chunk.join(''))}” · ${st.n_generated} generated · ${where}</div>`
   const toks = el('div', { className: 'tokens' })
@@ -18,7 +18,7 @@ export function renderDebug(p) {
   st.chunk.forEach(t => toks.appendChild(el('span', { className: 'tok on', textContent: t, title: 'in flight' })))
   p.appendChild(toks)
   if (st.next_choices) {
-    const box = el('div', { className: 'alts' }, '<h4>The model predicts — click to force a token:</h4>')
+    const box = el('div', { className: 'alts' }, '<h4>The model predicts · click to force a token:</h4>')
     st.next_choices.forEach(([piece, id, pr]) => {
       const b = el('button', { className: 'alt' }, `<span>${esc(piece)}</span><i style="width:${pr * 100}%"></i><b>${(pr * 100).toFixed(1)}%</b>`)
       b.onclick = () => debugStep('block', { force_token: id })

@@ -1,4 +1,4 @@
-// FlowEditor — a small dependency-free node editor: boxes, ports, arrows.
+// FlowEditor - a small dependency-free node editor: boxes, ports, arrows.
 // Drag a box by its body. Drag from an output port (filled dot) to an input port (ring) to connect.
 // Click an arrow to select it. Delete / Backspace removes the selected box or arrow.
 // Drag the background to pan, mouse wheel to zoom.
@@ -8,7 +8,7 @@ const HANDLES = {
   tokenizer: [['in', 'target', 'left'], ['out', 'source', 'right']],
   text_encoder: [['in', 'target', 'left'], ['out', 'source', 'right']],
   embed: [['in', 'target', 'left'], ['out', 'source', 'right'], ['cache', 'target', 'top', 'KV'], ['loop', 'target', 'bottom']],
-  block: [['in', 'target', 'left'], ['out', 'source', 'right'], ['mod', 'target', 'top', 'mod']],
+  block: [['in', 'target', 'left'], ['out', 'source', 'right'], ['mod', 'target', 'top', 'mod'], ['fork', 'source', 'bottom', 'fork']],
   final_norm: [['in', 'target', 'left'], ['out', 'source', 'right']],
   lm_head: [['in', 'target', 'left'], ['out', 'source', 'right']],
   sampler: [['in', 'target', 'left'], ['out', 'source', 'right'], ['loop', 'source', 'bottom']],
@@ -22,15 +22,23 @@ const HANDLES = {
   vae_decode: [['in', 'target', 'left'], ['out', 'source', 'right']],
   output_image: [['in', 'target', 'left']],
   intervention: [['out', 'source', 'right']],
+  fork_head: [['in', 'target', 'left', 'fork']],
   block_kv: [['out', 'source', 'right']],
   kv_import: [['out', 'source', 'right']],
   prompt_kv: [['out', 'source', 'right']],
   init_image: [['out', 'source', 'right']],
 }
 
+export const CUSTOM_HANDLES = {}
+export const CUSTOM_NODE_SUB = {}
+export function registerNodeHandles(kind, handles, subFn) {
+  CUSTOM_HANDLES[kind] = handles
+  if (subFn) CUSTOM_NODE_SUB[kind] = subFn
+}
+
 function handlesFor(node) {
   const k = node.data.kind
-  let hs = (HANDLES[k] || [['in', 'target', 'left'], ['out', 'source', 'right']]).map(h => ({ id: h[0], type: h[1], side: h[2], label: h[3] }))
+  let hs = (CUSTOM_HANDLES[k] || HANDLES[k] || [['in', 'target', 'left'], ['out', 'source', 'right']]).map(h => ({ id: h[0], type: h[1], side: h[2], label: h[3] }))
   if (k === 'block' && node.data.has_kv !== false) {
     hs.push({ id: 'kv', type: 'target', side: 'top', label: 'KV' })
   }
@@ -166,11 +174,14 @@ export class FlowEditor {
       replace_system: 'replace system', append_system: 'append system', prepend_system: 'prepend system',
       replace_user: 'replace user', append_user: 'append user', prepend_user: 'prepend user',
     }
-    const sub = n.data.bypass ? 'bypassed — the stream skips this block' : k === 'intervention' ? ivSummary(n.data)
+    const sub = n.data.bypass ? 'bypassed · the stream skips this block'
+      : CUSTOM_NODE_SUB[k] ? CUSTOM_NODE_SUB[k](n.data)
+      : k === 'fork_head' ? `${n.data.mode || 'monitor'} · ${n.data.target_category || 'powershell'}${n.data.head_id ? ` · ${n.data.head_id}` : ''}`
+      : k === 'intervention' ? ivSummary(n.data)
       : k === 'block_kv' ? `${bkvOpLabel[n.data.op] || n.data.op || 'replace system'}${n.data.layers ? ` · blocks ${n.data.layers}` : ''} · “${(n.data.text || '').slice(0, 26)}”`
       : k === 'kv_import' ? `${n.data.cache_id ? n.data.mode || 'shift' : 'no cache chosen'} · blocks ${n.data.layers || 'all'}`
       : (n.data.code || '').trim() ? `✎ edited code${n.data.sub ? ' · ' + n.data.sub : ''}`
-      : k === 'init_image' ? (n.data.image ? `${n.data.guide ? 'sketch guide · ' : ''}strength ${Number(n.data.strength ?? 0.6).toFixed(2)}${n.data.mask ? ` · region ${n.data.mask_mode || 'keep'}` : ''} · click to edit` : 'no picture yet — click to add one')
+      : k === 'init_image' ? (n.data.image ? `${n.data.guide ? 'sketch guide · ' : ''}strength ${Number(n.data.strength ?? 0.6).toFixed(2)}${n.data.mask ? ` · region ${n.data.mask_mode || 'keep'}` : ''} · click to edit` : 'no picture yet · click to add one')
       : k === 'prompt_kv' ? `${n.data.role === 'prepend' ? `hidden · ${n.data.mode || 'shift'}` : 'replaces the prompt'} · blocks ${n.data.blocks || 'all'} · “${(n.data.prompt || '').slice(0, 28)}”`
       : k === 'input_prompt' && n.data.history?.length ? `${n.data.history.length} earlier turn${n.data.history.length > 1 ? 's' : ''} · then the prompt`
       : (n.data.sub || '')
@@ -223,6 +234,7 @@ export class FlowEditor {
       if (e.data?.skip) cls.push('skip')
       if (e.targetHandle === 'mod') cls.push('mod')
       if (e.targetHandle === 'kv') cls.push('kv')
+      if (e.sourceHandle === 'fork' || e.targetHandle === 'fork') cls.push('fork')
       if (e.targetHandle === 'cache' || e.targetHandle === 'init') cls.push('aux')
       if (this.selected?.type === 'edge' && this.selected.id === e.id) cls.push('sel')
       const label = e.data?.label ? `<text class="fe-edge-label" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 6 + (e.data?.loop ? 46 : 0)}">${esc(e.data.label)}</text>` : ''

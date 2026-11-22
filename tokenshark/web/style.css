@@ -30,7 +30,7 @@ main { flex: 1; display: grid; grid-template-columns: 150px 1fr 340px; min-heigh
 .palette h4 { margin: 8px 0 2px; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
 .legend { margin-top: 12px; color: var(--muted); font-size: 11px; display: grid; gap: 4px; }
 .lg { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--accent); margin-right: 6px; vertical-align: middle; }
-.lg.kv { border-color: var(--kv); } .lg.mod { border-color: var(--mod); } .lg.loop { border-top-style: dashed; border-color: var(--loop); } .lg.skip { border-top-style: dotted; border-color: var(--skip); }
+.lg.kv { border-color: var(--kv); } .lg.mod { border-color: var(--mod); } .lg.fork { border-top-style: dashed; border-color: var(--ok); } .lg.loop { border-top-style: dashed; border-color: var(--loop); } .lg.skip { border-top-style: dotted; border-color: var(--skip); }
 .center { position: relative; display: flex; flex-direction: column; min-width: 0; }
 #canvas { flex: 1; }
 .plan { padding: 5px 12px; border-top: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--muted); }
@@ -95,6 +95,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .fe-edge .hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; }
 .fe-edge.mod { color: var(--mod); } .fe-edge.aux { color: var(--warn); }
 .fe-edge.kv { color: var(--kv); }
+.fe-edge.fork { color: var(--ok); } .fe-edge.fork .line { stroke-dasharray: 4 3; }
 .fe-edge.loop { color: var(--loop); } .fe-edge.loop .line { stroke-dasharray: 6 5; }
 .fe-edge.skip { color: var(--skip); } .fe-edge.skip .line { stroke-dasharray: 2 4; opacity: .7; }
 .fe-edge.sel .line { stroke-width: 4; filter: drop-shadow(0 0 4px currentColor); }
@@ -113,6 +114,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .fe-badge .outtext { white-space: pre-wrap; color: var(--ok); }
 .kind-block, .kind-unet_block { border-top: 3px solid var(--accent); }
 .kind-intervention { border-top: 3px solid var(--mod); background: #2a2116; }
+.kind-fork_head { border-top: 3px solid var(--ok); background: #142820; }
 .kind-block_kv { border-top: 3px solid var(--kv); background: #142824; }
 .kind-kv_import, .kind-init_image { border-top: 3px solid var(--warn); background: #29230f; }
 .fe-node.linear-block { opacity: .72; }
@@ -125,7 +127,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .fe-port.hot { background: var(--warn); border-color: var(--warn); transform: scale(1.4); }
 .fe-port.side-left { left: -7px; } .fe-port.side-right { right: -7px; } .fe-port.side-top { top: -7px; } .fe-port.side-bottom { bottom: -7px; }
 .fe-port-label { position: absolute; font-size: 9px; color: var(--muted); white-space: nowrap; pointer-events: none; }
-.fe-port.side-top .fe-port-label { top: -14px; left: -4px; } .fe-port.side-left .fe-port-label { left: -30px; top: -2px; }
+.fe-port.side-top .fe-port-label { top: -14px; left: -4px; } .fe-port.side-left .fe-port-label { left: -30px; top: -2px; } .fe-port.side-bottom .fe-port-label { bottom: -14px; left: -4px; }
 .fe-hint { position: absolute; left: 10px; bottom: 6px; color: var(--muted); font-size: 11px; pointer-events: none; }
 
 .dbg { display: inline-flex; gap: 4px; padding: 0 6px; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }

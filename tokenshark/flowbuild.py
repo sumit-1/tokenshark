@@ -222,7 +222,42 @@ class FlowBuilder:
         th_lbl = f" (>{threshold:g})" if threshold else ""
         return self.intercept(block, hook="mlp_neurons", op="wire", source_neurons=src_s, neurons=tgt_s,
                               value=float(strength), threshold=float(threshold), positions=positions,
-                              experts=experts, label=label or f"wire {src_s} → {tgt_s} ×{strength:g}{th_lbl}")
+                              experts=experts, label=label or f"wire {src_s} -> {tgt_s} ×{strength:g}{th_lbl}")
+
+    def fork(self, block, ref: str = "powershell_detector", mode: str = "monitor",
+             threshold: float = 0.65, hook: str = "resid_post", trigger_category: str = "",
+             halt_message: str = "", label: str = "") -> str:
+        """Attach a side-branch `fork_head` box to `block`'s bottom `fork` handle."""
+        t = self.node(block)
+        nid = f"fork_{next(self._n)}"
+        while any(n["id"] == nid for n in self.flow["nodes"]):
+            nid = f"fork_{next(self._n)}"
+        self.flow["nodes"].append({
+            "id": nid,
+            "type": "box",
+            "position": {"x": t["position"]["x"] + 8, "y": t["position"]["y"] + 115},
+            "data": {
+                "kind": "fork_head",
+                "fork_kind": "guardrail",
+                "label": label or f"Fork: {ref} ({mode})",
+                "ref": ref,
+                "mode": mode,
+                "threshold": float(threshold),
+                "hook": hook,
+                "trigger_category": trigger_category,
+                "halt_message": halt_message,
+                "enabled": True,
+            },
+        })
+        self.flow["edges"].append({
+            "id": f"e-{t['id']}-fork-{nid}-in",
+            "source": t["id"],
+            "target": nid,
+            "sourceHandle": "fork",
+            "targetHandle": "in",
+            "data": {"fork": True},
+        })
+        return nid
 
     # ---------------------------------------------------------------- mixture of experts
     def ban_experts(self, block, experts, positions: str = "all") -> str:
@@ -400,6 +435,8 @@ class FlowBuilder:
                     self.route(blk, e.pop("weights"), **e)
                 elif do == "shared_expert":
                     self.shared_expert(blk, bool(e.pop("enabled", False)))
+                elif do == "fork":
+                    self.fork(blk, **e)
                 else:
                     raise ValueError(f"Unknown edit '{do}'.")
             except (KeyError, TypeError) as ex:

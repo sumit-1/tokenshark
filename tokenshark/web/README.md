@@ -27,7 +27,7 @@ itself from that:
 | `tabs` | results tabs, in order | `registerTab({ id })` in `tabs/*.js` |
 | `palette_actions` | flow-editing buttons | `data-action="…"` in `index.html` |
 | `train` | sections of the Train tab | `sections` in `tabs/train.js` |
-| `step_debugger` | whether the header's step buttons apply | — |
+| `step_debugger` | whether the header's step buttons apply | - |
 
 A tab can also say when it applies: `registerTab({ ..., when: info => !!info.moe })` hides the Experts tab for
 models without experts. That is a property of the loaded model's `info`, not of its name.

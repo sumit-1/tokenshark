@@ -37,6 +37,7 @@ export async function validate(sync = true) {
     flow.setErrors([])
     $('#plan').innerHTML = `<span class="ok-dot"></span> ${p.schedule.length} blocks: [${p.schedule.join(', ')}]` +
       (p.interventions.length ? ` · ${p.interventions.length} interceptor(s)` : '') +
+      (p.forks?.length ? ` · ${p.forks.length} fork head(s)` : '') +
       (p.params.kv_overrides?.length ? ` · ${p.params.kv_overrides.length} block KV override(s)` : '') +
       (p.params.prefixes?.length ? ` · ${p.params.prefixes.length} KV prefix${p.params.prefixes.length > 1 ? 'es' : ''} (${p.params.prefixes.map(x => `blocks ${x.layers}`).join(' / ')})` : '') +
       (p.params.rope ? ` · RoPE modified in ${Object.keys(p.params.rope).length} block(s)` : '') +
@@ -64,6 +65,34 @@ export function addIntervention(target, world) {
     positions: 'all', steps: 'all', heads: 'all', experts: 'all', enabled: true } })
   if (target) flow.addEdge({ source: n.id, sourceHandle: 'out', target: target.id, targetHandle: 'mod' })
   flow.select({ type: 'node', id: n.id })
+}
+
+export function addForkHead(target, ref = 'powershell_detector', mode = 'monitor', threshold = 0.65) {
+  const anchor = (target && target.data?.kind === 'block') ? target : flow.nodes.find(x => x.data?.kind === 'block')
+  const at = anchor ? { x: anchor.position.x + 10, y: anchor.position.y + 115 } : flow.center()
+  const n = flow.addNode({
+    id: newId('fork'),
+    type: 'box',
+    position: at,
+    data: {
+      kind: 'fork_head',
+      fork_kind: 'guardrail',
+      label: `Fork: ${ref} (${mode})`,
+      ref,
+      mode,
+      threshold,
+      hook: 'resid_post',
+      trigger_category: 'PowerShell',
+      halt_message: '',
+      enabled: true,
+    },
+  })
+  if (anchor && anchor.data?.kind === 'block') {
+    flow.addEdge({ source: anchor.id, sourceHandle: 'fork', target: n.id, targetHandle: 'in', data: { fork: true } })
+  }
+  flow.select({ type: 'node', id: n.id })
+  hooks.refreshBadges?.()
+  return n
 }
 
 export function duplicateBlock(b) {
@@ -142,6 +171,10 @@ export function addInitImage() {
 
 $('#btn-iv').onclick = () => addIntervention(isBlock(selectedNode()) ? selectedNode() : null)
 
+if ($('#btn-fork')) {
+  $('#btn-fork').onclick = () => addForkHead(selectedNode()?.data.kind === 'block' ? selectedNode() : null)
+}
+
 $('#btn-bkv').onclick = () => {
   const b = selectedNode()
   addBlockKV(b?.data.kind === 'block' ? b : null)
@@ -199,10 +232,15 @@ export function addPromptKV(role = 'replace') {
 }
 hooks.scheduleValidate = scheduleValidate
 
-// The palette shows the actions the loaded model's plugin declares.
+// The palette shows the actions the loaded model's plugin declares (filtered by enabled extensions).
 function buildPalette() {
   const actions = schema().palette_actions || []
-  document.querySelectorAll('.palette [data-action]').forEach(b => { b.style.display = actions.includes(b.dataset.action) ? '' : 'none' })
+  document.querySelectorAll('.palette [data-action]').forEach(b => {
+    const act = b.dataset.action
+    const ok = actions.includes(act) && (act !== 'fork_head' || !S.extensions?.length || S.extensions.find(e => e.id === 'guardrail_fork')?.enabled !== false)
+    b.style.display = ok ? '' : 'none'
+  })
 }
 on('model', buildPalette)
+on('extensions', buildPalette)
 buildPalette()

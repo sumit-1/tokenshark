@@ -13,7 +13,7 @@ export function renderImageLens(p) {
   // a selection belongs to one run: another run may have other captured steps (e.g. one that started from a picture)
   if (S.ilensSel && (S.ilensRun !== S.run.id || !o.lens_steps?.includes(S.ilensSel[0]) || S.ilensSel[1] >= S_)) S.ilensSel = null
   if (!o.lens_steps?.length) { p.innerHTML = '<div class="empty">No image-lens captures in this run (they are skipped when guidance runs the model twice).</div>'; return }
-  p.appendChild(el('div', { className: 'small', innerHTML: `<b>Image lens.</b> After any block, apply the model's final norm + projection: the picture it would produce if it stopped there (its guess x̂₀ at that step). Middle blocks don't “speak pictures” yet — like early layers in the text logit lens — so their direct decode is often a mess. <b>Decode through the last k blocks</b> jumps from that block straight into the model's last k blocks first, which translates it. The top row is the input the model was given at that step.` }))
+  p.appendChild(el('div', { className: 'small', innerHTML: `<b>Image lens.</b> After any block, apply the model's final norm + projection: the picture it would produce if it stopped there (its guess x̂₀ at that step). Middle blocks don't “speak pictures” yet · like early layers in the text logit lens · so their direct decode is often a mess. <b>Decode through the last k blocks</b> jumps from that block straight into the model's last k blocks first, which translates it. The top row is the input the model was given at that step.` }))
   const bar = el('div', { className: 'row' })
   const sel = el('select')
   sel.appendChild(el('option', { value: 0, textContent: 'decode each block directly (norm + projection)' }))
@@ -74,7 +74,7 @@ export function renderImageLens(p) {
         if (c && c[0].classList.contains('pending')) { c[0].classList.remove('pending'); c[1].src = `/api/runs/${S.run.id}/imagelens/${s}/${b}.png${q}` }
       }
       const n = (part.done || []).length, tot = o.lens_steps.length * S_
-      status.innerHTML = n < tot ? `${spinner()} computing ${n}/${tot}${t?.status === 'queued' ? ' — waiting for the model (see Tasks)' : ''}` : ''
+      status.innerHTML = n < tot ? `${spinner()} computing ${n}/${tot}${t?.status === 'queued' ? ' · waiting for the model (see Tasks)' : ''}` : ''
     }
     streamAnalysis(`/api/runs/${S.run.id}/imagelens/compute?through=${k}`, fill, alive)
       .then(r => r && alive() && fill(r)).catch(e => { if (alive()) status.innerHTML = `<span class="bad">${esc(e.message)}</span>` })
@@ -86,7 +86,7 @@ export async function showLensExact(side) {
   const [s, b] = S.ilensSel, nid = S.run.plan.schedule_nodes[b], k = Math.min(S.ilensThrough, S.run.outputs.lens_blocks)
   const title = `After ${esc(flow.node(nid)?.data.label || '#' + b)} · step ${s}${k ? ` · through the last ${k}` : ''}`
   document.querySelectorAll('table.ilens td').forEach(td => td.classList.remove('on'))
-  side.innerHTML = `<h4>${title}</h4><div class="small">${spinner('VAE decode (a task — see Tasks)')}</div>`
+  side.innerHTML = `<h4>${title}</h4><div class="small">${spinner('VAE decode (a task · see Tasks)')}</div>`
   const runId = S.run.id
   const img = new Image()
   const last = b === S.run.outputs.lens_blocks - 1

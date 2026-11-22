@@ -92,8 +92,8 @@ export function drawCompare(out, r, partial) {
   r.rows.forEach(x => {
     const tr = el('tr')
     const toks = x.tokens.map((tk, i) => `<span class="tok${i < x.same_tokens || x.bits == null ? '' : ' diff'}">${esc(tk)}</span>`).join('')
-    tr.innerHTML = `<td><b>${esc(x.label)}</b></td><td><div class="tokens">${toks}</div></td><td>${x.bits == null ? '—' : `${x.same_tokens} / ${base.length}`}</td>
-      <td>${x.bits == null ? '—' : (x.agree * 100).toFixed(0) + '%'}</td><td>${x.bits == null ? '—' : `<span class="pbar"><i style="width:${Math.min(100, x.kl * 50)}%;background:var(--bad)"></i></span> ${x.kl}`}</td>`
+    tr.innerHTML = `<td><b>${esc(x.label)}</b></td><td><div class="tokens">${toks}</div></td><td>${x.bits == null ? '-' : `${x.same_tokens} / ${base.length}`}</td>
+      <td>${x.bits == null ? '-' : (x.agree * 100).toFixed(0) + '%'}</td><td>${x.bits == null ? '-' : `<span class="pbar"><i style="width:${Math.min(100, x.kl * 50)}%;background:var(--bad)"></i></span> ${x.kl}`}</td>`
     t.appendChild(tr)
   })
   out.innerHTML = partial ? spinner(`${r.rows.length} done…`) : ''

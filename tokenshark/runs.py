@@ -115,7 +115,7 @@ class RunStore:
         def hook(ctx):
             run.ctx = ctx
             ctx.cancel, ctx.pause = task.cancel, task.paused
-            ctx.sources = getattr(run, "sources", None) or {}      # patch / steer / clamp inputs (interp.py)
+            ctx.sources = getattr(run, "sources", None) or {}
 
         def work():
             from .engine import Cancelled
@@ -125,18 +125,19 @@ class RunStore:
                 adapter = loaded.adapter
                 if adapter is None or loaded.spec["id"] != run.model_id:
                     raise RuntimeError("The model for this run is no longer loaded.")
-                # The plugin names the loop its models run with (plugins/__init__.py: run_loop).
                 RUN_LOOPS[run_loop_of(loaded)](run, loaded, adapter, prefix, resume, progress, hook, task)
             except Cancelled:
-                run.status, run.message = "cancelled", "cancelled"
-                print(f"[{time.strftime('%H:%M:%S')}] run {run.id} cancelled"
-                      + (" (output so far is kept)" if run.outputs else ""), flush=True)
+                # If the stepper is still unfinished, keep it in stepping state so the user can step or continue!
+                if run.status != "stepping":
+                    run.status, run.message = "cancelled", "cancelled"
+                print(f"[{time.strftime('%H:%M:%S')}] run {run.id} stopped"
+                      + (" (output & stepper state kept)" if run.outputs else ""), flush=True)
             except Exception as e:
                 run.status, run.error = "error", f"{type(e).__name__}: {e}"
                 traceback.print_exc()
             run.seconds = round(time.time() - t0, 2)
             run.ctx = None
-            TASKS.finish(task, {"done": "done", "cancelled": "cancelled"}.get(run.status, "error"), run.error)
+            TASKS.finish(task, {"done": "done", "cancelled": "cancelled", "stepping": "cancelled"}.get(run.status, "error"), run.error)
             try:
                 (RUNS_DIR / f"{run.id}.json").write_text(json.dumps(
                     {**run.manifest(), "status": run.status, "error": run.error,
@@ -146,7 +147,7 @@ class RunStore:
                     (RUNS_DIR / f"{run.id}.png").write_bytes(base64.b64decode(run.outputs["image"].split(",", 1)[1]))
             except Exception:
                 traceback.print_exc()
-            self.add(run)  # re-apply capture eviction
+            self.add(run)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -162,13 +163,25 @@ class RunStore:
 
     @staticmethod
     def _run_llm(run: Run, loaded, adapter, prefix, resume, progress, hook, task):
-        """A language-model run is a stepper driven one block at a time. The model lock is taken per block, so
-        between blocks the analysis views can read the run, a pause can hold it without blocking anything,
-        and the text so far is published as it is generated."""
+        """A language-model run is a stepper driven one block at a time, bound directly to `DEBUG` so
+        stopping (`■`), pausing (`⏸`), stepping (`Block ▸`, `Token ▸▸`), and continuing (`▶ Continue`)
+        share the exact same live stepper state without restarting from block 0."""
         from .engine import Cancelled
+        from .llm import Stepper
+        from .server import DEBUG
         from .tasks import TASKS
         with TASKS.slot(task):
-            st = adapter.run_stepper(run.plan, prefix, progress, hook)
+            st = Stepper(adapter, run.plan, prefix=prefix, progress=progress, ctx_hook=hook, trace=True)
+        DEBUG.clear()
+        DEBUG.update(
+            stepper=st,
+            model_id=loaded.spec["id"],
+            flow=run.flow,
+            label=run.label or "run",
+            run=run,
+            busy=True,
+            task=task.id,
+        )
         last_pub, n_pub = 0.0, -1
 
         def publish():
@@ -178,6 +191,7 @@ class RunStore:
             run.outputs, run.captures, run.cache = res["outputs"], res["captures"], {}
             run.version += 1
             last_pub, n_pub = time.time(), st.n_generated
+            DEBUG["state"] = {**st.state(), "run_id": run.id}
 
         try:
             while True:
@@ -185,28 +199,49 @@ class RunStore:
                     if st.logits_rows or st.x is not None:
                         publish()
                     run.status = "paused"
+                    DEBUG["busy"] = False
                     run.message = f"paused · token {st.n_generated}/{st.total}" + \
                         (f" · before block {st.bp + 1}/{len(run.plan.schedule)}" if st.x is not None else "")
                     while run.ctx.pause and not run.ctx.cancel:
                         time.sleep(0.1)
                     run.status = "running"
+                    DEBUG["busy"] = True
                 run.active_node = "embed" if st.x is None else (
                     run.plan.schedule_nodes[st.bp] if st.bp < len(run.plan.schedule_nodes) else "final_norm"
                 )
                 run.done_nodes = [t["node"] for t in st.trace if "node" in t]
+                DEBUG["progress"] = {
+                    "frac": round((st.bp + 1) / max(1, len(run.plan.schedule)), 3),
+                    "message": run.message,
+                    "node": run.active_node,
+                    "done": run.done_nodes,
+                }
                 with TASKS.slot(task):
                     if loaded.adapter is not adapter:
                         raise RuntimeError("The model was unloaded during the run.")
                     more = st.step_block()
                 if not more:
                     break
-                # new text after every finished token (at most ~once a second for fast models)
                 if st.x is None and st.n_generated != n_pub and time.time() - last_pub > 1.0:
                     publish()
         except Cancelled:
-            run.active_node, run.done_nodes = None, []
-            if st.logits_rows:
+            if st.logits_rows or st.x is not None:
                 publish()
+            DEBUG["busy"] = False
+            if not st.done:
+                st.ctx.cancel = False
+                run.status = "stepping"
+                run.active_node = (
+                    run.plan.schedule_nodes[st.bp]
+                    if st.x is not None and st.bp < len(run.plan.schedule_nodes)
+                    else None
+                )
+                run.done_nodes = [t["node"] for t in st.trace if "node" in t]
+                run.message = f"stopped · token {st.n_generated}/{st.total}" + \
+                    (f" · block {st.bp}/{len(run.plan.schedule)}" if st.x is not None else "")
+                DEBUG["state"] = {**st.state(), "run_id": run.id}
+            else:
+                run.active_node, run.done_nodes = None, []
             raise
         run.active_node, run.done_nodes = None, []
         with TASKS.slot(task, force=True):
@@ -214,6 +249,8 @@ class RunStore:
         run.outputs, run.captures, run.cache = res["outputs"], res["captures"], {}
         run.version += 1
         run.status, run.progress = "done", 1.0
+        DEBUG["busy"] = False
+        DEBUG["state"] = {**st.state(), "run_id": run.id}
 
     @staticmethod
     def _run_image(run: Run, loaded, adapter, prefix, resume, progress, hook, task):
@@ -270,10 +307,21 @@ class RunStore:
                 if st.x is None and st.n_generated != n_pub:
                     publish()
         except Cancelled:
-            run.active_node, run.done_nodes = None, []
             if st.x0s or st.guess is not None:
                 publish()
             DEBUG["busy"] = False
+            if not st.done:
+                st.ctx.cancel = False
+                run.status = "stepping"
+                run.active_node = (
+                    run.plan.schedule_nodes[st.bp]
+                    if st.x is not None and st.bp < len(run.plan.schedule_nodes)
+                    else None
+                )
+                run.done_nodes = [t["node"] for t in st.trace if "node" in t]
+                DEBUG["state"] = {**st.state(), "run_id": run.id}
+            else:
+                run.active_node, run.done_nodes = None, []
             raise
         run.active_node = "vae_decode"
         run.done_nodes = list(run.plan.schedule_nodes)
@@ -289,7 +337,7 @@ class RunStore:
 
 # How a run is driven. A plugin picks one by name; a new way of running a model is a new entry here.
 RUN_LOOPS = {
-    "token_stepper": RunStore._run_llm,       # a language model, one block at a time (live text, pause between blocks)
+    "token_stepper": RunStore._run_llm,       # a language model, one block at a time (live text, pause between blocks, unified with debugger)
     "image_stepper": RunStore._run_image,     # a steppable image model, one block at a time (tied to the step debugger)
     "plain": RunStore._run_plain,             # adapter.run() from start to end
 }

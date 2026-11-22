@@ -32,6 +32,7 @@
     <button id="dbg-stop" class="dbg-on" disabled title="Discard the stepping session">✕</button>
   </span>
   <button id="run" class="primary">▶ Run</button>
+  <span class="taskwrap"><button id="ext-btn" title="Enable or disable feature plugins & extensions">Extensions ▾</button><div id="ext-pop" class="tasks-pop" style="display:none"></div></span>
   <span class="taskwrap"><button id="tasks-btn" title="Running and queued work: reorder, pause or stop">Tasks</button><div id="tasks-pop" class="tasks-pop" style="display:none"></div></span>
   <button id="pause" disabled title="Pause the run">⏸</button>
   <button id="cancel" title="Stop the run (the output so far is kept) or the current step">■</button>
@@ -45,7 +46,8 @@
     <h4>Edit the flow</h4>
     <!-- data-action buttons are shown when the loaded model's plugin lists that action (ui_schema.palette_actions) -->
     <button id="btn-iv" data-action="intervention">+ Interceptor</button>
-    <button id="btn-bkv" data-action="block_kv" title="Wire into a block’s KV port: recreate that block’s cache from a replaced or appended system / user prompt, then grow it as tokens are generated">+ Rewrite prompt (KV)</button>
+    <button id="btn-fork" data-action="fork_head" title="Fork a block's residual stream into a side-branch classifier or guardrail gate">+ Fork Head</button>
+    <button id="btn-bkv" data-action="block_kv" title="Wire into a block's KV port: recreate that block's cache from a replaced or appended system / user prompt, then grow it as tokens are generated">+ Rewrite prompt (KV)</button>
     <button id="btn-dup" data-action="duplicate_block">Repeat block</button>
     <button id="btn-bypass" data-action="bypass_block">Bypass / restore</button>
     <button id="btn-kv" data-action="kv_prefix">+ KV-cache prefix</button>
@@ -64,6 +66,7 @@
       <div><i class="lg main"></i>residual stream</div>
       <div><i class="lg kv"></i>block KV override</div>
       <div><i class="lg mod"></i>interceptor</div>
+      <div><i class="lg fork"></i>side-branch fork</div>
       <div><i class="lg loop"></i>loop (per token / step)</div>
       <div><i class="lg skip"></i>UNet skip</div>
     </div>

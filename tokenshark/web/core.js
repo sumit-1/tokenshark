@@ -43,8 +43,15 @@ export const S = {
   status: null, models: [], info: null, run: null, runs: [], lens: null, caches: [],
   selected: null, resume: null, polling: null, tab: 'output', alt: null, xtok: 1, xgroup: 'all', xstep: -1,
   attnPos: 0, attnHead: -1,
+  extensions: [],
   clientId: `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
   wsVersion: -1, wsApplying: false,
+}
+
+export function extEnabled(extId) {
+  if (!S.extensions || !S.extensions.length) return true
+  const x = S.extensions.find(e => e.id === extId)
+  return x ? x.enabled !== false : true
 }
 
 export const $ = s => document.querySelector(s)

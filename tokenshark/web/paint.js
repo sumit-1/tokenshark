@@ -1,4 +1,4 @@
-// Paint — a small MS-Paint-style editor (no dependencies).
+// Paint · a small MS-Paint-style editor (no dependencies).
 //
 //   openPaint({ mode, title, width, height, background, value, backgrounds, onSave })
 //
@@ -12,7 +12,7 @@ const PALETTE = ['#000000', '#808080', '#800000', '#808000', '#008000', '#008080
   '#0080ff', '#004080', '#8000ff', '#804000', '#ffffff', '#c0c0c0', '#ff0000', '#ffff00', '#00ff00', '#00ffff', '#0000ff',
   '#ff00ff', '#ffff80', '#00ff80', '#80ffff', '#8080ff', '#ff0080', '#ff8040']
 const TOOLS = [
-  ['soft', '☁️', 'Soft / blurry brush (feathered edges & gentle opacity — hints shapes and shadows without hard borders)'],
+  ['soft', '☁️', 'Soft / blurry brush (feathered edges & gentle opacity · hints shapes and shadows without hard borders)'],
   ['brush', '🖌️', 'Brush (round, solid edge)'], ['pencil', '✏️', 'Pencil (1–2 px, hard edge)'], ['eraser', '🧽', 'Eraser'],
   ['fill', '🪣', 'Fill (flood fill similar colours; in mask mode it follows the picture underneath)'],
   ['line', '╱', 'Line'], ['rect', '▭', 'Rectangle'], ['rectf', '■', 'Filled rectangle'], ['ellipse', '◯', 'Ellipse'],
@@ -53,7 +53,7 @@ export async function openPaint(opts) {
   let W = Math.max(16, Math.round(opts.width || 512)), H = Math.max(16, Math.round(opts.height || 512))
   if (isMask && opts.background) { try { const b = await loadImg(opts.background); W = b.naturalWidth; H = b.naturalHeight } catch { } }
   const st = { tool: isMask ? 'brush' : 'soft', size: isMask ? 24 : 36, opacity: 0.45, feather: 0.7, fg: '#000000', bg: '#ffffff', tol: 32, zoom: 0, undo: [], redo: [] }
-  // image mode: "noise canvas" = unpainted pixels stay transparent and mean "nothing here — let the model invent it"
+  // image mode: "noise canvas" = unpainted pixels stay transparent and mean "nothing here · let the model invent it"
   st.noise = !isMask && (opts.value ? await hasAlpha(opts.value) : opts.noiseCanvas !== false)
 
   // ---- canvases: base (picture), mask (mask mode), overlay (shape preview)

@@ -1,4 +1,4 @@
-import { $, GET, POST, S, emit, flow, hasFeature, spark, toast } from '../core.js'
+import { $, GET, POST, S, emit, flow, hasFeature, schema, spark, toast } from '../core.js'
 import { esc } from '../flow.js'
 import { debugStep, renderDebugButtons } from './debugger.js'
 import { validate } from './flowedit.js'
@@ -8,17 +8,35 @@ import { renderResume } from '../tabs/output_image.js'
 import { refreshRuns } from '../tabs/runs.js'
 
 $('#run').onclick = () => {
-  // If we are in the middle of a stepping session, ▶ Run continues to the end instead of restarting from step 0!
+  // If we are in the middle of a stepping or paused/stopped session, ▶ Run continues from the current block!
   if (S.debug && !S.debug.done) {
     if (S.debug.busy) return toast('Already running (press ■ to stop).')
+    if (S.run && S.run.status === 'paused') {
+      return POST(`/api/runs/${S.run.id}/resume`).then(() => { S.pauseWanted = false; pollRun(S.run.id) }).catch(e => toast(e.message, 'error'))
+    }
     return debugStep('all')
   }
   startRun()
 }
 
 $('#cancel').onclick = async () => {
-  if (S.debug?.busy) return POST('/api/debug/cancel').catch(e => toast(e.message, 'error'))
-  if (S.run) await POST(`/api/runs/${S.run.id}/cancel`)
+  if (S.debug?.busy) {
+    await POST('/api/debug/cancel').catch(() => {})
+  }
+  if (S.run && ['running', 'queued', 'paused'].includes(S.run.status)) {
+    await POST(`/api/runs/${S.run.id}/cancel`).catch(e => toast(e.message, 'error'))
+  }
+  if (schema().step_debugger) {
+    setTimeout(async () => {
+      try {
+        const dbg = await GET('/api/debug')
+        if (dbg && Object.keys(dbg).length) {
+          S.debug = dbg
+          renderDebugButtons()
+        }
+      } catch {}
+    }, 150)
+  }
 }
 
 $('#pause').onclick = async () => {
@@ -58,9 +76,10 @@ export async function pollRun(id) {
   $('#progress').classList.remove('indet')
   $('#progress').style.width = `${Math.round(r.progress * 100)}%`
   $('#progress-msg').textContent = (live ? r.message : r.status === 'done' ? `done in ${r.seconds}s`
-    : r.status === 'cancelled' ? `cancelled after ${r.seconds}s${r.outputs ? ' — output so far is kept' : ''}` : r.status) +
+    : r.status === 'stepping' ? `${r.message || 'paused at current block'} · press ▶ Continue or Step`
+    : r.status === 'cancelled' ? `stopped after ${r.seconds}s${r.outputs ? ' · output so far is kept' : ''}` : r.status) +
     (r.ram_gb != null ? ` · process RAM ${r.ram_gb} GB` : '')
-  $('#run').disabled = live
+  $('#run').disabled = live && r.status !== 'paused'
   $('#pause').disabled = !live
   if (r.status === 'paused') S.pauseWanted = false
   $('#pause').textContent = r.status === 'paused' || S.pauseWanted ? '▶' : '⏸'
@@ -69,16 +88,19 @@ export async function pollRun(id) {
   const wasPaused = S.run?.status === 'paused'
   if (fresh) { S.runVersion = r.version; S.lens = null; S.lensKey = null }
   S.run = fresh || !S.run || S.run.id !== r.id ? r : { ...S.run, ...r, outputs: S.run.outputs }
-  if (hasFeature('image_stepper') && (fresh || !live || (r.status === 'paused' && !wasPaused))) {
+  if ((schema().step_debugger || hasFeature('image_stepper')) && (fresh || !live || (r.status === 'paused' && !wasPaused))) {
     GET('/api/debug').then(dbg => { if (dbg && dbg.run_id === id) { S.debug = dbg; renderDebugButtons(); if (S.tab === 'debug') renderTab() } }).catch(() => {})
   }
   if (live) {
     flow.setActive(r.active_node || null, r.done_nodes || [])
-    // Text / image updates appear as they are generated; while paused every tab works on the state so far.
     if (fresh || (r.status === 'paused' && !wasPaused)) { applyRunBadges(); renderInspector(); renderTab() }
     S.polling = setTimeout(() => pollRun(id), r.status === 'paused' ? 1000 : 400); return
   }
-  flow.setActive(null, [])
+  if (r.status === 'stepping') {
+    flow.setActive(r.active_node || null, r.done_nodes || [])
+  } else {
+    flow.setActive(null, [])
+  }
   $('#run').disabled = false
   $('#pause').textContent = '⏸'
   if (r.status === 'error') toast(r.error, 'error')
@@ -86,6 +108,7 @@ export async function pollRun(id) {
   refreshRuns()
   renderInspector()
   renderTab()
+  renderDebugButtons()
   if (r.status === 'done') emit('run-done', r)
 }
 
@@ -113,8 +136,7 @@ export function applyRunBadges() {
       }
     }
   })
-  // Mixture-of-experts blocks show their experts as a strip of cells — before any run too, so the structure is
-  // visible; after a run each cell is shaded by how many tokens used that expert.
+  // Mixture-of-experts blocks show their experts as a strip of cells
   if (S.info?.moe) flow.nodes.forEach(n => {
     if (n.data.kind === 'block' && n.data.moe) b[n.id] = (b[n.id] || '') + expertStrip(n, o?.block_stats?.[n.id]?.moe)
   })
@@ -131,6 +153,16 @@ export function applyRunBadges() {
       const tag = lay && (lay.reads !== 'main' || lay.prefix?.length)
         ? `<span class="pk" title="what this block's image tokens read">${esc([...(lay.prefix || []), lay.reads === 'main' ? 'prompt' : lay.reads].join(' + '))}</span>` : ''
       b[nid] = prev + tag + spark(st.std_by_step)
+    }
+  }
+  if (o.forks) {
+    for (const [fid, f] of Object.entries(o.forks)) {
+      const trig = f.triggered
+      const col = trig ? 'rgba(248,113,113,0.35)' : 'rgba(52,211,153,0.28)'
+      const brd = trig ? 'var(--bad)' : 'var(--ok)'
+      const topLabel = f.top_category || (trig ? 'alert' : 'pass')
+      const probPct = f.top_prob != null ? ` ${(f.top_prob * 100).toFixed(0)}%` : ''
+      b[fid] = `<span class="pk" style="background:${col};border:1px solid ${brd}" title="Fork head (${esc(f.mode || 'monitor')}): ${esc(topLabel)}${probPct}">${esc(topLabel)}${probPct}</span>`
     }
   }
   const out = flow.nodes.find(n => n.data.kind === 'output_text' || n.data.kind === 'output_image')
@@ -175,7 +207,7 @@ export function parseSpec(spec, n) {
   if (!spec || spec === 'all' || spec === '*') return [...Array(n).keys()]
   const out = new Set()
   for (let part of spec.split(',')) {
-    part = part.split('=')[0]                      // a custom route writes expert=weight
+    part = part.split('=')[0]
     const m = part.trim().match(/^(-?\d*)\s*:\s*(-?\d*)$/)
     if (m) { const a = m[1] === '' ? 0 : +m[1], z = m[2] === '' ? n : +m[2]; for (let i = Math.max(0, a); i < Math.min(n, z); i++) out.add(i) }
     else if (/^\d+$/.test(part.trim())) { const i = +part.trim(); if (i < n) out.add(i) }
@@ -183,7 +215,7 @@ export function parseSpec(spec, n) {
   return [...out]
 }
 
-export const expertHue = i => (i * 47) % 360          // a stable colour per expert index
+export const expertHue = i => (i * 47) % 360
 
 export function expertStrip(node, moe) {
   const E = node.data.moe, per = E <= 16 ? E : E <= 64 ? 16 : 32, banned = routerEdits(node)

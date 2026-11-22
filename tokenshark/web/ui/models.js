@@ -24,7 +24,7 @@ export async function refreshModels() {
 export function showModelNotes() {
   const m = S.models.find(x => x.id === $('#model').value)
   const pTag = m?.plugin_name ? `<span class="chip">${esc(m.plugin_name)}</span> ` : ''
-  $('#model-notes').innerHTML = m ? `${pTag}${esc(m.repo || m.path)} — ${esc(m.notes || '')} · <span class="small">${m.downloaded
+  $('#model-notes').innerHTML = m ? `${pTag}${esc(m.repo || m.path)} · ${esc(m.notes || '')} · <span class="small">${m.downloaded
     ? `on disk: ${esc(m.folder)} (${m.disk_gb} GB)` : `will download to ${esc(m.folder)}`}</span>` : ''
   $('#del-files').style.display = m?.downloaded && !m.path && !m.loaded ? '' : 'none'
 }
@@ -156,7 +156,7 @@ export function showLoadProgress(st) {
   } else {
     $('#progress').style.width = '100%'
     $('#progress').classList.add('indet')
-    $('#progress-msg').textContent = st.status + (st.load_seconds != null ? ` · ${st.load_seconds}s` : '') + ' — still working (details in the terminal window)'
+    $('#progress-msg').textContent = st.status + (st.load_seconds != null ? ` · ${st.load_seconds}s` : '') + ' · still working (details in the terminal window)'
     return
   }
   $('#progress').classList.remove('indet')

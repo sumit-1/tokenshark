@@ -1,4 +1,4 @@
-// Experts tab — mixture-of-experts models. Read the router (which experts each token was sent to), read the experts
+// Experts tab · mixture-of-experts models. Read the router (which experts each token was sent to), read the experts
 // (what each one wrote, in words), and test them (ban, force, silence, amplify, knock-out sweep).
 // Also owns the expert panel in the inspector and the clicks on a block's expert cells in the flow.
 import { GET, POST, S, btn, el, flow, hooks, registerTab, spinner, toast } from '../core.js'
@@ -98,7 +98,7 @@ hooks.expertPanel = (n, box) => {
   for (let i = 0; i < E; i++) {
     const u = st ? st.usage[i] : 0
     const c = el('button', { className: `xcell${S.moe.node === n.id && S.moe.expert === i ? ' on' : ''}${banned.has(i) ? ' ban' : ''}`, textContent: i,
-      title: `expert ${i}${st ? ` — used by ${(u * 100).toFixed(0)}% of the last run’s tokens` : ''}${banned.has(i) ? ' — banned' : ''}` })
+      title: `expert ${i}${st ? ` · used by ${(u * 100).toFixed(0)}% of the last run’s tokens` : ''}${banned.has(i) ? ' · banned' : ''}` })
     c.style.background = st ? `hsla(${expertHue(i)},70%,${14 + 40 * u / mx}%,${0.3 + 0.7 * u / mx})` : ''
     c.onclick = () => pick(n.id, i, false)
     grid.appendChild(c)
@@ -107,7 +107,7 @@ hooks.expertPanel = (n, box) => {
   if (st?.last?.length) sec.appendChild(el('div', { className: 'small' }, `Newest token went to ${st.last.map(([e, w]) => `<b>E${e}</b> (${w})`).join(', ')}.`))
   if (S.moe.node === n.id && S.moe.expert != null) {
     const e = S.moe.expert
-    sec.appendChild(el('div', { className: 'small', style: 'margin-top:6px' }, `<b>Expert ${e}</b> — change what it does, then run again:`))
+    sec.appendChild(el('div', { className: 'small', style: 'margin-top:6px' }, `<b>Expert ${e}</b> · change what it does, then run again:`))
     sec.appendChild(actionRow(n.id, e))
     sec.appendChild(btn('Add to custom route', () => addToRoute(n.id, e, st?.last?.find(x => x[0] === e)?.[1] ?? null), 'mini'))
     if (S.run?.outputs && tabAvailable('experts')) sec.appendChild(btn('What does it do? (Experts tab)', () => pick(n.id, e, true), 'mini'))
@@ -124,7 +124,7 @@ async function renderExperts(p) {
   const st = S.moe, alive = aliveIn('experts')
   p.appendChild(el('div', { className: 'small' }, `<b>Mixture of experts.</b> Each of these blocks has ${moeInfo().n_experts} small MLPs instead of one big one.
     A router scores every expert for every token and runs only the best ${moeInfo().top_k}; their outputs are added, weighted by the scores${moeInfo().norm_topk ? ' (rescaled to sum to 1)' : ''}${moeInfo().shared ? ', next to one shared expert that every token uses' : ''}.
-    So for any token most of the block’s weights do nothing — and <i>which</i> experts ran is a fact you can read, not an estimate.`))
+    So for any token most of the block’s weights do nothing · and <i>which</i> experts ran is a fact you can read, not an estimate.`))
   const body = el('div', {}, spinner()); p.appendChild(body)
   let ov
   try { ov = await GET(`/api/runs/${S.run.id}/experts`) } catch (e) { if (alive()) body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return }
@@ -189,12 +189,12 @@ async function renderExperts(p) {
   // the router's decision at this token
   const probs = d.probs?.[d.token]
   const chosen = new Map(d.here.map(h => [h.index, h]))
-  det.appendChild(el('div', { className: 'small', style: 'margin-top:8px' }, `<b>Token #${d.token} “${esc(d.piece)}”</b> — the router’s score for each of the ${d.n_experts} experts (softmax). The ${d.k} highest run; the rest are skipped.${d.k !== d.native_k ? ` <span class="bad">(k changed from the model’s ${d.native_k})</span>` : ''}`))
+  det.appendChild(el('div', { className: 'small', style: 'margin-top:8px' }, `<b>Token #${d.token} “${esc(d.piece)}”</b> · the router’s score for each of the ${d.n_experts} experts (softmax). The ${d.k} highest run; the rest are skipped.${d.k !== d.native_k ? ` <span class="bad">(k changed from the model’s ${d.native_k})</span>` : ''}`))
   if (probs) {
     const mx = Math.max(...probs, 1e-9)
     const bars = el('div', { className: 'xbars' })
     probs.forEach((v, i) => {
-      const b = el('i', { className: chosen.has(i) ? 'on' : '', title: `expert ${i}: ${v}${chosen.has(i) ? ' — chosen' : ''}` })
+      const b = el('i', { className: chosen.has(i) ? 'on' : '', title: `expert ${i}: ${v}${chosen.has(i) ? ' · chosen' : ''}` })
       b.style.height = `${Math.max(2, v / mx * 100)}%`; b.style.background = chosen.has(i) ? hue(i) : ''
       b.onclick = () => pick(blockNode(st.pos), i, false)
       bars.appendChild(b)
@@ -256,14 +256,14 @@ async function showExpert(box, pos, index, alive) {
   try { d = await GET(`/api/runs/${S.run.id}/expert?pos=${pos}&index=${index}`) } catch (e) { box.innerHTML = `<div class="bad">${esc(e.message)}</div>`; return }
   if (!alive()) return
   const mx = Math.max(...d.weight, 1e-9)
-  box.innerHTML = `<div class="kvbox"><h4>Expert ${d.index} of block #${d.pos} (layer ${d.layer}) — ${d.size.toLocaleString()} weights, chosen for ${d.count} of ${d.tokens.length} tokens</h4>
+  box.innerHTML = `<div class="kvbox"><h4>Expert ${d.index} of block #${d.pos} (layer ${d.layer}) · ${d.size.toLocaleString()} weights, chosen for ${d.count} of ${d.tokens.length} tokens</h4>
     <div class="small">Its weight at every token (0 = not chosen). Hover for the router’s score and rank.</div>
     <div class="tokens">${d.tokens.map((t, i) => `<span class="tok" title="#${i}: weight ${d.weight[i]}${d.prob ? ` · score ${d.prob[i]} · rank ${d.rank[i]} of ${d.n_experts}` : ''}" style="background:${recColor(d.weight[i] / mx)}">${esc(t || '∅')}</span>`).join('')}</div>
     <div class="kv" style="margin-top:6px">
       ${d.promotes ? `<span>writes (pushes for)</span><b>${d.promotes.map(w => `<span class="chip">${esc(w)}</span>`).join('')}</b>
       <span>pushes against</span><b>${d.suppresses.slice(0, 8).map(w => `<span class="chip dim">${esc(w)}</span>`).join('')}</b>` : ''}
       <span title="Tokens whose embedding points the same way as this expert’s row of the router. A fair reading in the first blocks; deeper, the stream no longer looks like an embedding.">its router row attracts</span><b>${d.attracts.map(w => `<span class="chip">${esc(w)}</span>`).join('')}</b>
-      <span>fires together with</span><b>${d.co.map(([e, c]) => `${chipX(e)}<sub>${c}</sub>`).join(' ') || '—'}</b>
+      <span>fires together with</span><b>${d.co.map(([e, c]) => `${chipX(e)}<sub>${c}</sub>`).join(' ') || '-'}</b>
       <span title="Experts whose router rows point the same way: they compete for the same tokens.">competes with (similar router row)</span><b>${d.similar.map(([e, c]) => `${chipX(e)}<sub>${c}</sub>`).join(' ')}</b>
     </div></div>`
   box.querySelectorAll('.xchip[data-x]').forEach(c => { c.onclick = () => pick(blockNode(pos), +c.dataset.x, false) })
@@ -273,7 +273,7 @@ async function showExpert(box, pos, index, alive) {
 function renderSweep(box, blk) {
   const st = S.moe
   box.innerHTML = `<h4>4 · Which experts does the answer depend on? <span class="small">(remove one at a time and measure)</span></h4>`
-  const mode = selectOf([['ban', 'ban — the router picks a replacement (what deleting the expert would do)'], ['zero', 'silence — it is chosen but writes nothing (what its own output was worth)']], st.mode)
+  const mode = selectOf([['ban', 'ban · the router picks a replacement (what deleting the expert would do)'], ['zero', 'silence · it is chosen but writes nothing (what its own output was worth)']], st.mode)
   mode.onchange = () => { st.mode = mode.value }
   const row = el('div', { className: 'row' })
   const go = async pos => {
@@ -300,7 +300,7 @@ function drawSweep(out) {
   t.innerHTML = `<tr><th>Block</th><th>Expert</th><th>Share of prompt tokens</th><th>Weight at the last token</th><th>Change in the answer’s lead</th><th>p(answer)</th><th title="How far the whole prediction moved (KL divergence, nats)">KL</th><th>Top word now</th><th></th></tr>`
   for (const x of rows.slice(0, 60)) {
     const tr = el('tr')
-    tr.innerHTML = `<td>#${x.pos} · L${x.layer}</td><td>${chipX(x.index)}</td><td>${(x.usage * 100).toFixed(0)}%</td><td>${x.weight_last || '—'}</td>
+    tr.innerHTML = `<td>#${x.pos} · L${x.layer}</td><td>${chipX(x.index)}</td><td>${(x.usage * 100).toFixed(0)}%</td><td>${x.weight_last || '-'}</td>
       <td><span class="pbar${x.d_margin < 0 ? ' alt' : ''}"><i style="width:${(Math.abs(x.d_margin) / mx * 100).toFixed(0)}%"></i></span> ${x.d_margin}</td><td>${x.p_answer}</td><td>${x.kl}</td>
       <td>${x.flipped ? `<span class="chip bad">${esc(x.top)}</span>` : `<span class="chip">${esc(x.top)}</span>`}</td>`
     const td = el('td')

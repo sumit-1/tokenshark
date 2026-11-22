@@ -9,7 +9,7 @@ export function stepStrip() {
   const o = S.run.outputs
   const rv = S.run.version ?? 0
   const outer = el('div')
-  outer.appendChild(el('div', { className: 'small note', innerHTML: 'Top: <b>what the model gets</b> at each step — the noisy latent xₜ = (1−σ)·picture + σ·noise. Bottom: <b>its guess</b> of the finished image (x̂₀). Both ≈ approximate colours (a linear map, one square per latent tile); only the final image is an exact decode.' }))
+  outer.appendChild(el('div', { className: 'small note', innerHTML: 'Top: <b>what the model gets</b> at each step · the noisy latent xₜ = (1−σ)·picture + σ·noise. Bottom: <b>its guess</b> of the finished image (x̂₀). Both ≈ approximate colours (a linear map, one square per latent tile); only the final image is an exact decode.' }))
   const wrap = el('div', { className: 'steps two' })
   for (let i = 0; i < o.steps; i++) {
     if (o.preview_steps && !o.preview_steps.includes(i)) continue      // img2img: steps before the start were skipped
@@ -62,7 +62,7 @@ export async function renderImageOut(p) {
       btn('+ 4 steps', async () => {
         try {
           const r = await POST('/api/debug/extend', { add: 4 })
-          toast(`Extended schedule to ${r.n_steps} steps — press Step ▸▸ to continue.`)
+          toast(`Extended schedule to ${r.n_steps} steps · press Step ▸▸ to continue.`)
           showDebug(r)
         } catch (e) { toast(e.message, 'error') }
       }, 'mini')
@@ -71,7 +71,7 @@ export async function renderImageOut(p) {
   side.append(toks, row, el('div', { className: 'small', textContent: `${o.steps} steps${o.start_step ? `, started at step ${o.start_step}` : ''}${S.run.seconds ? ` · run ${S.run.seconds}s` : ''}` }))
   top.appendChild(side)
   p.append(top, el('h4', { textContent: 'Each step’s guess of the final image (x̂₀)' }),
-    el('div', { className: 'small', innerHTML: (o.preview_kind === 'linear' ? 'Previews are fast approximations (a linear latent → colour map fitted on the final image), not full VAE decodes. ' : '') + 'Early steps fix layout and colour, late steps add detail. <b>Branch here</b> saves this step’s noisy latent as the starting point for your next Run: change the prompt, guidance or interventions, press Run, and only the remaining steps are recomputed — the image analogue of forking a conversation mid-way. Greyed frames were inherited from the parent.' }),
+    el('div', { className: 'small', innerHTML: (o.preview_kind === 'linear' ? 'Previews are fast approximations (a linear latent → colour map fitted on the final image), not full VAE decodes. ' : '') + 'Early steps fix layout and colour, late steps add detail. <b>Branch here</b> saves this step’s noisy latent as the starting point for your next Run: change the prompt, guidance or interventions, press Run, and only the remaining steps are recomputed · the image analogue of forking a conversation mid-way. Greyed frames were inherited from the parent.' }),
     stepStrip())
   if (o.xattn_groups?.length) {
     try {

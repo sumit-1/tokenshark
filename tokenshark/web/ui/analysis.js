@@ -19,7 +19,7 @@ export async function streamAnalysis(url, onPart, alive) {
       if (t.result) onPart(t.result, t)
       if (t.status === 'done') return t.result
       if (t.status === 'error') throw new Error(t.error)
-      if (t.status === 'cancelled') throw new Error('Stopped — from the Tasks list, or replaced by a newer request.')
+      if (t.status === 'cancelled') throw new Error('Stopped · from the Tasks list, or replaced by a newer request.')
       await sleep(t.status === 'running' ? 350 : 700)
     }
   } finally { if (S.streams[url] === id && alive()) delete S.streams[url] }

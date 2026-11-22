@@ -64,10 +64,10 @@ export function renderTasks(list) {
     r.appendChild(ctl)
     return r
   }
-  pop.innerHTML = `<div class="small">The model works on the first task that isn’t paused, one block or layer at a time — reorder, pause or stop here. Changes take effect after the current block.</div>`
+  pop.innerHTML = `<div class="small">The model works on the first task that isn't paused, one block or layer at a time. Reorder, pause or stop here; changes take effect after the current block.</div>`
   if (!live.length) pop.appendChild(el('div', { className: 'empty', textContent: 'Nothing running.' }))
   live.forEach((t, i) => pop.appendChild(row(t, i)))
-  if (old.length) { pop.appendChild(el('h4', { textContent: 'Recent' })); old.slice(0, 8).forEach((t, i) => pop.appendChild(row(t, i))) }
+  if (old.length) { pop.appendChild(el('h4', { textContent: 'Recent' })); old.forEach((t, i) => pop.appendChild(row(t, i))) }
 }
 
 pollTasks()

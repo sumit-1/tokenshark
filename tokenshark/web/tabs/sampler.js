@@ -12,7 +12,7 @@ export async function renderSampler(p) {
   const T = o.live?.n_complete ?? o.tokens.length
   if (st.pos == null || st.pos >= T) st.pos = Math.max(0, Math.min(T - 1, (gen?.start ?? T) - 1))
   p.appendChild(el('div', { className: 'small' }, `<b>Sampler playground.</b> The model outputs a score for every word; the sampler turns scores into one choice.
-    Pick a position, then move the sliders: <b>temperature</b> flattens or sharpens the odds, <b>top-k</b> keeps the k best, <b>top-p</b> keeps the smallest set that covers p of the probability. Nothing is re-run — this is the same prediction, read differently.`))
+    Pick a position, then move the sliders: <b>temperature</b> flattens or sharpens the odds, <b>top-k</b> keeps the k best, <b>top-p</b> keeps the smallest set that covers p of the probability. Nothing is re-run · this is the same prediction, read differently.`))
   const strip = el('div', { className: 'tokens' })
   o.tokens.slice(0, T).forEach((t, i) => { const s = el('span', { className: `tok${i === st.pos ? ' on' : ''}`, textContent: t || '∅', title: `after token #${i}` }); s.onclick = () => { st.pos = i; st.draws = null; renderTab() }; strip.appendChild(s) })
   p.appendChild(strip)

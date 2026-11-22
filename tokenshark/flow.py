@@ -74,11 +74,26 @@ class Intervention:
 
 
 @dataclass
+class ForkSpec:
+    node_id: str
+    pos: int                 # schedule position of the block this fork branches from
+    layer: int = 0           # underlying layer index of the block
+    kind: str = "guardrail"  # e.g. "guardrail" / "fork_head"
+    label: str = ""
+    hook: str = "resid_post"
+    mode: str = "monitor"
+    threshold: float = 0.5
+    ref: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Plan:
     family: str                          # causal_lm | t2i
     schedule: list[int]                  # block indices in execution order (repeats / removals allowed)
     schedule_nodes: list[str]            # flow node id at each schedule position
     interventions: list[Intervention] = field(default_factory=list)
+    forks: list[ForkSpec] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)   # prompt, sampler, scheduler, noise ... settings
 
     def to_dict(self) -> dict:
@@ -551,9 +566,17 @@ def compile_flow(flow: dict, info: dict) -> Plan:
             err(f"Hook '{hook}' isn't available here; choose one of {', '.join(valid_hooks)}.", e["source"])
             continue
         op = src.get("op", "scale")
-        if op not in shape.ops:
+        from .sdk import get_op
+        custom_op = get_op(op)
+        if op not in shape.ops and custom_op is None:
             err(f"Unknown op '{op}'.", e["source"])
             continue
+        if custom_op and custom_op.valid_hooks and hook not in custom_op.valid_hooks:
+            err(f"Op '{op}' only applies to hooks {', '.join(custom_op.valid_hooks)}.", e["source"])
+            continue
+        if custom_op and custom_op.validate_fn:
+            if not custom_op.validate_fn(src, e["source"], info, err):
+                continue
         if hook == "weights" and op not in ("quantize", "scale", "zero", "add_noise"):
             err("Hook 'weights' supports quantize, scale, zero or add_noise.", e["source"])
             continue
@@ -650,12 +673,56 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         except ValueError as ex:
             err(str(ex), e["source"])
 
+    # Side-branch forks: boxes wired from a block's "fork" handle (e.g. guardrail / auxiliary probe heads).
+    from .sdk import get_node_kind
+    forks: list[ForkSpec] = []
+    for e in edges:
+        if e.get("sourceHandle") != "fork" or e["source"] not in nodes or e["target"] not in nodes:
+            continue
+        if e["source"] in bypassed:
+            continue
+        if e["source"] not in pos_of_node:
+            err(f"Fork source '{nodes[e['source']]['data'].get('label')}' is not on the active block path.", e["source"])
+            continue
+        tnode = nodes[e["target"]]
+        td = tnode.get("data") or {}
+        if td.get("enabled") is False:
+            continue
+        tkind = str(td.get("kind") or "fork_head")
+        nks = get_node_kind(tkind)
+        if tkind != "fork_head" and (nks is None or not nks.is_fork_target):
+            err(f"Only fork / probe boxes can connect to a block's fork handle (found '{tkind}').", e["target"])
+            continue
+        f_params = {k: v for k, v in td.items() if k not in ("kind", "label", "sub")}
+        if nks and nks.compile_fn:
+            try:
+                f_params = nks.compile_fn(td, nodes, edges, info)
+            except ValueError as ex:
+                err(str(ex), e["target"])
+                continue
+        b_pos = pos_of_node[e["source"]]
+        b_lay = int(nodes[e["source"]]["data"].get("layer", b_pos))
+        forks.append(ForkSpec(
+            node_id=e["target"],
+            pos=b_pos,
+            layer=b_lay,
+            kind=str(td.get("fork_kind") or tkind),
+            label=str(td.get("label") or tkind),
+            hook=str(td.get("hook") or "resid_post"),
+            mode=str(td.get("mode") or "monitor"),
+            threshold=_num(td.get("threshold"), 0.5, float),
+            ref=str(td.get("ref") or ""),
+            params=f_params,
+        ))
+
     if errors:
         raise FlowError(errors)
 
     params = shape.params(nodes, edges, find_kind, chain, caps)
     params["bypassed"] = sorted(bypassed)
-    return Plan(family=family, schedule=schedule, schedule_nodes=chain, interventions=ivs, params=params)
+    if forks:
+        params["forks"] = [asdict(f) for f in forks]
+    return Plan(family=family, schedule=schedule, schedule_nodes=chain, interventions=ivs, forks=forks, params=params)
 
 
 def _expert_spec(spec: str):
