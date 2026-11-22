@@ -83,3 +83,24 @@ def test_routes_ask_the_plugin_for_features(tmp_path_factory):
         assert c.post("/api/tokenize", json={"text": "hi"}).status_code == 200
     finally:
         LOADED.unload()
+
+
+def test_no_em_dashes_in_repository():
+    """Guardrail test: ensure no em dash (U+2014) appears in any source, web, doc, or test file."""
+    root = Path(__file__).parent.parent
+    skip_dirs = {".git", ".venv", "models", "data", "__pycache__", ".pytest_cache", "dist", "build", "tokenshark.egg-info"}
+    bin_exts = {".png", ".gif", ".jpg", ".jpeg", ".webp", ".ico", ".safetensors", ".bin", ".pth", ".pyc", ".pdf"}
+    em_char = chr(0x2014)
+    em_esc = chr(92) + "u2014"
+    offenders: list[str] = []
+    for p in root.rglob("*"):
+        if not p.is_file() or any(part in skip_dirs for part in p.parts) or p.suffix.lower() in bin_exts:
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if em_char in txt or em_esc in txt:
+            offenders.append(str(p.relative_to(root)))
+    assert not offenders, f"Em dash found in files: {', '.join(offenders)}"
+

@@ -69,7 +69,7 @@
   "family": "causal_lm",
   "repo": "Qwen/Qwen3.6-27B",
   "size_gb": 55.0,
-  "notes": "Hybrid: 48 Gated DeltaNet (linear-attention) + 16 gated-attention blocks, 64 total. ~55 GB in bf16 \u2014 use 'stream from disk' (or 'RAM \u2192 device' with 64 GB+ RAM). Text only for now; image input is next. Over 10 GB: expect minutes per token on CPU."
+  "notes": "Hybrid: 48 Gated DeltaNet (linear-attention) + 16 gated-attention blocks, 64 total. ~55 GB in bf16 - use 'stream from disk' (or 'RAM \u2192 device' with 64 GB+ RAM). Text only for now; image input is next. Over 10 GB: expect minutes per token on CPU."
  },
  {
   "id": "qwen-image-2.1",
@@ -79,6 +79,6 @@
   "default_steps": 24,
   "default_guidance": 1.0,
   "default_size": 512,
-  "notes": "Single-stream DiT (32 blocks, 7B) + Qwen3-VL 8B text encoder + 64-channel VAE, ~33 GB in bf16. The prompt goes through the blocks once (KV cache); each step only computes image tokens. On CPU expect minutes per step at 512\u00d7512 (the model's own default is 1024\u00d71024, 40 steps). Qwen Research License — read it on the model page."
+  "notes": "Single-stream DiT (32 blocks, 7B) + Qwen3-VL 8B text encoder + 64-channel VAE, ~33 GB in bf16. The prompt goes through the blocks once (KV cache); each step only computes image tokens. On CPU expect minutes per step at 512\u00d7512 (the model's own default is 1024\u00d71024, 40 steps). Qwen Research License - read it on the model page."
  }
 ]

@@ -1,8 +1,8 @@
 """Export a run as a Python script that reproduces it with the public API (tokenshark.api).
 
 The script rebuilds the flow from the model's default flow, one readable line per change (prompt, sampler,
-bypassed / repeated blocks, interventions, layer prompts, edited box code). Runs it depends on — the source of
-an activation patch — are exported first, in the same file.
+bypassed / repeated blocks, interventions, layer prompts, edited box code). Runs it depends on - the source of
+an activation patch - are exported first, in the same file.
 """
 from __future__ import annotations
 
@@ -197,7 +197,7 @@ def run_script(run, default_flow_for, get_run, vectors: dict | None = None) -> s
 
     emit(run, "run")
     image = run.plan.family == "t2i"
-    head = [f'"""Run {run.id}{" · " + run.label if run.label else ""} — exported from Tokenshark.',
+    head = [f'"""Run {run.id}{" · " + run.label if run.label else ""} - exported from Tokenshark.',
             "",
             "Reproduces the run with the same engine the app uses. Run it from the app's folder:",
             f"    python run_{run.id}.py",

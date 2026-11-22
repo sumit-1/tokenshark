@@ -1,4 +1,4 @@
-# Tokenshark — Guide for AI Agents, Tutors & Course Creators (`agent.md`)
+# Tokenshark - Guide for AI Agents, Tutors & Course Creators (`agent.md`)
 
 This document teaches AI agents (Claude Code, Cursor, Codex, custom tutoring agents, and curriculum builders) what **Tokenshark** is, how to install and operate it via CLI, Python, HTTP, or MCP, and how to design interactive **coursework, lab exercises, and security challenges** on top of it.
 
@@ -40,7 +40,7 @@ tokenshark --host 127.0.0.1 --port 8000 --device auto --dtype auto --models-dir 
   - `auto`: Automatically chooses based on model size vs. free VRAM/RAM.
   - `device`: Entire model resident on GPU/MPS/CPU.
   - `cpu`: Weights resident in RAM, copied to GPU block-by-block.
-  - `disk`: Memory-mapped streaming from disk per layer (and per active expert for MoE models)—allows inspecting 27B–70B models on a standard laptop.
+  - `disk`: Memory-mapped streaming from disk per layer (and per active expert for MoE models) - allows inspecting 27B–70B models on a standard laptop.
 
 ### Connect an AI Agent via MCP (`tokenshark-mcp`)
 Tokenshark includes a zero-dependency stdio MCP server (`tokenshark.mcp_server`) that talks to a running Tokenshark server over HTTP. Every run, patch, or intervention the agent performs appears live in the user's browser under the **Runs** tab!
@@ -63,9 +63,9 @@ Add to Claude Desktop, Claude Code, or Cursor MCP configuration:
 ## 3. How to Operate Tokenshark
 
 You can operate Tokenshark in three ways:
-1. **Python API (`from tokenshark.api import Lab`)** — best for scripts, automated grading, Jupyter notebooks, and multi-step experiments.
-2. **MCP Tools (`tokenshark.mcp_server`)** — best for live interactive tutoring alongside a student who has the browser UI open.
-3. **Browser UI (`http://127.0.0.1:8000`)** — best for visual exploration, step debugging (`F10`/`F11`), and manual flow surgery.
+1. **Python API (`from tokenshark.api import Lab`)** - best for scripts, automated grading, Jupyter notebooks, and multi-step experiments.
+2. **MCP Tools (`tokenshark.mcp_server`)** - best for live interactive tutoring alongside a student who has the browser UI open.
+3. **Browser UI (`http://127.0.0.1:8000`)** - best for visual exploration, step debugging (`F10`/`F11`), and manual flow surgery.
 
 ### 3.1 Operating via the Python API (`tokenshark.api`)
 
@@ -84,6 +84,7 @@ print(run.tokens)        # ['The', ' capital', ' of', ' France', ' is', ' Paris'
 lens = run.lens(k=5, through=2)            # Logit lens decoded through the last 2 blocks
 track = run.track("Paris", position=4)     # Direct Logit Attribution (DLA) push per layer
 attn = run.attention(block=18)             # [n_heads, n_tokens, n_tokens] tensor
+trace = run.trace_attention(query_token=-1, target_word="Paris") # Rank all (layer, head) pairs attending to previous tokens
 resid = run.resid(block=18, where="post")  # [n_tokens, d_model] residual stream tensor
 neurons = run.top_neurons(block=21, token=4, k=10) # Strongest MLP neurons + vocabulary push
 n_info = run.neuron(block=21, index=3752)  # Single neuron's activations & promoted/suppressed tokens
@@ -122,9 +123,14 @@ vec = lab.vector_from_word("Tokyo", minus="Paris")
 flow.steer(14, vec, value=15.0, positions="last")
 flow.project_out(14, vec, positions="all") # Erase direction from residual stream
 
-# MLP Neuron Clamping
+# MLP Neuron Clamping & Detector-to-Writer Wiring
 flow.clamp(21, neurons="3752,1712", to="value", value=30.0, positions="4")
 flow.clamp(21, neurons="4090,1001", to="value", value=0.0, positions="4")
+flow.wire(19, source="2751", target="2282", strength=3.0, threshold=0.0)
+
+# Center-Layer Guardrail Fork (side-branch classifier on a block's fork port)
+lab.train_guardrail_fork(preset="powershell_detector", pos=12, head_type="linear_probe", steps=80, name="ps_guard")
+flow.fork(12, ref="ps_guard", mode="gate", threshold=0.65, halt_message="[Blocked by center-layer guardrail]")
 
 # Per-block KV rewrite: recreate that layer's cache from a modified system/user prompt
 # (full-attention layers only; cache then grows as tokens are generated)
@@ -223,6 +229,7 @@ You can generate complete coursework or CTF challenges across any of these 10 to
 | **Lab 08** | **Model Forensics, LoRA Auditing & Quantization Drift** | `LoRA / Fine-tune` tab, `Quantize` tab, `Train` tab (`lab.load_lora()`, `lab.quant_compare()`) | Train a tiny LLM or adapt the loaded model (`lora`, `ia3`, `norms`, `adapter`, `new_block`); audit Frobenius weight diffs `‖ΔW‖/‖W‖` to find modified blocks; measure KL drift across 8/4/3/2-bit RTN quantization. |
 | **Lab 09** | **Introspection & Natural Language Autoencoders** | `Introspection` tab (`lab.concept_injection()`, `lab.concept_meter()`, `lab.nla_roundtrip()`) | Inject concept vectors into the residual stream while asking `"Do you detect an injected thought?"` with control trials; decode an activation into English and re-encode it. |
 | **Lab 10** | **Diffusion & Single-Stream DiTs Under the Microscope** | `Image lens` (`ilens`), `Block contributions` (`contrib`), `Step` (`debug_image`), `+ Start image` | Watch an image form across denoising steps and DiT blocks; paint mid-step edits onto $\hat{x}_0$; lock spatial regions with a mask; route different prompts to early (layout) vs. late (detail) blocks. |
+| **Lab 11** | **Center-Layer Guardrail Forks & Previous-Token Attention Attribution** | `Guardrail` tab (`+ Fork Head`), `Attention` tab (`Previous-Token Attribution`) | Train a lightweight `linear_probe` or `mlp_guard` head forked from a middle transformer block (`powershell_detector` preset) to halt generation mid-layer (`mode="gate"`), and trace which `(layer, head)` pairs copy previous tokens into the prediction. |
 
 ---
 

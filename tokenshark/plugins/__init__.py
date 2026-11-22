@@ -51,13 +51,13 @@ class ModelPlugin:
     # features this plugin supports without hardcoding model names in app.js
     # What the page shows for models of this plugin. The web UI has no per-model conditions: it builds itself
     # from this declaration.
-    #   tabs             results tabs, in order — ids of modules in tokenshark/web/tabs/ (see web/README.md)
-    #   palette_actions  flow-editing buttons — the data-action values in web/index.html
+    #   tabs             results tabs, in order - ids of modules in tokenshark/web/tabs/ (see web/README.md)
+    #   palette_actions  flow-editing buttons - the data-action values in web/index.html
     #   train            sections of the Train tab: tiny_text | adapt | tiny_image
     #   course           which guided course the Learn tab offers: text | image
     #   step_debugger    whether the header's step buttons apply; step_unit: token | step (what ▸▸ advances);
     #                    step_background: prepare the session in the background; step_saved_note: toast on Finish
-    #   modality         text | image — which fields the Prompt and Intervention boxes have
+    #   modality         text | image - which fields the Prompt and Intervention boxes have
     #   texts            wording set for help and lessons: lm | unet | dit
     #   block_term       what a box on the chain is called: block | stage
     #   default_hook     hook a new intervention box starts with (default: the adapter's first hook)

@@ -46,7 +46,7 @@ class CustomModelPlugin(ModelPlugin):
 
     # 3. Declarative UI schema: which tabs and editable components appear in the browser
     ui_schema = {
-        # ids of tab modules in tokenshark/web/tabs/ — list only what your adapter can feed
+        # ids of tab modules in tokenshark/web/tabs/ - list only what your adapter can feed
         "tabs": ["output_text", "debug_text", "lens", "lora", "quant", "runs"],
         "palette_actions": ["intervention", "duplicate_block", "bypass_block"],
         "train": [],

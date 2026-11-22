@@ -374,7 +374,7 @@ def test_mcp_protocol():
 
 
 def test_lora_can_adapt_a_single_block(lab, tmp_path):
-    """A LoRA adds a small pair per chosen matrix per chosen block — not one layer, and not necessarily all."""
+    """A LoRA adds a small pair per chosen matrix per chosen block - not one layer, and not necessarily all."""
     from tokenshark.registry import Loaded
     from tokenshark.tasks import TaskManager
     from tokenshark.train import LoRAJob

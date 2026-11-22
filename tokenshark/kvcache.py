@@ -4,7 +4,7 @@ Keys are stored *before* rotary position encoding (after QK-norm where the model
 explicit position per token. RoPE is applied at attention time from those positions, so any part of
 the cache can be re-positioned without recomputation:
 
-    prepend  — put another conversation's cache in front of this one
+    prepend  - put another conversation's cache in front of this one
                mode "shift":    imported keeps 0..m-1, new tokens continue at m, m+1, ...
                mode "negative": imported moves to -m..-1, new tokens start at 0 (as if fresh)
                mode "offset":   imported positions + offset (any integer), new tokens start at 0
@@ -134,7 +134,7 @@ class KVCache:
     tokens: list = field(default_factory=list)
     segments: list = field(default_factory=list)
     device: str = "cpu"
-    # imported prefixes: [(start, end, slots)] — tokens start..end-1 came from a prefix cache and only the schedule
+    # imported prefixes: [(start, end, slots)] - tokens start..end-1 came from a prefix cache and only the schedule
     # positions in `slots` may attend to them (None = every block). Several prefixes can each target other blocks.
     prefix_spans: list = field(default_factory=list)
     # Hybrid models (Qwen3.5/3.6): linear-attention (Gated DeltaNet) blocks keep no per-token K/V, only a running
@@ -414,7 +414,7 @@ class KVCache:
         return c, json.loads(meta.get("extra", "{}"))
 
     def slot_kv(self, s: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Return (K, V) for slot s — from its per-block recreated cache if overridden, else main cache."""
+        """Return (K, V) for slot s - from its per-block recreated cache if overridden, else main cache."""
         if s in self.block_caches:
             bc = self.block_caches[s]
             return bc.k, bc.v

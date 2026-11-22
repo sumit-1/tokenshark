@@ -1,4 +1,4 @@
-"""Ways to adapt a model, beyond LoRA — so they can be compared on the same examples.
+"""Ways to adapt a model, beyond LoRA - so they can be compared on the same examples.
 
 All of them freeze almost everything and train a small part. What differs is *which* part:
 
@@ -217,7 +217,7 @@ class AdaptJob(LoRAJob):
                 if self.probe:
                     with self.tasks.slot(task):
                         self.samples.append({"step": self.step, "text": self.generate(ad, self.probe), "label": "after"})
-            self.message = f"saved to {self.out}" + (" and attached — see the LoRA / Fine-tune tab" if self.attach else "")
+            self.message = f"saved to {self.out}" + (" and attached - see the LoRA / Fine-tune tab" if self.attach else "")
             self.tasks.finish(task, "cancelled" if self.stop else "done")
         except Exception as e:
             self.tasks.finish(task, error=f"{type(e).__name__}: {e}")

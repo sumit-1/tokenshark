@@ -110,8 +110,8 @@ class QuantOverlay:
 def iter_compare(loaded, plan, bits_list: list[int], prefix=None, sources=None):
     """Run the same flow at full precision and at each bit width. Yields the table as it fills in.
 
-    For every setting: the text it generates on its own, and — forced along the full-precision text, so the
-    comparison is token for token — how far its next-token distributions drift (KL divergence) and how often
+    For every setting: the text it generates on its own, and - forced along the full-precision text, so the
+    comparison is token for token - how far its next-token distributions drift (KL divergence) and how often
     its top choice still agrees."""
     from .llm import Stepper
     ad = loaded.adapter

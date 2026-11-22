@@ -1,12 +1,12 @@
 """Mixture-of-experts tools: read the router, read the experts, and measure what each expert is for.
 
 A dense block has one MLP that every token passes through. A mixture-of-experts (MoE) block has E small MLPs and
-a *router* — a single matrix with one row per expert. For each token the router computes one score per expert,
+a *router* - a single matrix with one row per expert. For each token the router computes one score per expert,
 keeps the k highest and runs only those experts. Two things follow that make MoE models unusually readable:
 
   1. The routing is a discrete, visible decision. "Which experts did this token use?" has an exact answer, unlike
      "which neurons mattered?". It is recorded for every token of every run (captures: router, moe_sel, moe_w).
-  2. The MLP's write to the residual stream is already split into k named pieces — one per chosen expert
+  2. The MLP's write to the residual stream is already split into k named pieces - one per chosen expert
      (captures: moe_parts). Each piece can be read through the unembedding, attributed, banned or scaled.
 
     overview        every MoE block of a run: how often each expert was used, router entropy, load balance

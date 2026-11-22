@@ -8,7 +8,7 @@ Two lines of published work are reproduced here at classroom scale, on whatever 
     and score the answers against control trials with nothing injected.
         concept_vectors   the vectors, at every block, from one pass per word
         iter_injection    the sweep: concepts × blocks × strengths → detection / identification / false positives
-        concept_meter     how strongly a run's residual stream points along a concept (per block, per token) —
+        concept_meter     how strongly a run's residual stream points along a concept (per block, per token) - 
                           the measurement behind the "think about X / don't think about X" experiment
 
 2 · Natural-language autoencoders ("Natural Language Autoencoders", Anthropic, 2026)
@@ -20,7 +20,7 @@ Two lines of published work are reproduced here at classroom scale, on whatever 
                           forms with the original; baselines: the token itself, an unrelated token
         score_text        the same score for an explanation you type yourself
 
-Small models pass few of these tests — that is a result, not a bug. The controls are what make it a measurement.
+Small models pass few of these tests - that is a result, not a bug. The controls are what make it a measurement.
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ BASELINE_WORDS = ["table", "window", "river", "Tuesday", "number", "paper", "roa
                   "bottle", "letter", "corner", "minute", "bridge", "pencil"]
 CONCEPT_TEMPLATE = "Tell me about {word}."
 INJECTION_SYSTEM = ""
-INJECTION_PROMPT = ("I am a researcher studying language models like you. I can inject patterns of activity — "
-                    "\"thoughts\" — directly into your network while you answer. On some trials I inject a thought "
+INJECTION_PROMPT = ("I am a researcher studying language models like you. I can inject patterns of activity - "
+                    "\"thoughts\" - directly into your network while you answer. On some trials I inject a thought "
                     "about one specific word; on other trials I inject nothing.\n\n"
                     "Trial 1: Do you detect an injected thought? If so, what is the injected thought about?")
 EXPLAIN_TEMPLATE = 'What does "{x}" mean? Answer with a short definition.'
@@ -53,7 +53,7 @@ def reference_mean(adapter, plan) -> dict[int, torch.Tensor]:
 
     The first token of any sequence is special: models park an enormous, content-free activation there (an
     "attention sink"), often 10–100× larger than any other token's. Averaging it in, or comparing against it,
-    swamps everything else — so every measurement in this file leaves position 0 out."""
+    swamps everything else - so every measurement in this file leaves position 0 out."""
     key = (adapter.spec.get("id"), id(adapter), tuple(plan.schedule), repr(sorted((plan.params.get("code") or {}).items())))
     if key not in _REF:
         if len(_REF) > 8:
@@ -96,7 +96,7 @@ def _forward(adapter, plan, ivs=None, sources=None, store=None):
 
 
 def resid_of(adapter, plan, text: str, chat: bool = True, system: str = "") -> dict[int, torch.Tensor]:
-    """{schedule position: [tokens, d]} — the residual stream after every block for one text (nothing generated)."""
+    """{schedule position: [tokens, d]} - the residual stream after every block for one text (nothing generated)."""
     p = _clean_plan(plan, prompt=text, system=system, prefill="", max_new_tokens=0,
                     use_chat_template=bool(chat and adapter.tok.chat_template))
     st = _forward(adapter, p)
@@ -139,7 +139,7 @@ def score_answer(text: str, concept: str) -> dict:
     """Grade one answer by simple rules (stated here so they can be argued with):
         claims      the answer affirms that it detects an injected thought (and does not deny it first)
         named       the concept word (or its stem) appears in the answer
-        introspect  claims AND the affirmation comes before the word is first written — the paper's criterion:
+        introspect  claims AND the affirmation comes before the word is first written - the paper's criterion:
                     a model that only says "ocean ocean" and then notices it is reading its own output, not its
                     activations
         coherent    the answer is not a degenerate repetition (many distinct words)"""
@@ -297,7 +297,7 @@ def _placeholder_index(adapter, plan, template: str, prefill: str) -> tuple[int,
 
 def _score(h: torch.Tensor, rec: torch.Tensor, mu: torch.Tensor) -> dict:
     """How well `rec` rebuilds `h`. cosine: raw direction agreement (flattered by the large component every
-    activation shares). centred: cosine after subtracting the average activation on ordinary text — the fair number.
+    activation shares). centred: cosine after subtracting the average activation on ordinary text - the fair number.
     fve: fraction of variance explained, 1 − ‖h − rec‖² / ‖h − μ‖² (1 = perfect, 0 = no better than guessing the
     mean, negative = worse than that)."""
     h, rec, mu = h.float(), rec.float(), mu.float()
@@ -308,7 +308,7 @@ def _score(h: torch.Tensor, rec: torch.Tensor, mu: torch.Tensor) -> dict:
 
 def reconstruct(adapter, plan, text: str, pos: int, how: str = "last") -> torch.Tensor:
     """The reconstructor: let the model read `text` (plain, no chat template) and take the residual stream after
-    block `pos` — at the last token, or averaged over the text."""
+    block `pos` - at the last token, or averaged over the text."""
     if not text.strip():
         raise ValueError("Empty explanation.")
     # A line break goes first so that no word of the explanation sits at position 0 (see reference_mean).
@@ -329,13 +329,13 @@ def iter_round_trip(adapter, plan, cap: dict, pos: int, token: int = -1, inject:
     """activation → words → activation, with the model as its own verbalizer and reconstructor.
 
     verbalize   The activation h (residual stream after block `pos` at `token` of the run) replaces the
-                placeholder token's stream at block `inject` of the prompt  What does "X" mean?  — rescaled to
+                placeholder token's stream at block `inject` of the prompt  What does "X" mean?  - rescaled to
                 the size the stream has there, × scale. The remaining blocks treat it as the thing being asked
                 about and the model writes a definition. (This is the "patchscope" / "SelfIE" trick.)
     reconstruct The model reads that definition as plain text; its stream after block `pos` is the rebuilt
                 activation ĥ, scored against h.
     baselines   the same score for the token's own text, for the text up to the token, and for an unrelated
-                token of the run — an explanation is only informative if it beats the unrelated one."""
+                token of the run - an explanation is only informative if it beats the unrelated one."""
     from .flow import Intervention
     x = cap["resid_post"].get(pos)
     if x is None:

@@ -159,7 +159,7 @@ def test_prompt_kv_boxes(qi):
     # a hidden prompt no block can see, placed at negative positions (main prompt still starts at 0): no change
     hidden = dict(box, prompt="a blue whale", role="prepend", blocks="none", mode="negative", label="hidden")
     assert torch.equal(ad.run(_plan(ad, prompt_kvs=[hidden]))["captures"]["final_latent"], base)
-    # in shift mode it still occupies positions 0..m-1 and moves the main prompt along — that alone changes the
+    # in shift mode it still occupies positions 0..m-1 and moves the main prompt along - that alone changes the
     # picture, because image tokens sit on a fixed height/width grid while text tokens use one position on all axes
     assert not torch.equal(ad.run(_plan(ad, prompt_kvs=[dict(hidden, mode="shift")]))["captures"]["final_latent"], base)
     for b in (dict(hidden, blocks="all"), dict(hidden, blocks="1", mode="negative"),

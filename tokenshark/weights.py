@@ -58,7 +58,7 @@ _DT_TORCH = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,
 
 
 class _SafetensorsFile:
-    """Minimal safetensors reader using ordinary file reads — no memory map.
+    """Minimal safetensors reader using ordinary file reads - no memory map.
 
     With a memory map, every page of a 4 GB shard that a block touches stays in the process's working set
     (Windows counts it as used RAM), so streaming a 55 GB model 'fills' memory and the machine starts paging.
@@ -245,7 +245,7 @@ class WeightStore:
 
     def _prepare(self, name: str, t: torch.Tensor, device: str, compact: bool = False) -> torch.Tensor:
         """compact=True (resident copies): keep a smaller stored dtype (bf16 checkpoint, fp32 compute on CPU) and
-        convert when the weight is used — halves the RAM a resident 27B model needs."""
+        convert when the weight is used - halves the RAM a resident 27B model needs."""
         if self.transform is not None:
             t = self.transform(name, t)
         if t.is_floating_point():

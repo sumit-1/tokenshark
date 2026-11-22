@@ -13,7 +13,7 @@ Students learning how open-weight models are adapted do two things:
 Because every plugin in Tokenshark reads weights through `WeightStore` by canonical tensor name
 (`W("model.layers.3.self_attn.q_proj.weight")` or `W("transformer_blocks.0.attn.to_q.weight")`),
 handling LoRAs and fine-tuned checkpoints at the `WeightStore` level means **every model plugin
-gets LoRA & fine-tune support automatically — without writing a new plugin!**
+gets LoRA & fine-tune support automatically - without writing a new plugin!**
 
 Even better, we can inspect the exact per-layer changes (`‖ΔW‖_F`, relative change `‖ΔW‖ / ‖W‖`,
 rank `r`, and which submodules `q_proj`, `k_proj`, `mlp`, etc. were modified) and highlight the

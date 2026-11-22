@@ -1,0 +1,45 @@
+name: CI & Code Quality Guard
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  no-em-dash-and-architecture:
+    name: Guard against em dashes & verify architecture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for forbidden em dashes (U+2014)
+        run: |
+          python -c "
+          import pathlib, sys
+          root = pathlib.Path('.')
+          skip = {'.git', '.venv', 'models', 'data', '__pycache__', '.pytest_cache', 'dist', 'build', 'tokenshark.egg-info'}
+          bins = {'.png', '.gif', '.jpg', '.jpeg', '.webp', '.ico', '.safetensors', '.bin', '.pth', '.pyc', '.pdf'}
+          em = chr(0x2014)
+          esc = chr(92) + 'u2014'
+          bad = []
+          for p in root.rglob('*'):
+              if not p.is_file() or any(part in skip for part in p.parts) or p.suffix.lower() in bins:
+                  continue
+              try:
+                  t = p.read_text(encoding='utf-8')
+              except Exception:
+                  continue
+              if em in t or esc in t:
+                  bad.append(str(p))
+          if bad:
+              print('ERROR: Em dash (U+2014) found in:', ', '.join(bad))
+              sys.exit(1)
+          print('OK: Zero em dashes in repository.')
+          "

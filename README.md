@@ -41,8 +41,8 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 ### Flow Editor & Raw PyTorch Engine
 - **Flow editor.** Each model is drawn as boxes and arrows (`prompt → tokenizer → embed → blocks → norm → head → sampler`, `prompt → CLIP → UNet stages → VAE`, or `prompt → Qwen3-VL → 32 single-stream DiT blocks → Wan VAE`). Re-wire arrows to remove, repeat, or re-order transformer blocks; wire intervention boxes into a block's top port to zero, scale, add noise, mean-ablate, patch, steer, or clamp an activation.
 - **Bypass keeps the block.** A bypassed block stays on the canvas, struck through; the residual stream skips it. Restore it from the right-click menu or the inspector.
-- **Raw PyTorch engine.** No `transformers`, no `diffusers` at runtime. Every matmul is in `tokenshark/llm.py`, `tokenshark/sd.py`, and `tokenshark/qimage.py`, small enough to read in class.
-- **Declarative plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`) that declares its `ui_schema` (tabs, palette actions, training sections) and backend `features`.
+- **Raw PyTorch engine.** No `transformers`, no `diffusers` at runtime. Every matmul is in `tokenshark/llm/`, `tokenshark/sd.py`, and `tokenshark/qimage.py`, small enough to read in class.
+- **Declarative model & feature plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`), and every specialized analysis or intervention feature is a modular extension in `tokenshark/extensions/` (`patching`, `steering`, `neurons`, `moe`, `introspect`, `lora`, `quant`, `training`, `guardrail_fork`, `attn_traceback`, `datasets`) built on `tokenshark/sdk.py` and toggleable live from the **Extensions ▾** header menu.
 
 ### Editable Box Code & Export to Python Script
 - **Editable box code (`tokenshark/blockcode.py`).** Click **View / edit code** on any language-model box (`Embed`, any `Block`, `Final norm`, `LM head`, `Sampler`) to view the exact ~15 lines of Python it runs (`rms_norm`, `heads`, `remember(k, v)`, `rope`, `softmax`, `silu`, `unembed`). Edit the code in the browser (e.g., remove `x = x + mlp_out`, scale `attn_out`, or write a custom sampler) and the engine executes your Python in place of the built-in step, capturing `print(...)` output.
@@ -50,26 +50,28 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 
 ![Editable Box Code](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/editable-box-code.png)
 
-### Mechanistic Interpretability Lab Tools
-- **Activation patching / causal tracing (`Patching` tab).** Run a clean prompt (`"The capital of France is"`) and sweep a corrupted prompt (`"The capital of Japan is"`) across every `(block, token)` pair, copying one activation (`resid_post`, `resid_pre`, `attn_out`, or `mlp_out`) at a time to locate where the model stores a fact. Click any heatmap cell to wire that exact patch into the flow.
-- **Neuron hunting & clamping (`Neurons` tab).** Inspect the strongest MLP neurons in any block (at a chosen token or peak across the run), see their activation across every token, and read the vocabulary words each neuron's `down_proj` column promotes or suppresses. Pin any neuron to `max`, `max ×5`, `min`, `0`, or a custom value.
-- **Steering vectors (`Steering` tab).** Build contrastive directions in the residual stream from two runs (`run A − run B` at a block) or from a word's unembedding row (`"Paris" − "Tokyo"`), save them to `data/vectors/`, and wire them into any block.
-- **Tokenizer explorer & Sampler playground (`Tokenizer` & `Sampler` tabs).** Inspect BPE splits, byte/char ratios, chat-template wrapping, vocabulary search, and cosine-nearest embedding neighbors. In the Sampler tab, adjust temperature, top-k, and top-p live on a captured logit distribution, compute entropy in bits, and draw 200 samples without re-running the model.
+### Mechanistic Interpretability Lab Tools & Modular Extensions
+- **Previous-Token Attention Attribution (`Attention` tab, `tokenshark/extensions/attn_traceback/`).** In addition to single-block heatmaps and QKV head ablation, switch to **Previous-Token Attribution (All Layers × Heads)** to rank every `(block, head)` pair across the entire model for any target token by attention probability, value-weighted output norm $\|\alpha \cdot v W_O\|_2$, and direct target-word logit push, with one-click head knock-out wiring.
+- **Center-Layer Guardrail Fork (`Guardrail` tab & `+ Fork Head` box, `tokenshark/extensions/guardrail_fork/`).** Wire a side-branch classifier (`linear_probe`, `mlp_guard`, or `block_branch`) to any transformer block's bottom `fork` port. Train a fast guardrail head on frozen middle-layer activations (including the built-in `powershell_detector` preset for `PowerShell` vs `Python / General`) and run it in `monitor` mode (live probability telemetry) or `gate` mode (early-exit generation halt at the middle layer).
+- **Activation patching / causal tracing (`Logit lens` & `Patching`, `tokenshark/extensions/patching/`).** Run a clean prompt (`"The capital of France is"`) and sweep a corrupted prompt (`"The capital of Japan is"`) across every `(block, token)` pair, copying one activation (`resid_post`, `resid_pre`, `attn_out`, or `mlp_out`) at a time to locate where the model stores a fact. Click any heatmap cell to wire that exact patch into the flow.
+- **Neuron hunting, contrastive A/B activity & wiring (`Neurons` tab, `tokenshark/extensions/neurons/`).** Inspect the strongest MLP neurons in any block, compare Group A vs. Group B prompt sets, project unembedding directions, and wire detector neurons into writer neurons (`op="wire"`) or clamp neurons (`op="clamp"`).
+- **Steering vectors & subspace projection (`Word cloud` & `Steering`, `tokenshark/extensions/steering/`).** Build contrastive directions in the residual stream from two runs (`run A − run B` at a block) or from a word's unembedding row (`"Paris" − "Tokyo"`), save them to `data/vectors/`, and wire them into any block to steer (`op="steer"`) or erase a direction (`op="project_out"`).
+- **Tokenizer explorer & Sampler playground (`Tokenizer` & `Sampler` tabs).** Inspect BPE splits, word-to-token dictionaries, byte/char ratios, chat-template wrapping, vocabulary search, and cosine-nearest embedding neighbors. In the Sampler tab, adjust temperature, top-k, and top-p live on a captured logit distribution, compute entropy in bits, and draw 200 samples without re-running the model.
 
 | Activation Patching (Causal Tracing Heatmap) | MLP Neuron Hunting, Vocabulary Push & Clamping |
 |---|---|
 | ![Activation Patching](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/activation-patching.png) | ![MLP Neurons](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/neurons.png) |
 
 ### Mixture-of-Experts Models: Routers & Experts You Can See and Change
-- **MoE engine (`tokenshark/llm.py`).** Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE and DeepSeek-V2 (latent attention, YaRN positions, shared experts, grouped routing) run in the same raw PyTorch engine, checked logit-for-logit against `transformers` on tiny models of each family (`tests/test_moe.py`) and on two real checkpoints streamed from disk — the 27 GB `Qwen1.5-MoE-A2.7B-Chat` and the 29 GB `DeepSeek-V2-Lite-Chat` (same top-1 token at every position, logit correlation above 0.999, identical expert routing). The layout (router, per-expert or stacked expert tensors, shared expert) is detected from the checkpoint. With `stream from disk`, only the experts a token is routed to are read.
+- **MoE engine (`tokenshark/llm.py`).** Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE and DeepSeek-V2 (latent attention, YaRN positions, shared experts, grouped routing) run in the same raw PyTorch engine, checked logit-for-logit against `transformers` on tiny models of each family (`tests/test_moe.py`) and on two real checkpoints streamed from disk - the 27 GB `Qwen1.5-MoE-A2.7B-Chat` and the 29 GB `DeepSeek-V2-Lite-Chat` (same top-1 token at every position, logit correlation above 0.999, identical expert routing). The layout (router, per-expert or stacked expert tensors, shared expert) is detected from the checkpoint. With `stream from disk`, only the experts a token is routed to are read.
 - **Experts on the flow graph.** Every MoE block shows one cell per expert, shaded by how many tokens of the last run used it; the newest token's experts are outlined. Click a cell to pick an expert and **ban**, **force** (`only`), **silence** or **amplify** it from the inspector. A block's inspector also sets *experts per token* (`k`) and the *router temperature*.
 - **`Experts` tab (`tokenshark/moe.py`).** Usage of every expert in every block with router entropy; each token coloured by its top expert; the router's full score distribution at a token; what each chosen expert *wrote* there, read as words, and its push for the answer (direct logit attribution per expert); per-expert pages (where it fired, what it writes, which experts it competes with); and a **knock-out sweep** that removes one expert at a time and reports the damage.
-- **Custom routing.** Take the router's job yourself: in a block's inspector build a *custom route* — pick experts and give each a weight (`3=0.7, 5=0.3`; a slider per expert; an empty weight keeps the router's own score; negative weights subtract an expert's write) — for every token or only some. Blocks with a **shared expert** have a switch to turn it off. From Python: `flow.route(block, {3: 0.7, 5: 0.3})`, `flow.shared_expert(block, False)`.
-- **Edits carry through every calculation.** Whatever you change — a banned expert, a custom route, a steering box, edited code — is part of the logit lens, word clouds and word tracking (including *decode through the last k blocks*, which re-runs those blocks as edited), of the patching and knock-out sweeps, and of the introspection experiments, not only of the run itself.
+- **Custom routing.** Take the router's job yourself: in a block's inspector build a *custom route* - pick experts and give each a weight (`3=0.7, 5=0.3`; a slider per expert; an empty weight keeps the router's own score; negative weights subtract an expert's write) - for every token or only some. Blocks with a **shared expert** have a switch to turn it off. From Python: `flow.route(block, {3: 0.7, 5: 0.3})`, `flow.shared_expert(block, False)`.
+- **Edits carry through every calculation.** Whatever you change - a banned expert, a custom route, a steering box, edited code - is part of the logit lens, word clouds and word tracking (including *decode through the last k blocks*, which re-runs those blocks as edited), of the patching and knock-out sweeps, and of the introspection experiments, not only of the run itself.
 
 ![Custom route](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/moe-custom-route.png)
 
-- **Two new hooks, three new ops.** `router` (the scores before top-k: `ban`, `only`, `route`, scale, noise, and `patch` — copy *only the routing* from another run) and `expert_out` (one expert's output before it is weighted and summed). The `Patching` tab can sweep `router`.
+- **Two new hooks, three new ops.** `router` (the scores before top-k: `ban`, `only`, `route`, scale, noise, and `patch` - copy *only the routing* from another run) and `expert_out` (one expert's output before it is weighted and summed). The `Patching` tab can sweep `router`.
 - **Train a tiny MoE (`Train` tab).** Set *Experts per block* > 0: the tiny model gets a router and experts with a load-balancing loss, and a live chart of each expert's share of tokens.
 
 | Experts on the graph + inspector | `Experts` tab: usage, routing, what each expert wrote |
@@ -79,9 +81,9 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 ![Qwen1.5-MoE-A2.7B: 24 blocks × 60 experts, streamed from disk](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/moe-real-experts.png)
 
 ### Introspection Lab (`Introspection` tab, `tokenshark/introspect.py`)
-Classroom-scale versions of two lines of Anthropic research — [Signs of introspection in large language models](https://www.anthropic.com/research/introspection) and [Natural Language Autoencoders](https://www.anthropic.com/research/natural-language-autoencoders) — on whatever open model is loaded:
+Classroom-scale versions of two lines of Anthropic research - [Signs of introspection in large language models](https://www.anthropic.com/research/introspection) and [Natural Language Autoencoders](https://www.anthropic.com/research/natural-language-autoencoders) - on whatever open model is loaded:
 - **Concept injection.** Build concept vectors by contrast, add them at chosen blocks and strengths while the model answers “Do you detect an injected thought?”, and grade the answers (detects → names, false positives on a control trial, coherence). One click wires any trial into the flow as a steering box.
-- **Concept meter.** How strongly every block's residual stream points along a concept, token by token — the measurement behind “think about X / don't think about X”.
+- **Concept meter.** How strongly every block's residual stream points along a concept, token by token - the measurement behind “think about X / don't think about X”.
 - **Activation → words → activation.** A natural-language autoencoder with nothing trained: the model verbalizes one of its own activations (patched into “what does ▢ mean?”), the explanation is read back, and the rebuilt activation is scored against a ceiling and a floor. Type your own explanation and try to beat it.
 
 Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it” with nothing injected); the tab is built to show how, with the controls that make it a measurement.
@@ -92,7 +94,7 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 
 
 ### Multi-Turn Conversations
-- **Write the conversation so far.** The Prompt box has a list of *earlier turns* — user and assistant, in any order — in front of the prompt. With the chat template on each is wrapped as a real turn. Assistant turns are words you put in the model's mouth: plant “The capital of France is Lyon.” and ask a follow-up to watch the model stay consistent with something it never said.
+- **Write the conversation so far.** The Prompt box has a list of *earlier turns* - user and assistant, in any order - in front of the prompt. With the chat template on each is wrapped as a real turn. Assistant turns are words you put in the model's mouth: plant “The capital of France is Lyon.” and ask a follow-up to watch the model stay consistent with something it never said.
 - **Continue after a run.** The Output tab shows the whole conversation and a box for the next message: **Send** moves the exchange into the earlier turns and runs the new turn, with every interceptor, bypass and code edit still in place. *Keep as earlier turns* does the same without running, so the model's answer can be edited first.
 - **Python.** `lab.flow(prompt, history=[{"role": "user", "content": …}, …])`, `flow.say("assistant", "…")`, `run.conversation`, and `run.reply("next message")`.
 
@@ -106,9 +108,9 @@ Small models mostly *fail* these tests (Qwen2.5-0.5B says “yes, I detect it”
 ### LoRA / Fine-Tune Inspector, Quantization & In-Browser Training
 - **LoRA & fine-tune overlay (`LoRA / Fine-tune` tab, `tokenshark/lora.py`).** Attach any Hugging Face PEFT LoRA, Diffusers/Kohya `.safetensors` LoRA, or full fine-tuned checkpoint at the `WeightStore` level. Inspect exact Frobenius norms `‖ΔW‖_F`, relative change `‖ΔW‖ / ‖W‖` per block and module (`q_proj`, `v_proj`, `mlp`), highlight the most-changed blocks on the flow canvas, and slide the LoRA scale live from `-2.0×` (anti-LoRA) to `+3.0×`.
 - **On-the-fly quantization (`Quantize` tab, `tokenshark/quant.py`).** Round block weight matrices on the fly to `8`, `6`, `4`, `3`, `2`, or `1` bit (per-row symmetric RTN), measure per-block rounding error `‖W − round(W)‖ / ‖W‖`, and compare generated text, top-1 agreement, and KL divergence against full precision token-for-token.
-- **Train models from scratch or adapt the loaded LLM (`Train` tab, `tokenshark/train.py`, `tokenshark/adapt.py`, `tokenshark/train_image.py`):**
-  1. **Tiny language model from scratch:** Train a custom Llama-architecture transformer + BPE tokenizer on synthetic facts/counting corpora or your own text in seconds, then load it into the flow editor.
-  2. **6 adaptation methods on the loaded LLM:** Compare `lora`, `full` (chosen matrices), `ia3` (per-row scaling), `norms` (RMSNorm weights), `adapter` (bottleneck layer after chosen blocks), and `new_block` (insert a whole new block initialized as `duplicate`, `average`, `identity`, or `random`).
+- **Train models from scratch or adapt the loaded LLM (`Train` tab, `tokenshark/train.py`, `tokenshark/adapt.py`, `tokenshark/extensions/datasets/`):**
+  1. **Tiny language model from scratch:** Train a custom Llama-architecture or Mixture-of-Experts transformer + BPE tokenizer on synthetic corpora, the built-in **2,000-question `multiarith_cot` step-by-step reasoning dataset**, or custom uploaded `.jsonl`/`.csv`/`.txt` datasets with a HuggingFace-style 2-column Question/Answer preview table, configurable question count (`n_questions`), and custom system prompt.
+  2. **6 adaptation methods on the loaded LLM:** Compare `lora`, `full` (chosen matrices), `ia3` (per-row scaling), `norms` (RMSNorm weights), `adapter` (bottleneck layer after chosen blocks), and `new_block` (insert a whole new block initialized as `duplicate`, `average`, `identity`, or `random`), with 2-column Q&A dataset preview and custom system prompts.
   3. **Tiny flow-matching image model:** Train a 16×16 flow-matching denoiser on colored shapes with a held-out combination (`yellow triangle`) to watch compositional generalization and CFG emerge live.
 
 | In-Browser Training (Tiny LLM, Flow-Matching Image & Adaptation) | LoRA / Fine-Tune Weight Diff Inspector |
@@ -179,7 +181,7 @@ Built-in catalog (`tokenshark/models.json` & `tokenshark/plugins/*.py`):
 | `deepseek-v2-lite-chat` | `causal_lm` (text → text) | 29.3 GB | **MoE + latent attention (MLA)**: 64 experts (6 per token) + shared experts |
 | `qwen3-30b-a3b` | `causal_lm` (text → text) | 56.9 GB | **MoE**: 48 blocks × 128 experts, 8 per token; stream from disk |
 | `mixtral-8x7b-instruct` | `causal_lm` (text → text) | 87.0 GB | **MoE**: 8 large experts, 2 per token; stream from disk (slow) |
-| *your own* | `causal_lm` | < 0.01 GB | a tiny MoE trained in the `Train` tab in minutes — the quickest way to try the Experts tab |
+| *your own* | `causal_lm` | < 0.01 GB | a tiny MoE trained in the `Train` tab in minutes - the quickest way to try the Experts tab |
 | `sd-turbo` | `stable_diffusion` (text → image) | 2.6 GB | UNet, 1–4 steps, no CFG; best first image model |
 | `tiny-sd` | `stable_diffusion` (text → image) | 1.0 GB | distilled SD 1.5 UNet |
 | `sd-1.5` | `stable_diffusion` (text → image) | 2.0 GB | classic UNet with CFG; reference model for cross-attention maps |
@@ -251,38 +253,47 @@ To connect Claude Desktop, Claude Code, or Cursor to a running Tokenshark instan
 
 ```text
 tokenshark/
-  weights.py       WeightStore: safetensors/.bin/.pth, offload policies, per-layer streaming, LoRA/quant hooks
-  llm.py           raw decoder-only LLM: RMSNorm, RoPE (incl. llama3 scaling), GQA, SwiGLU, QK-norm, Gated DeltaNet
-  kvcache.py       pre-RoPE KV cache, per-block recreated caches, hybrid linear memory, prepend/edit
-  sd.py            raw Stable Diffusion: CLIP text encoder, UNet, VAE, Euler scheduler, cross-attn & stage maps
-  qimage.py        raw Qwen-Image 2.1: Qwen3-VL text encoder, 32-block single-stream DiT, Wan VAE, ImageStepper
-  tokenizer.py     tokenizer.json / tiktoken + Jinja chat templates; pure-Python CLIP BPE
-  flow.py          default flows per model; compile flow (boxes + arrows) → plan (schedule + interventions)
-  flowbuild.py     FlowBuilder: fluent Python builder for editing flows in one line per change
-  engine.py        run context, intervention ops (zero, scale, noise, mean, patch, steer, clamp), device/dtype choice
-  interp.py        activation patching sweeps, steering vector library, neuron hunting, tokenizer & sampler tools
-  blockcode.py     editable Python code view and AST-checked execution for LLM flow boxes
-  lora.py          WeightStore-level LoRA & full fine-tune overlay with Frobenius norm diff inspection
-  quant.py         on-the-fly per-row RTN quantization overlay (1–16 bits) and token-by-token KL comparison
-  train.py         differentiable forward pass, TinyJob (train LLM from scratch) & LoRAJob (PEFT LoRA trainer)
-  adapt.py         model adaptation methods beyond LoRA: full, ia3, norms, bottleneck adapter, new_block
-  train_image.py   TinyDenoiser flow-matching trainer on 16×16 colored shapes with CFG and compositional test
-  export.py        export any browser run (and its patch sources) to a reproducible Python script
-  api.py           Lab & RunResult Python API for scripts and notebooks
-  mcp_server.py    pure-stdlib stdio MCP server for AI tutoring
-  server.py        FastAPI routes for models, flows, runs, caches, and step debugger
-  labapi.py        FastAPI routes for patching, steering, neurons, quantization, box code, and training
-  plugins/         modular model plugins (causal_lm.py, stable_diffusion.py, qwen_image_21.py, _template.py)
-  web/             browser UI in plain ES modules + HTML/CSS (core.js, flow.js, paint.js, ui/*, tabs/*)
+  weights.py          WeightStore: safetensors/.bin/.pth, offload policies, per-layer streaming, LoRA/quant hooks
+  sdk.py              FeaturePlugin SDK, extension state toggles, and registries (ops, node kinds, forks, datasets, API, MCP)
+  building_blocks.py  Core interpretability primitives (activation slicing, logit projection, KV analysis, vocab search)
+  llm/                Raw decoder-only LLM package:
+    config.py           ArchConfig & checkpoint shape inference (Llama, Qwen2/3, Hybrid Gated DeltaNet, MoE, DeepSeek MLA)
+    ops.py              Pure PyTorch math: rms_norm, apply_rope, Gated DeltaNet recurrence, int_quantize
+    model.py            RawLLM forward pass, MoE router/experts, and side-branch fork execution
+    stepper.py          Interactive token/block Stepper (unified with Run/Pause/Stop/Continue)
+    analysis.py         Logit lens, through-last-k-blocks decoding, word clouds, and DLA word tracking
+    adapter.py          LLMAdapter entry point
+  kvcache.py          Pre-RoPE KV cache, per-block recreated caches, hybrid linear memory, prepend/edit
+  sd.py               Raw Stable Diffusion: CLIP text encoder, UNet, VAE, Euler scheduler, cross-attn & stage maps
+  qimage.py           Raw Qwen-Image 2.1: Qwen3-VL text encoder, 32-block single-stream DiT, Wan VAE, ImageStepper
+  tokenizer.py        tokenizer.json / tiktoken + Jinja chat templates; pure-Python CLIP BPE
+  flow.py             Default flows per model; compile flow (boxes + arrows + side-branch forks) → Plan
+  flowbuild.py        FlowBuilder: fluent Python builder for editing flows and wiring interceptors/forks
+  engine.py           Run context, built-in & plugin-registered intervention ops, device/dtype choice
+  blockcode.py        Editable Python code view and AST-checked execution for LLM flow boxes
+  lora.py             WeightStore-level LoRA & full fine-tune overlay with Frobenius norm diff inspection
+  quant.py            On-the-fly per-row RTN quantization overlay (1–16 bits) and token-by-token KL comparison
+  train.py            Differentiable forward pass, TinyJob (train LLM from scratch) & LoRAJob (PEFT LoRA trainer)
+  adapt.py            Model adaptation methods beyond LoRA: full, ia3, norms, bottleneck adapter, new_block
+  train_image.py      TinyDenoiser flow-matching trainer on 16×16 colored shapes with CFG and compositional test
+  export.py           Export any browser run (and its patch sources) to a reproducible Python script
+  api.py              Lab & RunResult Python API for scripts and notebooks (extensible via sdk.py)
+  mcp_server.py       Pure-stdlib stdio MCP server for AI tutoring
+  server/             FastAPI server package (app.py, models_api.py, runs_api.py, kv_api.py, debug_api.py)
+  plugins/            Modular model-family plugins (causal_lm.py, stable_diffusion.py, qwen_image_21.py)
+  extensions/         Modular feature plugins & auto-discovery (patching, steering, neurons, moe, introspect,
+                      lora, quant, training, guardrail_fork, attn_traceback, datasets)
+  web/                Browser UI in plain ES modules + HTML/CSS (core.js, flow.js, paint.js, ui/*, tabs/*)
 tests/
-  test_oracles.py       raw LLM & SD engines vs transformers / diffusers on random weights; KV-cache maths
-  test_features.py      stepper, bypass, word through-k decoding, DLA tracking, region locks, model discovery
+  test_oracles.py       Raw LLM & SD engines vs transformers / diffusers on random weights; KV-cache maths
+  test_features.py      Stepper, bypass, word through-k decoding, DLA tracking, region locks, model discovery
   test_hybrid.py        Qwen3.5/3.6 hybrid Gated DeltaNet + gated attention vs transformers & cache roundtrips
-  test_moe.py           Mixtral / Qwen-MoE / OLMoE vs transformers, router & expert interceptors, expert sweep, tiny MoE, introspection
-  test_qimage.py        raw Qwen-Image 2.1 vs diffusers QwenImage21Pipeline, Prompt-KV, sketch guide, ImageStepper
-  test_lab.py           patching, steering, neurons, layer prompts, box code, quantization, adaptation, MCP, export
-  test_routes.py        end-to-end HTTP API tests for all lab, quantization, code, and training endpoints
-  test_architecture.py  plugin contract & declarative UI schema verification
+  test_moe.py           Mixtral / Qwen-MoE / OLMoE / DeepSeek-V2 vs transformers, router & expert interceptors, introspection
+  test_qimage.py        Raw Qwen-Image 2.1 vs diffusers QwenImage21Pipeline, Prompt-KV, sketch guide, ImageStepper
+  test_lab.py           Patching, steering, neurons, layer prompts, box code, quantization, adaptation, MCP, export
+  test_routes.py        End-to-end HTTP API tests for all lab, quantization, code, and training endpoints
+  test_extensions.py    Extension discovery/toggling, custom ops, guardrail forks, attention traceback, CoT datasets, stepper sync
+  test_architecture.py  Plugin contract & declarative UI schema verification
 ```
 
 ---
@@ -291,7 +302,7 @@ tests/
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests
+pytest
 ```
 
-The test suite (**112 tests** across 7 test modules) verifies numerical equivalence against `transformers` and `diffusers` on random weights, hybrid linear/full attention math, Qwen-Image 2.1 DiT bit-exact schedules and latents, step-by-step debugging, activation patching, steering, neuron clamping, quantization, in-browser training, adaptation methods, and UI plugin contracts.
+The test suite (**157 tests** across 10 test modules) verifies numerical equivalence against `transformers` and `diffusers` on random weights, hybrid linear/full attention math, Qwen-Image 2.1 DiT bit-exact schedules and latents, step-by-step debugging, unified Run/Stop/Step/Continue state preservation, activation patching, steering, neuron clamping/wiring, center-layer guardrail forks, previous-token attention attribution, quantization, in-browser training, adaptation methods, and UI/extension plugin contracts.

@@ -335,7 +335,7 @@ def test_two_prefixes_for_different_blocks(llm):
 
 def test_chat_template_with_run_cache_prefix_has_no_default_system(llm):
     """A cache saved from a whole conversation, prepended with the chat template on, must be followed by the
-    user turn only — not by a fresh template start."""
+    user turn only - not by a fresh template start."""
     ad, info, flow = llm
     import copy
     f = copy.deepcopy(flow)

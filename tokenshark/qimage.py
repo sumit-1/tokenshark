@@ -13,7 +13,7 @@ The model, piece by piece:
   Timestep conditioning ("modulation") is one shared Linear for all blocks: LayerNorm(x)·(1 + scale) before
   attention / MLP and tanh(gate) on what they write back. Text tokens always get the t = 0 modulation, so they
   never depend on the denoising step: the text is pushed through the 32 blocks ONCE and its keys/values are
-  kept — exactly an LLM's KV cache — while every denoising step only computes the image tokens.
+  kept - exactly an LLM's KV cache - while every denoising step only computes the image tokens.
 
   proj_out → velocity v (flow matching: x_t = (1-σ)·x₀ + σ·noise, v ≈ noise − x₀)
   Euler: x ← x + (σ_next − σ)·v ;  σ schedule = linspace(1, 1/N) → exponential shift (resolution dependent)
@@ -66,7 +66,7 @@ class QwenTextEncoder:
         self.cfg = self.model.cfg
         self.tok = LLMTokenizer(tok_root)
         self.device = device
-        # Number of leading system-turn tokens to drop — from the processor's own chat template, as diffusers does.
+        # Number of leading system-turn tokens to drop - from the processor's own chat template, as diffusers does.
         sys_msg = [{"role": "system", "content": [{"type": "text", "text": SYS_PROMPT}]}]
         try:
             head = self.tok.apply_chat(sys_msg, add_generation_prompt=False)
@@ -88,7 +88,7 @@ class QwenTextEncoder:
             x = m.block(l, l, x, cache, ctx, lambda iv: [])
             if progress:
                 progress(l)
-        # the last block's output BEFORE the final RMSNorm — what the DiT was trained on
+        # the last block's output BEFORE the final RMSNorm - what the DiT was trained on
         keep = ids[self.drop_idx:]
         return x[self.drop_idx:], [self.tok.piece(i) for i in keep]
 
@@ -428,9 +428,9 @@ class QwenImageAdapter:
     def _build_text(self, prompt: str, plan: Plan, mod0, boxes: list, prog, f0, f1, label: str) -> dict:
         """The text side every image token reads, block by block.
         Prompt-KV boxes change it per block, like the KV-cache prefixes of the language models:
-          prepend — a hidden prompt computed on its own; in the chosen blocks the main prompt *and* the image see it
+          prepend - a hidden prompt computed on its own; in the chosen blocks the main prompt *and* the image see it
                     in front of the main prompt (positions: shift = before it, negative = at −m…−1, offset = at k).
-          replace — in the chosen blocks the image reads this prompt instead of the main one."""
+          replace - in the chosen blocks the image reads this prompt instead of the main one."""
         if not boxes:
             cache_key = (prompt or " ", tuple(plan.schedule))
             tmemo = self.__dict__.setdefault("_text_memo", {})
@@ -505,7 +505,7 @@ class QwenImageAdapter:
         im = Image.open(io.BytesIO(raw))
         if _has_transparency(im):
             # a drawing on the "noise canvas": the empty parts carry no picture. Put the strokes on neutral grey so
-            # the encoder doesn't see a white page (only the drawn tiles are used — see _drawn_mask).
+            # the encoder doesn't see a white page (only the drawn tiles are used - see _drawn_mask).
             grey = Image.new("RGBA", im.size, (128, 128, 128, 255))
             im = Image.alpha_composite(grey, im.convert("RGBA"))
         im = im.convert("RGBA" if ch == 4 else "RGB").resize((w, h), Image.LANCZOS)
@@ -880,7 +880,7 @@ class ImageStepper:
             self.latents_before.update({k: v for k, v in resume["parent_latents"].items() if k < self.start})
             self.x0s.update({k: v for k, v in resume["parent_x0"].items() if k < self.start})
         elif init is not None and not p.get("guide"):
-            # flow matching: the latent at noise level σ is (1 − σ)·image + σ·noise — so "strength" picks σ to start at
+            # flow matching: the latent at noise level σ is (1 − σ)·image + σ·noise - so "strength" picks σ to start at
             self.start = min(self.n_steps - 1, int(round(self.n_steps * (1 - p.get("strength", 0.6)))))
             s0 = sig[self.start]
             self.lat = ((1 - s0) * init.float() + s0 * noise).to(dit.dtype)
@@ -982,7 +982,7 @@ class ImageStepper:
         else:
             lf = lf + (self.sig[i + 1] - self.sig[i]).to(lf.device) * vf
         if self.lock is not None and i in self.lock["steps"]:
-            # region lock — the image version of forced tokens: pull the painted tiles back to the start
+            # region lock - the image version of forced tokens: pull the painted tiles back to the start
             # image, noised to the level of the next step
             s1 = self.sig[i + 1].to(lf.device)
             target = (1 - s1) * self.init.float() + s1 * self.noise
@@ -1056,7 +1056,7 @@ class ImageStepper:
         return True
 
     def force(self, token_id):
-        raise ValueError("Image generation has no tokens to force — edit the guess instead.")
+        raise ValueError("Image generation has no tokens to force - edit the guess instead.")
 
     # ---------------------------------------------------------------- forcing the image
     @torch.no_grad()

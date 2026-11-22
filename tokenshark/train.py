@@ -3,7 +3,7 @@
 1. `TinyJob` trains a small transformer from scratch (a few hundred thousand parameters, minutes on a laptop
    CPU) and reports the loss as it falls. The result is saved in the same layout as any other model
    (config.json + model.safetensors + tokenizer.json), so it shows up in the model list and every tool of the
-   app — step debugger, logit lens, attention, patching — works on the model the student just trained.
+   app - step debugger, logit lens, attention, patching - works on the model the student just trained.
 
 2. `LoRAJob` trains a LoRA on the loaded language model: the base weights stay frozen and each chosen matrix
    gets a low-rank update  W + (α/r)·B·A.  The result is saved in PEFT format and attached, so it opens in the
@@ -34,7 +34,7 @@ def moe_mlp(W, lay: dict, moe: dict, act, h: torch.Tensor, on_route=None) -> tor
     """The MLP of a mixture-of-experts block, with gradients (same maths as RawLLM._moe_mlp).
 
     h [..., d]. The router scores every expert for every token; the k best run and their outputs are added,
-    weighted by the router's softmax scores. Gradients reach the router only through those weights — an expert
+    weighted by the router's softmax scores. Gradients reach the router only through those weights - an expert
     that is never chosen never learns, which is why training adds a load-balancing term (see TinyJob)."""
     shape = h.shape
     h = h.reshape(-1, shape[-1])
@@ -434,7 +434,7 @@ class TinyJob(Job):
                            "final_loss": self.losses[-1][1] if self.losses else None}}, indent=1))
         save_file({k: v.detach().contiguous() for k, v in P.items()}, str(self.out / "model.safetensors"))
         self.result = {"model_id": self.out.name, "path": str(self.out), "n_params": self.n_params, "vocab": V}
-        self.message = f"saved as model “{self.out.name}” — pick it in the model list and press Load"
+        self.message = f"saved as model “{self.out.name}” - pick it in the model list and press Load"
 
 
 # ======================================================================================
@@ -597,7 +597,7 @@ class LoRAJob(Job):
                 if self.probe:
                     with self.tasks.slot(task):
                         self.samples.append({"step": self.step, "text": self.generate(ad, self.probe), "label": "after"})
-            self.message = f"saved to {self.out}" + (" and attached — see the LoRA / Fine-tune tab" if self.attach else "")
+            self.message = f"saved to {self.out}" + (" and attached - see the LoRA / Fine-tune tab" if self.attach else "")
             self.tasks.finish(task, "cancelled" if self.stop else "done")
         except Exception as e:
             self.tasks.finish(task, error=f"{type(e).__name__}: {e}")

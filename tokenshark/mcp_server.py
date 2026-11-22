@@ -1,7 +1,7 @@
 """MCP server: lets an LLM (Claude, or any MCP client) use Tokenshark as a teacher would.
 
-The server talks to a running Tokenshark over its local HTTP API, so everything the LLM does — runs,
-interventions, patching sweeps — also appears in the student's browser (Runs tab → click a run), where the
+The server talks to a running Tokenshark over its local HTTP API, so everything the LLM does - runs,
+interventions, patching sweeps - also appears in the student's browser (Runs tab → click a run), where the
 student can open the lens, attention and neuron views on it. Start the app first, then point a client at:
 
     python -m tokenshark.mcp_server                       # app at http://127.0.0.1:8000
@@ -11,8 +11,8 @@ Claude Desktop / Claude Code config:
     {"mcpServers": {"tokenshark": {"command": "<path to .venv python>", "args": ["-m", "tokenshark.mcp_server"],
                                    "cwd": "<folder of this project>"}}}
 
-Protocol: MCP over stdio (JSON-RPC 2.0, one JSON object per line). Pure standard library — no torch, no
-MCP SDK — so it starts instantly; the model stays in the app's process.
+Protocol: MCP over stdio (JSON-RPC 2.0, one JSON object per line). Pure standard library - no torch, no
+MCP SDK - so it starts instantly; the model stays in the app's process.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from .flowbuild import FlowBuilder
 URL = "http://127.0.0.1:8000"
 PROTOCOL = "2025-06-18"
 
-GUIDE = """Tokenshark — guide for a tutor
+GUIDE = """Tokenshark - guide for a tutor
 
 What it is: a glass-box lab for open-weight models. A language model is drawn as a flow of boxes
 (prompt → tokenizer → embed → blocks → final norm → LM head → sampler). You can run it, look inside every block,
@@ -200,7 +200,7 @@ def t_load_model(model_id: str, policy: str = "auto", timeout: float = 600):
         if s["status"] == "ready" and (s.get("model") or {}).get("model_id") == model_id:
             return t_status()
         time.sleep(1)
-    return {"status": "still loading (large models download first) — call status again in a while"}
+    return {"status": "still loading (large models download first) - call status again in a while"}
 
 
 def t_run_prompt(prompt: str, system: str | None = None, prefill: str | None = None, chat: bool | None = None,
@@ -527,7 +527,7 @@ TOOLS = {
                            {"prompt": S, "bits": {"type": "array", "items": I}, "max_new_tokens": I}, ["prompt"]),
     "block_code": _tool(t_block_code, "The simple Python a box runs (kind: block | embed | final_norm | lm_head | sampler). Edit it and pass it in a code edit.",
                         {"layer": I, "kind": S}),
-    "export_script": _tool(t_export_script, "A run as a Python script (tokenshark.api) that reproduces it — for moving a lab result into a notebook.", RUN, ["run_id"]),
+    "export_script": _tool(t_export_script, "A run as a Python script (tokenshark.api) that reproduces it - for moving a lab result into a notebook.", RUN, ["run_id"]),
 }
 
 

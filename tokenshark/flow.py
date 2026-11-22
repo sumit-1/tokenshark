@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 # --------------------------------------------------------------------------------------
-# Plan data model (serialisable — stored in every run manifest)
+# Plan data model (serialisable - stored in every run manifest)
 # --------------------------------------------------------------------------------------
 
 LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_heads", "attn_out", "router", "expert_out", "mlp_neurons",
@@ -30,14 +30,14 @@ UNET_HOOKS = ["out", "skip", "both", "word"]
 DIT_HOOKS = ["out"]
 OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
 # Language-model ops that need something from outside the run (or project along a vector):
-#   patch       — copy this activation from another run (activation patching; `ref` = that run's id)
-#   steer       — add `value` × a saved direction to the activation (`ref` = steering-vector id)
-#   project_out — remove (value=1) or scale the component along a saved direction (`ref` = vector id)
-#   clamp       — pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
-#   wire        — wire detector neuron(s) (`source_neurons`) into writer neuron(s) (`neurons`) with `value` × relu(src - `threshold`)
-#   quantize    — round this tensor / block's weights / KV cache to `value` bits (1..16)
-#   ban / only  — mixture-of-experts router: these experts can never be chosen / are the only ones that can
-#   route       — mixture-of-experts router: use exactly these experts and weights ("3=0.6, 17=0.4")
+#   patch       - copy this activation from another run (activation patching; `ref` = that run's id)
+#   steer       - add `value` × a saved direction to the activation (`ref` = steering-vector id)
+#   project_out - remove (value=1) or scale the component along a saved direction (`ref` = vector id)
+#   clamp       - pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
+#   wire        - wire detector neuron(s) (`source_neurons`) into writer neuron(s) (`neurons`) with `value` × relu(src - `threshold`)
+#   quantize    - round this tensor / block's weights / KV cache to `value` bits (1..16)
+#   ban / only  - mixture-of-experts router: these experts can never be chosen / are the only ones that can
+#   route       - mixture-of-experts router: use exactly these experts and weights ("3=0.6, 17=0.4")
 LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "wire", "ban", "only", "route"]
 PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "router", "mlp_out", "resid_post"]
 CODE_KINDS = ["embed", "block", "final_norm", "lm_head", "sampler"]     # boxes whose Python can be edited
@@ -59,14 +59,14 @@ class Intervention:
     hook: str
     op: str
     value: float = 1.0
-    positions: str = "all"   # token positions (LLM) — all | last | prompt | prefill | generated | a:b | 1,2,5
-    steps: str = "all"       # step range (diffusion) — all | a:b | 3
+    positions: str = "all"   # token positions (LLM) - all | last | prompt | prefill | generated | a:b | 1,2,5
+    steps: str = "all"       # step range (diffusion) - all | a:b | 3
     seed: int = 0
-    heads: str = "all"       # attention heads for hook attn_heads — all | a:b | 1,4
-    region: str = ""         # image models: painted mask (PNG data URL) — the intervention only acts there
+    heads: str = "all"       # attention heads for hook attn_heads - all | a:b | 1,4
+    region: str = ""         # image models: painted mask (PNG data URL) - the intervention only acts there
     ref: str = ""            # patch: source run id · steer: steering-vector id · clamp: run whose min/max to use
     src_positions: str = ""  # patch: token(s) to copy from in the source run ("" = the same token index)
-    neurons: str = "all"     # which units of the activation's last axis the op touches — all | 12 | 3,7 | 0:64
+    neurons: str = "all"     # which units of the activation's last axis the op touches - all | 12 | 3,7 | 0:64
     source_neurons: str = "" # wire: detector neuron(s) whose relu(act - threshold) drives the target `neurons`
     threshold: float = 0.0   # wire: activation threshold subtracted before ReLU
     clamp: str = "max"       # clamp: max | min | value
@@ -504,7 +504,7 @@ def compile_flow(flow: dict, info: dict) -> Plan:
     while True:
         nxt = [t for t in out_by_src.get(cur, [])]
         if len(nxt) == 0:
-            err(f"The residual stream stops at '{nodes[cur]['data']['label']}' — connect it onward to "
+            err(f"The residual stream stops at '{nodes[cur]['data']['label']}' - connect it onward to "
                 f"'{end_k}'.", cur)
             break
         if len(nxt) > 1:

@@ -102,7 +102,7 @@ class CausalLMPlugin(ModelPlugin):
             "size_gb": 26.7,
             "notes": (
                 "Mixture of experts: 24 blocks, 60 experts (4 per token) plus a shared expert every token uses. "
-                "~27 GB in bf16 — 'RAM → device' or 'stream from disk'."
+                "~27 GB in bf16 - 'RAM → device' or 'stream from disk'."
             ),
         },
         {
@@ -113,7 +113,7 @@ class CausalLMPlugin(ModelPlugin):
             "size_gb": 29.3,
             "notes": (
                 "Mixture of experts with latent attention (MLA): 27 blocks, 64 experts (6 per token) plus shared "
-                "experts; the first block is dense. ~29 GB — 'RAM → device' or 'stream from disk' (about a minute for a "
+                "experts; the first block is dense. ~29 GB - 'RAM → device' or 'stream from disk' (about a minute for a "
                 "short answer when streamed)."
             ),
         },
@@ -124,7 +124,7 @@ class CausalLMPlugin(ModelPlugin):
             "repo": "Qwen/Qwen3-30B-A3B",
             "size_gb": 56.9,
             "notes": (
-                "Mixture of experts: 48 blocks, 128 experts (8 per token): 30B weights, about 3B active. ~57 GB — "
+                "Mixture of experts: 48 blocks, 128 experts (8 per token): 30B weights, about 3B active. ~57 GB - "
                 "use 'stream from disk'; only the experts a token is routed to are read."
             ),
         },
@@ -135,7 +135,7 @@ class CausalLMPlugin(ModelPlugin):
             "repo": "mistralai/Mixtral-8x7B-Instruct-v0.1",
             "size_gb": 87.0,
             "notes": (
-                "Mixture of experts: 32 blocks, 8 large experts (2 per token). ~87 GB — 'stream from disk' only, "
+                "Mixture of experts: 32 blocks, 8 large experts (2 per token). ~87 GB - 'stream from disk' only, "
                 "and slow: each expert is 2.6 GB."
             ),
         },
@@ -147,7 +147,7 @@ class CausalLMPlugin(ModelPlugin):
             "size_gb": 55.0,
             "notes": (
                 "Hybrid: 48 Gated DeltaNet (linear-attention) + 16 gated-attention blocks, 64 total. "
-                "~55 GB in bf16 — use 'stream from disk' (or 'RAM → device' with 64 GB+ RAM)."
+                "~55 GB in bf16 - use 'stream from disk' (or 'RAM → device' with 64 GB+ RAM)."
             ),
         },
     ]

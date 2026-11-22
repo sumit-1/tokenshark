@@ -1,4 +1,4 @@
-"""Train a tiny image model from scratch — the same recipe as Qwen-Image, small enough to watch.
+"""Train a tiny image model from scratch - the same recipe as Qwen-Image, small enough to watch.
 
 Big image models are trained with *flow matching*. The whole idea fits in four lines:
 
@@ -13,7 +13,7 @@ To make a picture, start from pure noise and walk the other way in a few steps (
 
 Here the pictures are 16×16 coloured shapes and the "prompt" is two words (a colour and a shape), each with
 its own embedding. One combination is never shown during training: if the model draws it anyway, it has
-learned colour and shape as separate ideas it can combine — the small version of what lets a big model draw
+learned colour and shape as separate ideas it can combine - the small version of what lets a big model draw
 things nobody photographed.
 
 Guidance (CFG) is trained the usual way: for some examples the prompt is dropped, so the same model can also
@@ -205,5 +205,5 @@ class ImageJob(Job):
                 self.message = f"step {step}/{self.steps} · loss {loss.item():.3f}"
             if step % max(1, self.steps // 5) == 0 or step == self.steps:
                 self.grids.append({"step": step, "url": self.grid()})
-        self.message = (f"trained for {self.step} steps — try the sampler below "
+        self.message = (f"trained for {self.step} steps - try the sampler below "
                         f"(the {HELD_OUT[0]} {HELD_OUT[1]} was never in the training pictures)")

@@ -1,8 +1,8 @@
 """Tokenizers without transformers.
 
-* LLMTokenizer — Hugging Face tokenizer.json (via the `tokenizers` package) or a Meta Llama-3
+* LLMTokenizer - Hugging Face tokenizer.json (via the `tokenizers` package) or a Meta Llama-3
   tiktoken `tokenizer.model`; chat templates rendered with jinja2 from tokenizer_config.json.
-* CLIPTokenizer — pure-Python byte-pair encoder for Stable Diffusion's CLIP text encoder.
+* CLIPTokenizer - pure-Python byte-pair encoder for Stable Diffusion's CLIP text encoder.
 """
 from __future__ import annotations
 

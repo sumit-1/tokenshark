@@ -6,7 +6,7 @@ of the built-in engine: delete the MLP, flip the sign of attention, write your o
 
 The code is a plain script over a small set of names (below). Tensors are torch tensors, so `+ - * / @`,
 `.T`, `.mean()`, slicing … all work. It is checked before it runs: no imports, no names starting with `_`,
-no file access — it is meant for arithmetic on activations, nothing else. This is a guard against accidents
+no file access - it is meant for arithmetic on activations, nothing else. This is a guard against accidents
 and against flows received from other people, not a security sandbox.
 
 Names available in every box
@@ -129,7 +129,7 @@ def _exec(code: Code, names: dict, ctx) -> dict:
 
     g = {"__builtins__": {**_BUILTINS, "print": _print}, **_MATH, **names}
     try:
-        exec(code.compiled, g)       # noqa: S102 — checked by check(); this is the feature
+        exec(code.compiled, g)       # noqa: S102 - checked by check(); this is the feature
     except Exception as e:
         ln = next((f.lineno for f in reversed(traceback.extract_tb(e.__traceback__)) if f.filename == code.filename), None)
         line = code.source.splitlines()[ln - 1].strip() if ln and ln <= len(code.source.splitlines()) else ""
@@ -291,7 +291,7 @@ def run_sampler(code: Code, logits: torch.Tensor, params: dict, gen: torch.Gener
 def default_code(kind: str, model=None, layer: int = 0) -> dict:
     """{"code": source or None, "editable": bool, "reason": why not}. `model` is a RawLLM."""
     if kind == "embed":
-        return _ok("# ids: the ids of the new tokens. Look up one vector per token —\n"
+        return _ok("# ids: the ids of the new tokens. Look up one vector per token - \n"
                    "# that vector is the start of the residual stream.\n"
                    "x = embedding(ids)\n")
     if kind == "final_norm":

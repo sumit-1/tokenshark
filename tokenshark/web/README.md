@@ -56,8 +56,7 @@ so `setTab('output')` opens whichever one the loaded model's plugin lists.
 2. Import it in `app.js` (`import './tabs/mytab.js'`).
 3. Add `"mytab"` to `ui_schema["tabs"]` of every plugin whose models it works for.
 
-If the tab needs data from the server, add a route (see `tokenshark/labapi.py`) and guard it with
-`_need("<feature>", "My tool")`; list that feature in the plugins that support it.
+If the tab needs data from the server, add a route in a modular extension under `tokenshark/extensions/<name>/` (or `tokenshark/server/`) and guard it with `_need("<feature>", "My tool")`; list that feature in the plugins that support it.
 
 ## Talk through events, not imports
 
