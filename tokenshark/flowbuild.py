@@ -171,7 +171,8 @@ class FlowBuilder:
 
     # ---------------------------------------------------------------- interceptors
     def intercept(self, block, hook: str = "mlp_out", op: str = "zero", value: float = 0.0, positions: str = "all",
-                  heads: str = "all", neurons: str = "all", ref: str = "", src_positions: str = "", clamp: str = "max",
+                  heads: str = "all", neurons: str = "all", source_neurons: str = "", threshold: float = 0.0,
+                  ref: str = "", src_positions: str = "", clamp: str = "max",
                   seed: int = 0, steps: str = "all", label: str = "", experts: str = "all") -> str:
         """Wire an interceptor box into a block. Returns the new box's id."""
         ref = getattr(ref, "id", ref)             # a RunResult or a vector dict/id
@@ -179,9 +180,10 @@ class FlowBuilder:
             ref = ref["id"]
         return self._add("iv", self.node(block)["id"], "mod", {
             "kind": "intervention", "label": label or f"{op} @ {hook}", "hook": hook, "op": op, "value": value,
-            "positions": str(positions), "heads": str(heads), "neurons": str(neurons), "ref": ref or "",
-            "src_positions": str(src_positions), "clamp": clamp, "seed": seed, "steps": steps, "enabled": True,
-            "experts": str(experts)})
+            "positions": str(positions), "heads": str(heads), "neurons": str(neurons),
+            "source_neurons": str(source_neurons), "threshold": float(threshold),
+            "ref": ref or "", "src_positions": str(src_positions), "clamp": clamp, "seed": seed,
+            "steps": steps, "enabled": True, "experts": str(experts)})
 
     intervene = intercept
 
@@ -210,6 +212,17 @@ class FlowBuilder:
         """Pin MLP neurons of `block` to their max / min (× value) or to a fixed value (to='value')."""
         return self.intercept(block, hook=hook, op="clamp", neurons=str(neurons), clamp=to, value=value, ref=ref,
                               positions=positions, label=f"neuron {neurons} → {to}")
+
+    def wire(self, block, source, target, strength: float = 3.0, threshold: float = 0.0,
+             positions: str = "all", experts: str = "all", label: str = "") -> str:
+        """Wire detector neuron(s) `source` into writer neuron(s) `target` in `block`'s MLP:
+        neurons[:, target] += strength * relu(neurons[:, source] - threshold)."""
+        src_s = ",".join(map(str, source)) if isinstance(source, (list, tuple)) else str(source)
+        tgt_s = ",".join(map(str, target)) if isinstance(target, (list, tuple)) else str(target)
+        th_lbl = f" (>{threshold:g})" if threshold else ""
+        return self.intercept(block, hook="mlp_neurons", op="wire", source_neurons=src_s, neurons=tgt_s,
+                              value=float(strength), threshold=float(threshold), positions=positions,
+                              experts=experts, label=label or f"wire {src_s} → {tgt_s} ×{strength:g}{th_lbl}")
 
     # ---------------------------------------------------------------- mixture of experts
     def ban_experts(self, block, experts, positions: str = "all") -> str:
@@ -339,3 +352,57 @@ class FlowBuilder:
         else:
             d["code"] = source
         return self
+
+    def apply_edits(self, edits: list[dict] | None):
+        """Apply a list of declarative edit dicts (used by MCP and /api/workspace/edit) to this flow."""
+        for raw in edits or []:
+            e = dict(raw)
+            do = e.pop("do", None)
+            blk = e.pop("block", None)
+            try:
+                if do == "bypass":
+                    self.bypass(blk)
+                elif do == "schedule":
+                    self.schedule(list(e["order"]))
+                elif do in ("intervene", "intercept"):
+                    self.intercept(blk, **e)
+                elif do == "patch":
+                    self.patch(blk, e.pop("source_run"), **e)
+                elif do == "steer":
+                    self.steer(blk, e.pop("vector"), **e)
+                elif do == "project_out":
+                    self.project_out(blk, e.pop("vector"), **e)
+                elif do == "quantize":
+                    self.quantize_block(blk, **e)
+                elif do == "clamp":
+                    self.clamp(blk, e.pop("neurons"), **e)
+                elif do == "wire":
+                    src_n = e.pop("source", e.pop("source_neurons", None))
+                    tgt_n = e.pop("target", e.pop("neurons", None))
+                    if "value" in e and "strength" not in e:
+                        e["strength"] = e.pop("value")
+                    self.wire(blk, src_n, tgt_n, **e)
+                elif do in ("kv_override", "block_kv"):
+                    self.kv_override(blk if blk is not None else e.pop("blocks", e.pop("layers", "all")), **e)
+                elif do in ("replace_system", "append_system", "prepend_system", "replace_user", "append_user", "prepend_user"):
+                    getattr(self, do)(e.pop("text", ""), blocks=blk if blk is not None else e.pop("blocks", e.pop("layers", "all")), **e)
+                elif do == "code":
+                    self.code(blk if blk is not None else e["box"], e["source"])
+                elif do == "rope":
+                    self.rope(blk if blk is not None else e.pop("blocks", "all"), **e)
+                elif do == "rope_step":
+                    self.rope_step(**e)
+                elif do == "ban_experts":
+                    self.ban_experts(blk, e.pop("experts"), **e)
+                elif do == "only_experts":
+                    self.only_experts(blk, e.pop("experts"), **e)
+                elif do == "route":
+                    self.route(blk, e.pop("weights"), **e)
+                elif do == "shared_expert":
+                    self.shared_expert(blk, bool(e.pop("enabled", False)))
+                else:
+                    raise ValueError(f"Unknown edit '{do}'.")
+            except (KeyError, TypeError) as ex:
+                raise ValueError(f"Edit {do!r}: {ex}") from None
+        return self
+

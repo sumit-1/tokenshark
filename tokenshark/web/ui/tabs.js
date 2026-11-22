@@ -1,6 +1,6 @@
 // The results panel: a row of tabs and the panel under it. This module knows nothing about individual tabs:
 // each tab registers itself (core.registerTab) and the loaded model's plugin lists the ones it supports.
-import { $, S, TABS, el, on, schema } from '../core.js'
+import { $, POST, S, TABS, el, on, schema } from '../core.js'
 
 const NO_MODEL = ['train', 'runs']          // what makes sense before a model is loaded
 
@@ -31,13 +31,19 @@ export function buildNav() {
 }
 const markNav = () => document.querySelectorAll('#tabs button[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === S.tab))
 
-export function setTab(name) {
+export function setTab(name, fromSync = false) {
   const t = resolve(name) || tabList()[0]
   if (!t) return
+  const prev = S.tab
   S.tab = nameOf(t)
   markNav()
   renderTab()
   t.onOpen?.()
+  if (!fromSync && !S.wsApplying && prev !== S.tab && S.info) {
+    POST('/api/workspace', { tab: S.tab, client_id: S.clientId, actor: 'browser' }).then(ws => {
+      if (ws?.version != null) S.wsVersion = ws.version
+    }).catch(() => {})
+  }
 }
 
 export function renderTab() {

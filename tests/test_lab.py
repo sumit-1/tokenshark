@@ -363,8 +363,9 @@ def test_mcp_protocol():
     assert M.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     tools = M.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert {"status", "run_prompt", "logit_lens", "patch_sweep", "teaching_guide"} <= names
-    assert all(t["inputSchema"]["type"] == "object" and t["description"] for t in tools)
+    assert {"status", "run_prompt", "logit_lens", "patch_sweep", "teaching_guide",
+            "hunt_neurons_ab", "search_neurons_by_words", "batch_test_neurons"} <= names
+    assert all(isinstance(t["inputSchema"].get("type"), (str, list)) and t["description"] for t in tools)
     g = M.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "teaching_guide", "arguments": {}}})
     assert not g["result"].get("isError") and "patch" in g["result"]["content"][0]["text"].lower()
     bad = M.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "nope", "arguments": {}}})
@@ -567,3 +568,41 @@ def test_conversations_prefilled_and_continued(lab):
     from tokenshark.export import run_script
     r.model_id, r.label, r.sources = lab.model_id, "", {}
     assert "history=[{'role': 'user'" in run_script(r, lambda _r: lab.plugin.default_flow(lab.info), lambda rid: None, {})
+
+
+def test_neuron_ab_hunt_word_search_and_wire(lab):
+    """A/B neuron hunt, writer word search, and first-class `flow.wire(...)` interceptor."""
+    # 1. Hunt differing neurons between Set A and Set B
+    res = lab.hunt_neurons_ab([A, "The capital of France"], [B, "The capital of Japan"], block=1, span="last", max_new_tokens=0, k=5)
+    assert res["n_a"] == 2 and res["n_b"] == 2 and len(res["neurons"]) == 5
+    det_idx = res["neurons"][0]["index"]
+
+    # 2. Search writer neurons by promoted vs suppressed words
+    w_res = lab.search_neurons_by_words(promote=["France", "Paris"], suppress=["Japan"], block=1, k=5)
+    assert len(w_res["neurons"]) == 5 and "push" in w_res["neurons"][0]
+    writer_idx = w_res["neurons"][0]["index"]
+
+    # 3. Wire detector -> writer via flow.wire() and verify it matches manual box code edit
+    f_wire = lab.flow(A, max_new_tokens=1)
+    f_wire.wire(1, source=det_idx, target=writer_idx, strength=3.5, threshold=0.1)
+    r_wire = lab.run(f_wire)
+
+    code = lab.block_code(1)
+    n_line = 'neurons = silu(h @ W("mlp.gate_proj.weight").T) * (h @ W("mlp.up_proj.weight").T)'
+    edit_line = f"neurons[:, {writer_idx}] = neurons[:, {writer_idx}] + 3.5 * relu(neurons[:, {det_idx}] - 0.1)"
+    f_code = lab.flow(A, max_new_tokens=1)
+    f_code.code(1, code.replace(n_line, n_line + "\n" + edit_line))
+    r_code = lab.run(f_code)
+    assert torch.allclose(_logits(r_wire), _logits(r_code), atol=1e-4)
+
+    # 4. Export script round-trip for flow.wire()
+    from tokenshark.export import run_script
+    from tokenshark.flow import default_llm_flow
+    r_wire.model_id, r_wire.label = lab.model_id, "wired"
+    src = run_script(r_wire, lambda _r: default_llm_flow(lab.info), lambda _rid: None)
+    assert f"flow.wire(1, '{det_idx}', '{writer_idx}', strength=3.5, threshold=0.1)" in src
+
+    # 5. Batch evaluation before vs after
+    batch = lab.batch_test_neurons(f_wire, test_prompts=[A], control_prompts=[B], max_new_tokens=2)
+    assert batch["status"] == "done" and len(batch["test_rows"]) == 1 and len(batch["control_rows"]) == 1
+

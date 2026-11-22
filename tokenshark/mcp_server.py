@@ -55,6 +55,9 @@ Lessons that work (in this order for newcomers)
                   {"do":"steer","block":6,"vector":<id>,"value":4}. Raise value until the text bends; too much breaks it.
   Neurons         top_neurons on a block → pick one with readable "promotes" words → clamp it:
                   {"do":"clamp","block":4,"neurons":"1021","to":"max","value":5}.
+                  Or run an A/B neuron hunt (hunt_neurons_ab) on Set A vs Set B prompts to find a detector neuron,
+                  find a writer neuron with search_neurons_by_words, and wire them together on the flow graph:
+                  {"do":"wire","block":19,"source":"2751","target":"2282","strength":3,"threshold":0}.
   Block KV        {"do":"replace_system","text":"You are a pirate.","block":12} (or append_system / replace_user /
                   append_user / prepend_*): recreate that full-attention block's KV cache from a rewritten
                   system/user prompt; the cache then grows as tokens are generated.
@@ -69,6 +72,7 @@ Edits for run_prompt (list of objects, applied in order to the default flow)
   {"do":"patch","block":7,"source_run":"<id>","hook":"resid_post","positions":"last"}
   {"do":"steer","block":6,"vector":"<id>","value":4}
   {"do":"clamp","block":4,"neurons":"12,40","to":"max"|"min"|"value","value":5}
+  {"do":"wire","block":19,"source":"2751","target":"2282","strength":3.0,"threshold":0.0}
   {"do":"replace_system"|"append_system"|"prepend_system"|"replace_user"|"append_user"|"prepend_user",
         "text":"…","block":12}   (or "blocks":"12:24"|"all"; recreates per-block KV)
   {"do":"kv_override","block":12,"op":"replace_system","text":"…"}
@@ -137,47 +141,16 @@ def wait_task(start: dict, timeout: float) -> dict:
 
 
 def build_flow(prompt=None, system=None, prefill=None, chat=None, max_new_tokens=None, temperature=None,
-               top_k=None, top_p=None, seed=None, edits=None) -> dict:
-    fb = FlowBuilder(call("GET", "/api/flow/default"))
+               top_k=None, top_p=None, seed=None, edits=None, base_flow: dict | None = None) -> dict:
+    fb = FlowBuilder(base_flow or call("GET", "/api/flow/default"))
     if any(v is not None for v in (prompt, system, prefill, chat)):
         fb.prompt(prompt=prompt, system=system, prefill=prefill, chat=chat)
     if any(v is not None for v in (max_new_tokens, temperature, top_k, top_p, seed)):
         fb.sampler(max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p, seed=seed)
-    for e in edits or []:
-        e = dict(e)
-        do = e.pop("do", None)
-        blk = e.pop("block", None)
-        try:
-            if do == "bypass":
-                fb.bypass(blk)
-            elif do == "schedule":
-                fb.schedule(list(e["order"]))
-            elif do in ("intervene", "intercept"):
-                fb.intercept(blk, **e)
-            elif do == "patch":
-                fb.patch(blk, e.pop("source_run"), **e)
-            elif do == "steer":
-                fb.steer(blk, e.pop("vector"), **e)
-            elif do == "project_out":
-                fb.project_out(blk, e.pop("vector"), **e)
-            elif do == "quantize":
-                fb.quantize_block(blk, **e)
-            elif do == "clamp":
-                fb.clamp(blk, e.pop("neurons"), **e)
-            elif do in ("kv_override", "block_kv"):
-                fb.kv_override(blk if blk is not None else e.pop("blocks", e.pop("layers", "all")), **e)
-            elif do in ("replace_system", "append_system", "prepend_system", "replace_user", "append_user", "prepend_user"):
-                getattr(fb, do)(e.pop("text", ""), blocks=blk if blk is not None else e.pop("blocks", e.pop("layers", "all")), **e)
-            elif do == "code":
-                fb.code(blk if blk is not None else e["box"], e["source"])
-            elif do == "rope":
-                fb.rope(blk if blk is not None else e.pop("blocks", "all"), **e)
-            elif do == "rope_step":
-                fb.rope_step(**e)
-            else:
-                raise AppError(f"Unknown edit '{do}'. See teaching_guide for the list.")
-        except (KeyError, TypeError) as ex:
-            raise AppError(f"Edit {do!r}: {ex}. See teaching_guide for the fields of each edit.") from None
+    try:
+        fb.apply_edits(edits)
+    except ValueError as ex:
+        raise AppError(f"{ex}. See teaching_guide for the fields of each edit.") from None
     return fb.to_dict()
 
 
@@ -235,8 +208,61 @@ def t_run_prompt(prompt: str, system: str | None = None, prefill: str | None = N
                  top_p: float | None = None, seed: int | None = None, edits: list | None = None, label: str = "",
                  timeout: float = 300):
     flow = build_flow(prompt, system, prefill, chat, max_new_tokens, temperature, top_k, top_p, seed, edits)
-    r = call("POST", "/api/runs", {"flow": flow, "label": label or "tutor"})
+    r = call("POST", "/api/runs", {"flow": flow, "label": label or "tutor", "actor": "mcp"})
     return show_run(wait_run(r["run"]["id"], timeout))
+
+
+def t_get_workspace():
+    """Return what is currently on the shared browser screen: active flow, prompt/system, KV overrides,
+    interceptors, active run, and open tab."""
+    ws = call("GET", "/api/workspace")
+    flow = ws.get("flow") or {}
+    nodes = flow.get("nodes") or []
+    p_node = next((n["data"] for n in nodes if (n.get("data") or {}).get("kind") == "input_prompt"), {})
+    s_node = next((n["data"] for n in nodes if (n.get("data") or {}).get("kind") == "sampler"), {})
+    ivs = [n["data"] for n in nodes if (n.get("data") or {}).get("kind") == "intervention"]
+    bkvs = [n["data"] for n in nodes if (n.get("data") or {}).get("kind") == "block_kv"]
+    return {
+        "version": ws.get("version"),
+        "model_id": ws.get("model_id"),
+        "active_run_id": ws.get("active_run_id"),
+        "tab": ws.get("tab"),
+        "selected": ws.get("selected"),
+        "actor": ws.get("actor"),
+        "notice": ws.get("notice"),
+        "prompt": p_node.get("prompt"),
+        "system": p_node.get("system"),
+        "prefill": p_node.get("prefill"),
+        "use_chat_template": p_node.get("use_chat_template"),
+        "sampler": {k: s_node.get(k) for k in ("max_new_tokens", "temperature", "top_k", "top_p", "seed") if k in s_node},
+        "kv_overrides": bkvs,
+        "interventions": ivs,
+        "n_nodes": len(nodes),
+    }
+
+
+def t_edit_flow(prompt: str | None = None, system: str | None = None, prefill: str | None = None,
+                chat: bool | None = None, max_new_tokens: int | None = None, temperature: float | None = None,
+                top_k: int | None = None, top_p: float | None = None, seed: int | None = None,
+                edits: list | None = None, reset: bool = False, tab: str | None = None, notice: str = ""):
+    """Modify the live shared flow in the user's browser (and optionally switch their active tab) without
+    starting a run yet, or incrementally add edits onto what the user currently has on screen."""
+    res = call("POST", "/api/workspace/edit", {
+        "prompt": prompt, "system": system, "prefill": prefill, "chat": chat,
+        "max_new_tokens": max_new_tokens, "temperature": temperature,
+        "top_k": top_k, "top_p": top_p, "seed": seed,
+        "edits": edits, "reset": reset, "tab": tab, "actor": "mcp", "notice": notice,
+    })
+    plan = res.get("plan") or {}
+    return {
+        "ok": True,
+        "workspace_version": res.get("version"),
+        "tab": res.get("tab"),
+        "notice": res.get("notice"),
+        "schedule": plan.get("schedule"),
+        "n_interventions": len(plan.get("interventions") or []),
+        "kv_overrides": plan.get("params", {}).get("kv_overrides") or [],
+    }
 
 
 def t_get_run(run_id: str):
@@ -287,6 +313,57 @@ def t_neuron(run_id: str, block: int, index: int):
     d = call("GET", f"/api/runs/{run_id}/neuron?{q(pos=block, index=index)}")
     d["acts"] = [[f"{i}:{t}", a] for i, (t, a) in enumerate(zip(d.pop("tokens"), d["acts"]))]
     return d
+
+
+def t_hunt_neurons_ab(set_a: list, set_b: list, block: int = -1, span: str = "reply",
+                      max_new_tokens: int = 14, k: int = 10, strict: bool = True,
+                      system: str | None = None, chat: bool | None = None, prefill: str | None = None,
+                      timeout: float = 900):
+    """Run Set A vs Set B conversations and rank neurons that differ the most (active in all A, quiet in B)."""
+    start = call("POST", "/api/neurons/hunt_ab", {
+        "set_a": set_a, "set_b": set_b, "pos": block, "span": span,
+        "max_new_tokens": max_new_tokens, "k": k, "strict": strict,
+        "system": system, "chat": chat, "prefill": prefill,
+    }, timeout=timeout)
+    w = wait_task(start, timeout)
+    r = w["result"] or {}
+    return {
+        "status": w["status"],
+        "mode": r.get("mode"),
+        "block": r.get("pos"),
+        "span": r.get("span"),
+        "n_a": r.get("n_a"),
+        "n_b": r.get("n_b"),
+        "n_every_a_and_quiet_b": r.get("n_EveryQuiet"),
+        "neurons": r.get("neurons", [])[:k],
+    }
+
+
+def t_search_neurons_by_words(promote: list | str, suppress: list | str | None = None,
+                              block: int = -1, k: int = 10, use_norm: bool = False):
+    """Find writer neurons in a block (or all blocks) whose `down_proj` column pushes `promote` words over `suppress` words."""
+    return call("POST", "/api/neurons/search_words", {
+        "promote": promote, "suppress": suppress, "pos": block, "k": k, "use_norm": use_norm,
+    })
+
+
+def t_batch_test_neurons(test_prompts: list, control_prompts: list | None = None,
+                         edits: list | None = None, max_new_tokens: int = 40,
+                         keyword_regex: str = r"(can't|cannot|can not|unable|not able)",
+                         system: str | None = None, chat: bool | None = None, prefill: str | None = None,
+                         timeout: float = 900):
+    """Run held-out test_prompts and control_prompts before and after applying `edits` (or the current workspace flow)."""
+    ws = call("GET", "/api/workspace")
+    base_flow = ws.get("flow") if not edits else None
+    flow = build_flow(system=system, prefill=prefill, chat=chat, max_new_tokens=max_new_tokens,
+                      temperature=0.0, edits=edits, base_flow=base_flow)
+    start = call("POST", "/api/neurons/batch_test", {
+        "flow": flow, "test_prompts": test_prompts, "control_prompts": control_prompts or [],
+        "max_new_tokens": max_new_tokens, "keyword_regex": keyword_regex,
+        "system": system, "chat": chat, "prefill": prefill,
+    }, timeout=timeout)
+    w = wait_task(start, timeout)
+    return w["result"] or {"status": w["status"]}
 
 
 def t_tokenize(text: str, chat: bool = False):
@@ -388,9 +465,16 @@ TOOLS = {
     "list_models": _tool(t_list_models, "Models the app can load (id, size, whether already downloaded).", {}),
     "load_model": _tool(t_load_model, "Load a model in the app (downloads it on first use). Small models: qwen2.5-0.5b-instruct, smollm2-360m-instruct.",
                         {"model_id": S, "policy": {**S, "enum": ["auto", "device", "cpu", "disk"]}}, ["model_id"]),
+    "get_workspace": _tool(t_get_workspace, "Inspect the unified shared browser view: current prompt, system prompt, KV overrides, interceptors, active run, and open tab.", {}),
+    "edit_flow": _tool(t_edit_flow, "Modify the live shared flow in the user's browser (wire KV overrides, interceptors, bypasses, or switch tabs) so all users and the LLM see the exact same canvas immediately.",
+                       {"prompt": S, "system": S, "prefill": S, "chat": Bo, "max_new_tokens": I, "temperature": N, "top_k": I, "top_p": N, "seed": I,
+                        "edits": {"type": "array", "items": {"type": "object"}, "description": "see teaching_guide for the edit objects"},
+                        "reset": {**Bo, "description": "true = start from default flow; false = apply on top of the current shared browser flow"},
+                        "tab": {**S, "description": "optional tab to open in the browser (output, kv, lens, attn, neurons, patch, steer, experts, runs)"},
+                        "notice": S}),
     "run_prompt": _tool(t_run_prompt, "Run the loaded language model on a prompt, optionally with edits to the flow (bypass a block, "
-                        "zero an MLP, patch, steer, clamp a neuron, layer prompt, custom block code). Returns the text, the tokens "
-                        "with their indices, and the top choices for the first generated token. The run appears in the student's Runs tab.",
+                        "zero an MLP, patch, steer, clamp a neuron, replace_system/replace_user KV override, custom block code). "
+                        "Updates the shared browser canvas and active run live for all connected users.",
                         {"prompt": S, "system": S, "prefill": {**S, "description": "forced start of the answer"},
                          "chat": {**Bo, "description": "wrap in the chat template (default: the model's own setting)"},
                          "max_new_tokens": I, "temperature": {**N, "description": "0 = greedy"}, "top_k": I, "top_p": N, "seed": I,
@@ -408,6 +492,22 @@ TOOLS = {
                          {**RUN, **BLOCK, "token": TOK, "k": I, "by": {**S, "enum": ["token", "max"]}}, ["run_id", "block"]),
     "neuron": _tool(t_neuron, "One neuron: activation at every token of the run, its range, promoted / suppressed words.",
                     {**RUN, **BLOCK, "index": I}, ["run_id", "block", "index"]),
+    "hunt_neurons_ab": _tool(t_hunt_neurons_ab, "A/B neuron identification: run Set A conversations vs Set B conversations and find detector neurons that fire in every Set A conversation while staying quiet in Set B.",
+                             {"set_a": {"type": "array", "items": S, "description": "Set A prompts (e.g. refund demands)"},
+                              "set_b": {"type": "array", "items": S, "description": "Set B prompts (e.g. neutral questions)"},
+                              "block": {**I, "description": "schedule block index (-1 = scan all blocks)"},
+                              "span": {**S, "enum": ["reply", "last", "generated", "prompt", "all"]},
+                              "max_new_tokens": I, "k": I, "strict": Bo, "system": S, "chat": Bo, "prefill": S}, ["set_a", "set_b"]),
+    "search_neurons_by_words": _tool(t_search_neurons_by_words, "Writer neuron search: rank MLP neurons in a block (or all blocks) by how strongly their down_proj column promotes target words over suppressed words.",
+                                     {"promote": {"type": ["array", "string"], "description": "words to promote, e.g. [' cannot', ' unable']"},
+                                      "suppress": {"type": ["array", "string"], "description": "words to suppress, e.g. [' will', ' confirm']"},
+                                      "block": {**I, "description": "schedule block index (-1 = scan all blocks)"},
+                                      "k": I, "use_norm": Bo}, ["promote"]),
+    "batch_test_neurons": _tool(t_batch_test_neurons, "Evaluate neuron wires/clamps on a batch of test_prompts and control_prompts (before vs after edits), counting keyword matches and byte-identical controls.",
+                                {"test_prompts": {"type": "array", "items": S},
+                                 "control_prompts": {"type": "array", "items": S},
+                                 "edits": {"type": "array", "items": {"type": "object"}, "description": "e.g. [{'do':'wire','block':19,'source':'2751','target':'2282','strength':3}]"},
+                                 "max_new_tokens": I, "keyword_regex": S, "system": S, "chat": Bo, "prefill": S}, ["test_prompts"]),
     "tokenize": _tool(t_tokenize, "Split text into the loaded model's tokens.", {"text": S, "chat": Bo}, ["text"]),
     "token_neighbors": _tool(t_token_neighbors, "Tokens whose embedding is closest to a word's.", {"word": S, "k": I}, ["word"]),
     "next_token_distribution": _tool(t_next_token_distribution, "Probabilities of the next token at a position of a run, at any temperature, with the entropy.",

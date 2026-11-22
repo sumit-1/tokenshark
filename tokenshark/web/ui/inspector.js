@@ -79,6 +79,7 @@ export const FIELDS = {
         ['mean', 'mean — replace by the average over tokens'], ['quantize', 'quantize — round to N bits (1..16)'],
         ['patch', 'patch — copy it from another run'], ['steer', 'steer — add a steering vector'],
         ['project_out', 'project_out — erase / project out a direction'], ['clamp', 'clamp — pin units to a fixed value'],
+        ['wire', 'wire — wire detector neuron(s) into writer neuron(s)'],
         ...(S.info?.moe ? [['ban', 'ban — MoE router: these experts can never be chosen'], ['only', 'only — MoE router: only these experts can be chosen'],
           ['route', 'route — MoE router: use exactly the experts and weights you write']] : [])]]]
     if (['router', 'expert_out', 'mlp_neurons'].includes(hook) && S.info?.moe) f.push(['experts', op === 'route'
@@ -91,10 +92,16 @@ export const FIELDS = {
     if (op === 'clamp') f.push(['clamp', 'Pin to', 'select', [['max', 'max — the largest value it reached'], ['min', 'min — the smallest value it reached'], ['value', 'value — the number below']]],
       ['value', n.data.clamp === 'value' ? 'Value' : 'Multiplier (1 = exactly its max / min, 5 = five times that)', 'number'],
       ['ref', 'Max / min measured in run (empty = this run so far)', 'select', [['', '— this run so far —'], ...keepRef(runs, n.data.ref)]])
+    if (op === 'wire') f.push(
+      ['source_neurons', 'Source / detector neuron(s) (e.g. 2751 or 1431)', 'text'],
+      ['neurons', 'Target / writer neuron(s) (e.g. 2282 or 836,10,1871)', 'text'],
+      ['value', 'Strength (adds strength × relu(source − threshold) to target)', 'number'],
+      ['threshold', 'Threshold on source neuron before ReLU (0 = any positive activation)', 'number'],
+    )
     if (op === 'scale' || op === 'add_noise' || op === 'quantize') f.push(['value', op === 'scale' ? 'Scale factor' : op === 'quantize' ? 'Bit width (1..16 bits)' : 'Noise size σ (× the activation’s spread)', 'number'])
     if (hook !== 'weights') f.push(['positions', 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
     if (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook)) f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
-    if (hook !== 'weights' && hook !== 'router' && hook !== 'rope') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
+    if (op !== 'wire' && hook !== 'weights' && hook !== 'router' && hook !== 'rope') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
     if (op === 'add_noise') f.push(['seed', 'Noise seed', 'number'])
     return f
   },
@@ -173,7 +180,12 @@ export function field(n, [key, label, type, options]) {
     if (type === 'number') v = v === '' ? '' : +v
     flow.updateNodeData(n.id, { [key]: v })
     // these choices decide which other fields the box has
-    if (n.data.kind === 'intervention' && ['op', 'hook', 'clamp'].includes(key)) renderInspector()
+    if (n.data.kind === 'intervention' && ['op', 'hook', 'clamp', 'source_neurons', 'neurons', 'threshold', 'value'].includes(key)) {
+      if (['op', 'hook', 'clamp'].includes(key)) {
+        if (key === 'op' && v === 'wire' && n.data.hook !== 'mlp_neurons') flow.updateNodeData(n.id, { hook: 'mlp_neurons' })
+        renderInspector()
+      }
+    }
     if (n.data.kind === 'intervention' && ['op', 'hook', 'experts', 'enabled'].includes(key)) hooks.refreshBadges?.()
     if (n.data.kind === 'block_kv' && key === 'op') {
       const lab = BLOCK_KV_OP_LABELS[v]
@@ -394,7 +406,29 @@ export function renderNodeResults(n, box) {
     sec.innerHTML = `<h4>Last run · schedule position #${st.pos}</h4>
       <div class="kv"><span>‖resid‖</span><b>${st.resid_norm}</b><span>‖attn out‖</span><b>${st.attn_norm}</b><span>‖mlp out‖</span><b>${st.mlp_norm}</b>
       <span>lens @ last token</span><b>${esc(st.lens_last ?? '')}</b></div>`
-    sec.appendChild(btn('Attention of this block', () => { S.attnPos = st.pos; setTab('attn') }))
+    const row = el('div', { className: 'row' })
+    row.append(btn('Attention of this block', () => { S.attnPos = st.pos; setTab('attn') }),
+      btn('Open KV caches tab', () => setTab('kv')))
+    sec.appendChild(row)
+    if (o.cache && n.data.has_kv !== false) {
+      const bOv = o.cache.block_overrides?.[st.pos] || o.cache.block_overrides?.[String(st.pos)]
+      const kvSrc = bOv || o.cache
+      const segOf = i => (kvSrc.segments || []).find(s => i >= s.start && i < s.end)?.origin || 'prompt'
+      const kvHead = el('h4', {
+        textContent: bOv
+          ? `Block KV cache (${bOv.op} · ${bOv.n_tokens} tokens, ${bOv.n_prompt} recreated prompt)`
+          : `Block KV cache (shared · ${kvSrc.n_tokens} tokens)`,
+      })
+      const kvToks = el('div', { className: 'tokens compact' })
+      ;(kvSrc.tokens || []).forEach((t, i) => {
+        const pos = kvSrc.positions?.[i] ?? i
+        kvToks.appendChild(el('span', {
+          className: `tok seg-${segOf(i)}`,
+          title: `#${i} · origin: ${segOf(i)} · RoPE pos ${pos}`,
+        }, `${esc(t)}<sub>${pos}</sub>`))
+      })
+      sec.append(kvHead, kvToks)
+    }
     if (S.lens) {
       const li = S.lens.layers.findIndex(l => l.node === n.id)
       if (li >= 0) {

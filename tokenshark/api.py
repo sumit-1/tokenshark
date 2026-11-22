@@ -320,6 +320,58 @@ class Lab:
         from . import moe
         return moe.router_rows(self.adapter, layer)
 
+    # ---------------------------------------------------------------- A/B neuron identification & wiring
+    @torch.no_grad()
+    def hunt_neurons_ab(self, set_a: list, set_b: list, block: int = -1, span: str = "reply",
+                        max_new_tokens: int = 14, k: int = 15, strict: bool = True,
+                        system: str | None = None, chat: bool | None = None, prefill: str | None = None,
+                        flow=None) -> dict:
+        """Find neurons that differ the most between Set A and Set B conversations (A/B testing).
+        Each item in `set_a` / `set_b` can be a prompt string, a conversation dict, or a `RunResult`.
+        """
+        plan = self.plan(flow or self.flow("x", system=system or "", chat=True if chat is None else chat))
+        if all(isinstance(x, RunResult) for x in set_a) and all(isinstance(x, RunResult) for x in set_b):
+            acts_a = [{"prompt": r.plan.params.get("prompt", ""), "text": r.text,
+                       "n_in": r.captures.get("n_in", 1), "neurons": r.captures.get("neurons", {}), "run_id": r.id}
+                      for r in set_a]
+            acts_b = [{"prompt": r.plan.params.get("prompt", ""), "text": r.text,
+                       "n_in": r.captures.get("n_in", 1), "neurons": r.captures.get("neurons", {}), "run_id": r.id}
+                      for r in set_b]
+            return interp.compare_neurons_from_acts(self.adapter, plan.schedule, acts_a, acts_b,
+                                                    pos=block, span=span, k=k, strict=strict)
+        out = None
+        for out in interp.iter_neuron_ab_hunt(
+            self.adapter, plan, set_a, set_b, pos=block, span=span,
+            max_new_tokens=max_new_tokens, k=k, strict=strict,
+            system=system, chat=chat, prefill=prefill,
+        ):
+            pass
+        return out
+
+    @torch.no_grad()
+    def search_neurons_by_words(self, promote: list[str] | str, suppress: list[str] | str | None = None,
+                                block: int = -1, k: int = 10, use_norm: bool = False, flow=None) -> dict:
+        """Find writer neurons whose `down_proj` column promotes target words over suppressed words."""
+        plan = self.plan(flow or self.flow("x"))
+        return interp.search_neurons_by_words(self.adapter, plan.schedule, promote, suppress,
+                                              pos=block, k=k, use_norm=use_norm)
+
+    @torch.no_grad()
+    def batch_test_neurons(self, flow, test_prompts: list, control_prompts: list | None = None,
+                           max_new_tokens: int = 40, keyword_regex: str = r"(can't|cannot|can not|unable|not able)",
+                           system: str | None = None, chat: bool | None = None, prefill: str | None = None) -> dict:
+        """Run `test_prompts` and `control_prompts` before and after the flow's neuron edits/wires."""
+        plan = self.plan(flow)
+        plan.sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+        out = None
+        for out in interp.iter_neuron_batch_test(
+            self.adapter, plan, test_prompts, control_prompts,
+            max_new_tokens=max_new_tokens, keyword_regex=keyword_regex,
+            system=system, chat=chat, prefill=prefill,
+        ):
+            pass
+        return out
+
     def save_vector(self, v: torch.Tensor, name: str = "") -> dict:
         return interp.VECTORS.save(v, name, {"model_id": self.model_id, "source": "python"})
 

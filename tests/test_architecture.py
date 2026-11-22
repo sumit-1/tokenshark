@@ -19,8 +19,8 @@ FEATURES = {"lora", "quant", "kv_cache", "lm_tools", "image_maps", "image_lens",
 
 
 def test_the_page_has_what_we_think_it_has():
-    assert {"output_text", "output_image", "debug_text", "debug_image", "lens", "patch", "kv", "train", "runs"} <= TAB_IDS
-    assert "learn" not in TAB_IDS
+    assert {"output_text", "output_image", "debug_text", "debug_image", "lens", "neurons", "kv", "train", "runs"} <= TAB_IDS
+    assert not ({"learn", "patch", "steer", "introspect"} & TAB_IDS)
     assert {"intervention", "block_kv", "code", "init_image"} <= ACTIONS
     assert TRAIN == {"tiny_text", "adapt", "tiny_image"}
 

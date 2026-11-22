@@ -119,6 +119,10 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
                               {"clamp": "to", "value": "value", "positions": "positions", "hook": "hook"})
                 r = f", ref={src_ref}" if d.get("ref") else ""
                 out.append(f"{var}.clamp({tgt}, {_lit(str(d.get('neurons') or 'all'))}{', ' + _kw(extra) if extra else ''}{r})")
+            elif op == "wire":
+                extra = _diff(d, {"value": 3.0, "threshold": 0.0, "positions": "all", "experts": "all"},
+                              {"value": "strength", "threshold": "threshold", "positions": "positions", "experts": "experts"})
+                out.append(f"{var}.wire({tgt}, {_lit(str(d.get('source_neurons') or ''))}, {_lit(str(d.get('neurons') or ''))}{', ' + _kw(extra) if extra else ''})")
             else:
                 extra = [("hook", d.get("hook")), ("op", op)] + _diff(d, _IV_DEFAULTS, {
                     "value": "value", "positions": "positions", "heads": "heads", "neurons": "neurons", "seed": "seed",

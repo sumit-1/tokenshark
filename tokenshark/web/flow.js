@@ -356,6 +356,11 @@ function curve(a, b) {
 }
 
 export function ivSummary(d) {
+  if (d.op === 'wire') {
+    const th = d.threshold ? ` (>${d.threshold})` : ''
+    const pos = d.positions && d.positions !== 'all' ? ` · tok ${d.positions}` : ''
+    return `wire ${d.source_neurons || '?'} → ${d.neurons || '?'} ×${d.value ?? 3}${th}${pos}`
+  }
   const v = d.op === 'scale' || d.op === 'add_noise' ? ` ${d.value ?? 1}`
     : d.op === 'quantize' ? ` ${d.value ?? 4}-bit`
     : d.op === 'patch' ? ` ← run ${d.ref || '?'}` : d.op === 'steer' ? ` ×${d.value ?? 1}`

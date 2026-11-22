@@ -37,10 +37,11 @@ export async function startRun(extra = {}) {
   if (!S.info) return toast('Load a model first.', 'error')
   if (!(await validate())) return toast('Fix the flow first (see the message under the canvas).', 'error')
   S.lastGuessUrl = null; S.lastGuessKey = null
-  const body = { flow: flow.getGraph(), label: $('#run-label').value || '', parent_id: S.run?.id || null, ...extra }
+  const body = { flow: flow.getGraph(), label: $('#run-label').value || '', parent_id: S.run?.id || null, client_id: S.clientId, actor: 'browser', ...extra }
   if (S.resume) body.resume = S.resume
   try {
     const r = await POST('/api/runs', body)
+    if (r.workspace_version != null) S.wsVersion = r.workspace_version
     S.resume = null; renderResume()
     S.run = { ...r.run }
     pollRun(r.run.id)

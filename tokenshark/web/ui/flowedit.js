@@ -5,8 +5,13 @@ import { renderInspector } from './inspector.js'
 import { renderTab } from './tabs.js'
 
 export async function resetFlow() {
-  const g = await GET('/api/flow/default')
-  flow.setGraph(g)
+  const g = await GET(`/api/flow/default?reset=true&client_id=${encodeURIComponent(S.clientId)}`)
+  S.wsApplying = true
+  try {
+    flow.setGraph(g)
+  } finally {
+    S.wsApplying = false
+  }
   hooks.refreshBadges?.()             // boxes that show structure before any run (the experts of an MoE block)
   setTimeout(() => flow.fit(), 50)
   S.selected = null
@@ -18,10 +23,15 @@ export let vTimer = null
 
 export function scheduleValidate() { clearTimeout(vTimer); vTimer = setTimeout(validate, 300) }
 
-export async function validate() {
+export async function validate(sync = true) {
   if (!S.info) return
   try {
-    const r = await POST('/api/flow/compile', { flow: flow.getGraph() })
+    const r = await POST('/api/flow/compile', {
+      flow: flow.getGraph(),
+      client_id: S.clientId,
+      sync: !!(sync && !S.wsApplying),
+    })
+    if (r.workspace_version != null) S.wsVersion = r.workspace_version
     const p = r.plan
     S.planNodes = p.schedule_nodes
     flow.setErrors([])

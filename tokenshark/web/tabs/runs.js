@@ -1,4 +1,4 @@
-import { GET, S, btn, el, flow, on, registerTab } from '../core.js'
+import { GET, POST, S, btn, el, flow, on, registerTab } from '../core.js'
 import { esc } from '../flow.js'
 import { scheduleValidate } from '../ui/flowedit.js'
 import { renderInspector } from '../ui/inspector.js'
@@ -19,8 +19,20 @@ export function renderRuns(p) {
     const row = el('div', { className: 'run' + (S.run?.id === r.id ? ' on' : '') })
     row.style.paddingLeft = 8 + depth * 18 + 'px'
     row.innerHTML = `<b>${esc(r.id)}</b> ${esc(r.label || '')} <span class="small">${esc(r.model_id)} · ${esc(r.status)}${r.seconds ? ` · ${r.seconds}s` : ''}${r.resume_step != null ? ` · from step ${r.resume_step}` : ''}</span> <span class="prev">${esc(r.preview || '')}</span>`
-    row.onclick = async () => { S.run = await GET(`/api/runs/${r.id}`); S.lens = null; applyRunBadges(); renderInspector(); renderTab() }
-    const rf = btn('Restore flow', async ev => { ev.stopPropagation(); const full = await GET(`/api/runs/${r.id}`); flow.setGraph(full.flow); S.run = full; applyRunBadges(); scheduleValidate() }, 'mini')
+    row.onclick = async () => {
+      S.run = await GET(`/api/runs/${r.id}`); S.lens = null; applyRunBadges(); renderInspector(); renderTab()
+      POST('/api/workspace', { active_run_id: r.id, client_id: S.clientId, actor: 'browser' }).then(ws => {
+        if (ws?.version != null) S.wsVersion = ws.version
+      }).catch(() => {})
+    }
+    const rf = btn('Restore flow', async ev => {
+      ev.stopPropagation()
+      const full = await GET(`/api/runs/${r.id}`)
+      flow.setGraph(full.flow); S.run = full; applyRunBadges(); scheduleValidate()
+      POST('/api/workspace', { flow: full.flow, active_run_id: r.id, client_id: S.clientId, actor: 'browser' }).then(ws => {
+        if (ws?.version != null) S.wsVersion = ws.version
+      }).catch(() => {})
+    }, 'mini')
     row.appendChild(rf)
     ul.appendChild(row)
     ;(kids[r.id] || []).forEach(c => add(c, depth + 1))

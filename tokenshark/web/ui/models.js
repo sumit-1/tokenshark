@@ -1,7 +1,9 @@
 import { $, GET, POST, S, api, el, flow, fmtBytes, toast, emit } from '../core.js'
 import { esc } from '../flow.js'
-import { resetFlow } from './flowedit.js'
-import { applyRunBadges } from './run.js'
+import { resetFlow, validate } from './flowedit.js'
+import { renderInspector } from './inspector.js'
+import { applyRunBadges, pollRun } from './run.js'
+import { renderTab, setTab } from './tabs.js'
 
 export async function refreshModels() {
   S.models = await GET('/api/models')
@@ -80,12 +82,62 @@ export async function pollStatus(loading) {
     document.body.dataset.family = m.family          // styling only (colours of the canvas); behaviour comes from the schema
     document.body.dataset.denoiser = m.denoiser || ''
     $('#model').value = m.model_id
-    await resetFlow()
-    refreshModels()
     emit('model', m)                                 // tabs, palette, debugger buttons and lessons adjust themselves
+    await syncWorkspace(true)
+    refreshModels()
     toast(`Loaded ${m.model_id} in ${m.load_seconds}s`)
   } else if (m && S.info) {
     S.info.lora = m.lora || null
+  }
+}
+
+export async function syncWorkspace(initial = false) {
+  if (!S.info) {
+    // Check if another client or MCP loaded a model on the server
+    try {
+      const st = await GET('/api/status')
+      if (st.model && (!S.info || S.info.model_id !== st.model.model_id)) {
+        await pollStatus(true)
+      }
+    } catch { }
+    return
+  }
+  let ws
+  try { ws = await GET(`/api/workspace?since=${initial ? -1 : S.wsVersion}`) } catch { return }
+  if (!ws) return
+  if (ws.model_id && ws.model_id !== S.info.model_id) {
+    await pollStatus(true)
+    return
+  }
+  if (!ws.changed && !initial) return
+  const fromSelf = !initial && ws.client_id && ws.client_id === S.clientId
+  S.wsVersion = ws.version
+  if (fromSelf) return
+
+  S.wsApplying = true
+  try {
+    if (ws.flow && ws.flow.nodes?.length) {
+      const hadNodes = flow.nodes.length > 0
+      flow.setGraph(ws.flow)
+      if (!hadNodes || initial) setTimeout(() => flow.fit(), 50)
+      await validate(false)
+      applyRunBadges()
+      renderInspector()
+      if (S.tab === 'kv') renderTab()
+    } else if (initial) {
+      await resetFlow()
+    }
+    if (ws.tab && ws.tab !== S.tab) {
+      setTab(ws.tab, true)
+    }
+    if (ws.active_run_id && ws.active_run_id !== S.run?.id) {
+      pollRun(ws.active_run_id)
+    }
+    if (!initial && ws.actor === 'mcp' && ws.notice) {
+      toast(ws.notice)
+    }
+  } finally {
+    S.wsApplying = false
   }
 }
 

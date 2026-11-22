@@ -34,10 +34,11 @@ OPS = ["scale", "zero", "add_noise", "mean", "quantize"]
 #   steer       — add `value` × a saved direction to the activation (`ref` = steering-vector id)
 #   project_out — remove (value=1) or scale the component along a saved direction (`ref` = vector id)
 #   clamp       — pin chosen neurons (`neurons`) to their min / max / a fixed value (`clamp`)
+#   wire        — wire detector neuron(s) (`source_neurons`) into writer neuron(s) (`neurons`) with `value` × relu(src - `threshold`)
 #   quantize    — round this tensor / block's weights / KV cache to `value` bits (1..16)
 #   ban / only  — mixture-of-experts router: these experts can never be chosen / are the only ones that can
 #   route       — mixture-of-experts router: use exactly these experts and weights ("3=0.6, 17=0.4")
-LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "ban", "only", "route"]
+LLM_OPS = OPS + ["patch", "steer", "project_out", "clamp", "wire", "ban", "only", "route"]
 PATCH_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "attn_out", "router", "mlp_out", "resid_post"]
 CODE_KINDS = ["embed", "block", "final_norm", "lm_head", "sampler"]     # boxes whose Python can be edited
 PREFIX_MODES = ["shift", "negative", "offset"]
@@ -66,6 +67,8 @@ class Intervention:
     ref: str = ""            # patch: source run id · steer: steering-vector id · clamp: run whose min/max to use
     src_positions: str = ""  # patch: token(s) to copy from in the source run ("" = the same token index)
     neurons: str = "all"     # which units of the activation's last axis the op touches — all | 12 | 3,7 | 0:64
+    source_neurons: str = "" # wire: detector neuron(s) whose relu(act - threshold) drives the target `neurons`
+    threshold: float = 0.0   # wire: activation threshold subtracted before ReLU
     clamp: str = "max"       # clamp: max | min | value
     experts: str = "all"     # mixture-of-experts hooks (router, expert_out, mlp_neurons): all | 3 | 0:8 | 1,5 | shared
 
@@ -605,18 +608,41 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if op == "clamp" and str(src.get("clamp") or "max") not in ("max", "min", "value"):
             err("Clamp to max, min or value.", e["source"])
             continue
+        if op == "wire":
+            if hook != "mlp_neurons":
+                err("Wire connects MLP neurons: set the hook to 'mlp_neurons'.", e["source"])
+                continue
+            s_neu = str(src.get("source_neurons") or "").strip()
+            t_neu = str(src.get("neurons") or "").strip()
+            if not s_neu or s_neu.lower() in ("all", "*"):
+                err("A neuron wire needs source (detector) neuron(s), e.g. 2751.", e["source"])
+                continue
+            if not t_neu or t_neu.lower() in ("all", "*"):
+                err("A neuron wire needs target (writer) neuron(s), e.g. 2282 or 836,10,1871.", e["source"])
+                continue
+            try:
+                if not parse_index_spec(s_neu, 1_000_000):
+                    raise ValueError("Specify at least one source neuron.")
+                if not parse_index_spec(t_neu, 1_000_000):
+                    raise ValueError("Specify at least one target neuron.")
+            except ValueError as ex:
+                err(str(ex), e["source"])
+                continue
         if (nodes[e["target"]]["data"].get("code") or "").strip() and hook not in ("resid_pre", "resid_post", "weights"):
             err(f"'{nodes[e['target']]['data'].get('label')}' runs edited code, so only resid_pre, resid_post and weights "
                 f"interceptors reach it. Change the code itself for anything in between.", e["source"])
             continue
         ivs.append(Intervention(node_id=e["source"], pos=pos_of_node[e["target"]], hook=hook, op=op,
-                                value=_num(src.get("value"), 4.0 if op == "quantize" else 1.0),
+                                value=_num(src.get("value"), 4.0 if op == "quantize" else (3.0 if op == "wire" else 1.0)),
                                 positions=str(src.get("positions") or "all"),
                                 steps=str(src.get("steps") or "all"), seed=_num(src.get("seed"), 0, int),
                                 heads=str(src.get("heads") or "all"),
                                 region=str(src.get("region") or "") if shape.regions else "",
                                 ref=str(src.get("ref") or ""), src_positions=str(src.get("src_positions") or ""),
-                                neurons=str(src.get("neurons") or "all"), clamp=str(src.get("clamp") or "max"),
+                                neurons=str(src.get("neurons") or "all"),
+                                source_neurons=str(src.get("source_neurons") or ""),
+                                threshold=_num(src.get("threshold"), 0.0, float),
+                                clamp=str(src.get("clamp") or "max"),
                                 experts=str(src.get("experts") or "all")))
         try:
             parse_index_spec(ivs[-1].neurons, 1_000_000)

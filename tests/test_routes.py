@@ -175,6 +175,66 @@ def test_tokenizer_code_script(api):
     assert s["status"] == "error" and "line 1" in s["error"]
 
 
+def test_shared_workspace_sync(api):
+    c = api
+    ws0 = c.get("/api/workspace").json()
+    assert ws0["changed"] and ws0["flow"]["nodes"]
+    # Polling with since=version returns changed=False and omits flow payload
+    unchanged = c.get(f"/api/workspace?since={ws0['version']}").json()
+    assert not unchanged["changed"] and "flow" not in unchanged
+    # MCP / external edit modifies the shared workspace flow and switches the open tab
+    ed = c.post("/api/workspace/edit", json={
+        "prompt": "Where is Paris?",
+        "system": "Be concise.",
+        "edits": [{"do": "replace_system", "text": "You are a pirate.", "block": 1}],
+        "reset": True,
+        "tab": "kv",
+    }).json()
+    assert ed["ok"] and ed["version"] > ws0["version"] and ed["tab"] == "kv"
+    assert ed["plan"]["params"]["kv_overrides"][0]["op"] == "replace_system"
+    ws1 = c.get(f"/api/workspace?since={ws0['version']}").json()
+    assert ws1["changed"] and ws1["tab"] == "kv"
+    assert any(n["data"].get("kind") == "block_kv" for n in ws1["flow"]["nodes"])
+    # Starting a run updates active_run_id and flow in the shared workspace
+    r = _run(c, ws1["flow"], label="tutor")
+    ws2 = c.get("/api/workspace").json()
+    assert ws2["active_run_id"] == r["id"] and ws2["version"] >= ws1["version"]
+
+
+def test_neuron_ab_routes_and_wire(api):
+    c = api
+    presets = c.get("/api/neurons/presets").json()
+    assert "refund_guardrail" in presets and len(presets["refund_guardrail"]["set_a"]) == 12
+
+    hunt = _task(c, c.post("/api/neurons/hunt_ab", json={
+        "set_a": ["The capital of France is", "The capital of France"],
+        "set_b": ["The capital of Japan is", "The capital of Japan"],
+        "pos": 1, "span": "last", "max_new_tokens": 0, "k": 4,
+    }))
+    assert hunt["status"] == "done" and len(hunt["neurons"]) == 4
+
+    words = c.post("/api/neurons/search_words", json={"promote": "France, Paris", "suppress": "Japan", "pos": 1, "k": 4}).json()
+    assert len(words["neurons"]) == 4
+
+    ed = c.post("/api/workspace/edit", json={
+        "prompt": "The capital of France is",
+        "edits": [{"do": "wire", "block": 1, "source": "0", "target": "1,2", "strength": 3.0, "threshold": 0.2}],
+        "reset": True,
+        "tab": "neurons",
+    }).json()
+    assert ed["ok"] and ed["plan"]["interventions"][0]["op"] == "wire"
+    assert ed["plan"]["interventions"][0]["source_neurons"] == "0"
+    assert ed["plan"]["interventions"][0]["neurons"] == "1,2"
+
+    bt = _task(c, c.post("/api/neurons/batch_test", json={
+        "flow": c.get("/api/workspace").json()["flow"],
+        "test_prompts": ["The capital of France is"],
+        "control_prompts": ["The capital of Japan is"],
+        "max_new_tokens": 2,
+    }))
+    assert bt["status"] == "done" and bt["test_total"] == 1 and bt["control_total"] == 1
+
+
 def test_quant_routes(api):
     c = api
     q = c.post("/api/quant", json={"bits": 3}).json()

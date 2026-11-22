@@ -107,14 +107,14 @@ def apply_op(x: torch.Tensor, iv: Intervention, ctx: RunContext, token_dim: int 
     else:
         sel, part = None, x
     # Any op can be limited to some units of the last axis (iv.neurons): one MLP neuron, a few residual dimensions.
-    nsel, whole = None, None
+    nsel, whole, page_part = None, None, part
     if (getattr(iv, "neurons", "all") or "all").strip().lower() not in ("all", "*", ""):
         nidx = parse_index_spec(iv.neurons, part.shape[-1])
         if not nidx:
             return x
         nsel = torch.tensor(nidx, device=x.device)
         whole, part = part, part[..., nsel]
-    new = _op(part, iv, ctx, token_dim if sel is not None else None, idx, nsel, x)
+    new = _op(part, iv, ctx, token_dim if sel is not None else None, idx, nsel, x, page_part)
     if new is None:
         return x
     if nsel is not None:
@@ -128,8 +128,20 @@ def apply_op(x: torch.Tensor, iv: Intervention, ctx: RunContext, token_dim: int 
     return x
 
 
-def _op(part, iv, ctx, token_dim, idx, nsel, x):
+def _op(part, iv, ctx, token_dim, idx, nsel, x, full_part=None):
     """The operation itself, on the selected slice. Returns the new slice (None = leave it unchanged)."""
+    if iv.op == "wire":
+        # Neuron wiring: add value * relu(source_neurons - threshold) onto target neurons.
+        # Mathematically equivalent to adding value * W_down[:, target] onto W_down[:, source] when threshold == 0.
+        fp = full_part if full_part is not None else part
+        sidx = parse_index_spec(getattr(iv, "source_neurons", "") or "", fp.shape[-1])
+        if not sidx:
+            return None
+        s_acts = fp[..., torch.tensor(sidx, device=fp.device)].float()
+        thresh = float(getattr(iv, "threshold", 0.0) or 0.0)
+        drive = torch.relu(s_acts - thresh).sum(dim=-1, keepdim=True)
+        strength = float(iv.value if iv.value is not None else 1.0)
+        return (part.float() + strength * drive).to(part.dtype)
     if iv.op == "scale":
         return part * iv.value
     if iv.op == "zero":

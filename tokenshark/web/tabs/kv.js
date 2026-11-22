@@ -293,10 +293,27 @@ export async function renderLiveKVAnalysis(box) {
     // 2. Per-block table with 1-click K vs V interceptor buttons
     const overrides = a.blocks.filter(b => b.override)
     if (overrides.length) {
-      box.appendChild(el('div', { className: 'small', style: 'margin:6px 0' },
-        `<b>${overrides.length} block KV override(s):</b> ${overrides.map(b =>
-          `#${b.pos} · ${esc(b.override.op || '')} · ${b.override.n_prompt} recreated tok${b.override.text ? ` · “${esc((b.override.text || '').slice(0, 40))}”` : ''}`
-        ).join(' · ')}`))
+      const ovWrap = el('div', { className: 'kvbox', style: 'margin:8px 0;padding:8px;background:var(--panel2);border-radius:6px' })
+      ovWrap.appendChild(el('div', { className: 'small' },
+        `<b>Recreated Per-Block KV Caches (${overrides.length} block${overrides.length > 1 ? 's' : ''}):</b>`))
+      overrides.forEach(b => {
+        const ov = b.override
+        const segOf = i => (ov.segments || []).find(s => i >= s.start && i < s.end)?.origin || 'prompt'
+        const d = el('details', { style: 'margin-top:4px' })
+        d.appendChild(el('summary', { className: 'small', style: 'cursor:pointer' },
+          `<b>${esc(b.label)}</b> · <span class="chip" style="border-color:var(--kv)">${esc(ov.op)}</span> · ${ov.n_tokens} tokens (${ov.n_prompt} recreated prompt + ${ov.n_tokens - ov.n_prompt} grown)${ov.text ? ` · “${esc(ov.text.slice(0, 60))}”` : ''}`))
+        const strip = el('div', { className: 'tokens', style: 'margin:4px 0' })
+        ;(ov.tokens || []).forEach((t, i) => {
+          const pos = ov.positions?.[i] ?? i
+          strip.appendChild(el('span', {
+            className: `tok seg-${segOf(i)}`,
+            title: `#${i} · ${segOf(i)} · RoPE pos ${pos}`,
+          }, `${esc(t)}<sub>pos ${pos}</sub>`))
+        })
+        d.appendChild(strip)
+        ovWrap.appendChild(d)
+      })
+      box.appendChild(ovWrap)
     }
     const bt = el('table', { className: 'grid', style: 'font-size:12px' })
     bt.innerHTML = '<tr><th>Block</th><th>KV override</th><th>Mean ‖K‖</th><th>Max ‖K‖</th><th>Mean ‖V‖</th><th>Max ‖V‖</th><th>Top Sink Token</th><th>Test K vs. V Sensitivity</th></tr>'
