@@ -4,6 +4,11 @@ Because all plugins in `tokenshark/plugins/` are auto-discovered on startup (unl
 starts with `_`), any `.py` file you drop here and decorate with `@register_plugin` immediately
 appears in the model picker, supports weight streaming (`auto` / `device` / `cpu` / `disk`),
 and gets automatic LoRA / fine-tune visualisation.
+
+New decoder-only language model? Do not copy this file: subclass `CausalLMPlugin` and override `arch_hooks()`
+instead, so the model gets the whole language-model toolset (flow, debugger, lens, KV tab, interventions).
+`gemma4.py` is the worked example; `tokenshark/llm/arch.py` lists the generic knobs. Keep model names and
+model-specific branches out of `tokenshark/llm/`, the server and the web UI.
 """
 from __future__ import annotations
 

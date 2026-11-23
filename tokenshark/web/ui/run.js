@@ -16,7 +16,21 @@ $('#run').onclick = () => {
     }
     return debugStep('all')
   }
+  if (canAppend()) return debugStep('all')
   startRun()
+}
+
+// A finished run whose only change is a higher "Max new tokens" goes on from where it stopped instead of restarting.
+export function samplerMax(g = flow.getGraph()) {
+  return +(g.nodes.find(n => n.data?.kind === 'sampler')?.data?.max_new_tokens) || 0
+}
+export function canAppend() {
+  const d = S.debug
+  if (!d?.done || !d.can_extend || !S.run || d.run_id !== S.run.id || !S.run.flow) return false
+  const g = flow.getGraph()
+  if (samplerMax(g) <= d.total) return false
+  const strip = gr => JSON.stringify((gr.nodes || []).map(n => [n.id, n.data?.kind === 'sampler' ? { ...n.data, max_new_tokens: 0 } : n.data]))
+  return strip(g) === strip(S.run.flow)
 }
 
 $('#cancel').onclick = async () => {
@@ -131,6 +145,8 @@ export function applyRunBadges() {
       if (n.data.rope_scale !== undefined && n.data.rope_scale !== '' && +n.data.rope_scale !== 1) rParts.push(+n.data.rope_scale === 0 ? 'off' : `×${n.data.rope_scale}`)
       if (n.data.rope_theta !== undefined && n.data.rope_theta !== '' && +n.data.rope_theta > 0) rParts.push(`θ=${n.data.rope_theta}`)
       if (n.data.rope_q_offset !== undefined && n.data.rope_q_offset !== '' && +n.data.rope_q_offset !== 0) rParts.push(`Δq=${n.data.rope_q_offset > 0 ? '+' : ''}${n.data.rope_q_offset}`)
+      if (n.data.rope_gen_start !== undefined && n.data.rope_gen_start !== '' && n.data.rope_gen_start !== null) rParts.push(`jump→${n.data.rope_gen_start}`)
+      if (String(n.data.kv_zero || '').trim()) rParts.push(`zeroed KV #${n.data.kv_zero}`)
       if (rParts.length) {
         b[n.id] = (b[n.id] || '') + `<span class="pk" style="background:rgba(167,139,250,0.35);border:1px solid var(--loop)" title="Custom RoPE on this block: ${rParts.join(' · ')}">RoPE ${esc(rParts.join(' '))}</span>`
       }

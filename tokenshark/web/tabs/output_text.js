@@ -1,7 +1,8 @@
 import { POST, S, btn, download, el, flow, registerTab, toast } from '../core.js'
 import { esc } from '../flow.js'
 import { renderInspector } from '../ui/inspector.js'
-import { startRun } from '../ui/run.js'
+import { debugStep } from '../ui/debugger.js'
+import { samplerMax, startRun } from '../ui/run.js'
 import { renderTab } from '../ui/tabs.js'
 import { saveRunCache } from './kv.js'
 
@@ -10,11 +11,24 @@ export function renderTextOut(p) {
   const o = S.run.outputs
   p.appendChild(el('div', { className: 'small' }, `${o.tokens.length} tokens · ${o.prefix_tokens ? `${o.prefix_tokens} imported KV tokens in front · ` : ''}read ${o.gb_read} GB of weights · click a token for the alternatives the model weighed`))
   renderTokens(p, false)
+  appendBox(p)
   conversationBox(p)
   if (o.edited_code?.length) p.appendChild(el('div', { className: 'small' }, `<span class="chip coded">✎ edited code</span> ran in: ${o.edited_code.map(esc).join(', ')}`))
   if (o.prints?.length) p.appendChild(el('pre', { className: 'codehelp', textContent: o.prints.join('\n') }))
   p.appendChild(el('div', { className: 'row' })).append(btn('Save KV cache', saveRunCache), btn('Export as Python script', () => exportScript()),
     btn('Download manifest', () => window.open(`/api/runs/${S.run.id}/manifest`)))
+}
+
+// A run that stopped at its token limit can go on: raise Max new tokens in the Sampler box, then append.
+function appendBox(p) {
+  const d = S.debug
+  if (!d?.done || !d.can_extend || d.run_id !== S.run.id || S.run.status === 'stepping') return
+  const want = samplerMax()
+  const row = el('div', { className: 'row' })
+  if (want > d.total) row.append(btn(`Append tokens (${d.total} → ${want}) ▶`, () => debugStep('all'), 'primary'),
+    el('span', { className: 'small', textContent: 'Continues from the finished run; nothing is recomputed. ▶ Run does the same.' }))
+  else row.append(el('span', { className: 'small', textContent: `Stopped at the limit of ${d.total} new tokens. Raise “Max new tokens” in the Sampler box to append more without restarting.` }))
+  p.appendChild(row)
 }
 
 // Every turn of the finished run, the model's answer included.

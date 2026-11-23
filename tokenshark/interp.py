@@ -51,6 +51,10 @@ _STEERING_EXPORTS = {
 
 
 def __getattr__(name: str):
+    if name in _NEURON_EXPORTS or name in _PATCHING_EXPORTS or name in _STEERING_EXPORTS:
+        # Extensions import `server.app`, and importing the server discovers every extension. Load the
+        # server first so that chain runs once, in order, instead of re-entering a half-imported extension.
+        importlib.import_module(".server", package=__package__)
     if name in _NEURON_EXPORTS:
         mod = importlib.import_module(".extensions.neurons", package=__package__)
         return getattr(mod, name)

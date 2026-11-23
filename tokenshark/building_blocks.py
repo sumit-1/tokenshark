@@ -228,7 +228,57 @@ def tokenize(adapter, text: str, chat: bool = False, system: str = "",
 # KV Cache Analysis (per-block & per-token K/V norms, GQA savings, attention sinks)
 # ======================================================================================
 
-def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[str]) -> dict:
+def _last_query_attention(adapter, cap: dict, cache: KVCache, p: int, K: torch.Tensor, qi: int,
+                          layer: int | None = None):
+    """Attention of the query at cache index `qi` over the cache of block slot p, with RoPE as it ran and
+    with the query-key distance removed (every key rotated as if it sat at the query's own position).
+    Returns (attn_rope [qi+1], attn_same_pos [qi+1], q_pos, k_pos [qi+1]) or None."""
+    from .llm.ops import apply_rope, rope_inv_freq
+    cfg = adapter.cfg
+    hist = (cap.get("last_q") or {}).get(p) or {}
+    rp = (cap.get("rope_pos") or {}).get(p)
+    if qi not in hist or rp is None or getattr(cfg, "mla", None):
+        return None
+    q, qp = hist[qi]
+    pos_k = rp[1]
+    T = min(K.shape[1], len(pos_k), qi + 1)                 # the keys that query could see (causal)
+    if T <= 0:
+        return None
+    K = K[:, :T].float().cpu()
+    q = q.float()                                            # [H, hd]
+    theta = ((cap.get("rope") or {}).get(p) or {}).get("theta")
+    inv = rope_inv_freq(cfg, theta=float(theta) if theta else None, layer=layer).cpu()
+    kp = pos_k[:T].float()
+    qr = apply_rope(q[:, None, :], torch.tensor([qp]), inv)[:, 0]          # [H, hd]
+    kr = apply_rope(K, kp, inv)                                             # [n_kv, T, hd]
+    k0 = apply_rope(K, torch.full((T,), qp), inv)                          # distance 0 for every key
+    rep = q.shape[0] // max(1, K.shape[0])
+    if rep > 1:
+        kr, k0 = kr.repeat_interleave(rep, 0), k0.repeat_interleave(rep, 0)
+    scale = cfg.attn_scale if cfg.attn_scale is not None else 1.0 / (q.shape[-1] ** 0.5)
+    s_rope = torch.einsum("hd,htd->ht", qr, kr) * scale
+    s_same = torch.einsum("hd,htd->ht", qr, k0) * scale
+    allowed = torch.ones(T, dtype=torch.bool)
+    if cache.block_caches.get(p) is None:
+        for a, b, slots in cache.prefix_spans:
+            if slots is not None and p not in slots:
+                allowed[a:min(b, T)] = False
+    window = cfg.layer_window(layer)
+    if window:
+        allowed[:max(0, T - window)] = False
+    s_rope = s_rope.masked_fill(~allowed, float("-inf"))
+    s_same = s_same.masked_fill(~allowed, float("-inf"))
+    return torch.softmax(s_rope, -1).mean(0), torch.softmax(s_same, -1).mean(0), qp, kp
+
+
+def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[str], blocks: str = "all",
+                query: int | None = None) -> dict:
+    """KV cache telemetry of a finished run.
+
+    Per-token columns are averaged over the selected block slots (`blocks`: all | 5 | 3,7 | 10:14).
+    Attention columns describe one query only - by default the forward pass that produced the last output
+    token; `query` picks another cache index - not an average over the whole run."""
+    from .flow import parse_index_spec
     cache: KVCache | None = cap.get("cache")
     if cache is None:
         raise ValueError("This run has no KV cache.")
@@ -244,106 +294,130 @@ def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[st
     bytes_total = summary["bytes"]
     bytes_per_token = round(bytes_total / max(1, T), 1)
     mha_bytes_total = int(round(bytes_total * (n_heads / max(1, n_kv))))
+    try:
+        selected = set(parse_index_spec(blocks or "all", S))
+    except ValueError as e:
+        raise ValueError(f"Blocks: {e}")
 
+    # Which forward pass produced the last output token: the newest one when that token was never fed back
+    # (end-of-text, or a run stopped right after sampling), else the one before it.
+    ids = list(cap.get("ids") or [])
+    n_pre = int(cap.get("n_prefix") or 0)
+    gen = (cap.get("token_ranges") or {}).get("generated")
+    result = int(ids[-1]) if ids and gen is not None and len(ids) > gen.start else None
+    back = 1 if result is not None and len(ids) + n_pre <= T and T >= 2 else 0
+    last_qi = T - 1 - back
+    qi = last_qi if query is None else int(query)
+    if not 0 <= qi < T:
+        raise ValueError(f"Query token #{qi} is outside the cache (0..{T - 1}).")
+    if qi != last_qi:                             # the token that query predicted is simply the next one
+        result = int(cache.tokens[qi + 1]) if qi + 1 < T else None
     origins = cache._origins()
-    attn_map = cap.get("attn") or {}
-    blocks = []
-    tok_k_norms = torch.zeros(T, dtype=torch.float32)
-    tok_v_norms = torch.zeros(T, dtype=torch.float32)
-    tok_attn_in = torch.zeros(T, dtype=torch.float32)
-    n_full_blocks = 0
-    n_attn_blocks = 0
+    next_origin = origins[qi + 1][0] if qi + 1 < len(origins) else "generated"
+    available = sorted(set().union(*[set(h) for h in (cap.get("last_q") or {}).values()])) if cap.get("last_q") else []
+    rope_cfg = cap.get("rope") or {}
+    out_blocks = []
+    acc = {k: torch.zeros(T, dtype=torch.float32) for k in ("k", "v", "attn", "same", "pos")}
+    n_norm = n_attn = 0
+    q_pos_sum, q_pos_n = 0.0, 0
 
     for p in range(S):
         l = schedule[p]
         nid = schedule_nodes[p] if p < len(schedule_nodes) else f"block_{l}"
         bc = cache.block_caches.get(p)
         k_t, v_t = cache.slot_kv(p)
+        base = {"pos": p, "layer": l, "node": nid, "label": f"#{p} · L{l}", "selected": p in selected,
+                "rope": dict(rope_cfg.get(p) or {})}
         if k_t is None or v_t is None:
-            blocks.append({
-                "pos": p, "layer": l, "node": nid, "label": f"#{p} · L{l}",
-                "linear": True, "override": None, "n_tokens": 0,
-                "k_norm_mean": None, "v_norm_mean": None,
-                "k_norm_max": None, "v_norm_max": None,
-                "sink_token": None, "sink_piece": None, "sink_attn": None, "bytes": 0,
-            })
+            out_blocks.append({**base, "linear": True, "override": None, "n_tokens": 0,
+                               "k_norm_mean": None, "v_norm_mean": None, "k_norm_max": None, "v_norm_max": None,
+                               "sink_token": None, "sink_piece": None, "sink_attn": None, "q_pos": None, "bytes": 0})
             continue
         T_b = k_t.shape[1]
         tok_list = bc.tokens if bc is not None else cache.tokens
         kn = k_t.float().norm(dim=-1).mean(0).cpu()[:T_b]
         vn = v_t.float().norm(dim=-1).mean(0).cpu()[:T_b]
-        if bc is None:
-            tok_k_norms[:min(T, len(kn))] += kn[:T]
-            tok_v_norms[:min(T, len(vn))] += vn[:T]
-            n_full_blocks += 1
-
-        sink_tok, sink_piece, sink_attn = None, None, None
-        a = attn_map.get(p)
-        if a is not None and a.numel() > 0:
-            col_mean = a.float().mean(dim=(0, 1)).cpu()[:T_b]
-            if bc is None:
-                tok_attn_in[:min(T, len(col_mean))] += col_mean[:T]
-                n_attn_blocks += 1
-            sink_tok = int(col_mean.argmax().item())
+        la = _last_query_attention(adapter, cap, cache, p, k_t, qi if bc is None else T_b - 1 - back, l)
+        use = p in selected and bc is None
+        if use:
+            m = min(T, len(kn))
+            acc["k"][:m] += kn[:m]
+            acc["v"][:m] += vn[:m]
+            n_norm += 1
+        sink_tok = sink_piece = sink_attn = q_pos = None
+        if la is not None:
+            att, same, q_pos, kp = la
+            sink_tok = int(att.argmax())
             sink_piece = adapter.tok.piece(tok_list[sink_tok]) if sink_tok < len(tok_list) else ""
-            sink_attn = round(float(col_mean[sink_tok].item()), 4)
-
+            sink_attn = round(float(att[sink_tok]), 4)
+            if use:
+                m = min(T, len(att))
+                acc["attn"][:m] += att[:m]
+                acc["same"][:m] += same[:m]
+                acc["pos"][:m] += kp[:m]
+                q_pos_sum += q_pos
+                q_pos_n += 1
+                n_attn += 1
         b_bytes = int(k_t.numel() * k_t.element_size() + v_t.numel() * v_t.element_size())
-        blocks.append({
-            "pos": p, "layer": l, "node": nid, "label": f"#{p} · L{l}",
-            "linear": False,
-            "n_tokens": T_b,
+        out_blocks.append({
+            **base, "linear": False, "n_tokens": T_b,
             "override": bc.summary(adapter.tok.piece) if bc is not None else None,
-            "k_norm_mean": round(float(kn.mean().item()), 3) if len(kn) else 0.0,
-            "v_norm_mean": round(float(vn.mean().item()), 3) if len(vn) else 0.0,
-            "k_norm_max": round(float(kn.max().item()), 3) if len(kn) else 0.0,
-            "v_norm_max": round(float(vn.max().item()), 3) if len(vn) else 0.0,
+            "k_norm_mean": round(float(kn.mean()), 3) if len(kn) else 0.0,
+            "v_norm_mean": round(float(vn.mean()), 3) if len(vn) else 0.0,
+            "k_norm_max": round(float(kn.max()), 3) if len(kn) else 0.0,
+            "v_norm_max": round(float(vn.max()), 3) if len(vn) else 0.0,
             "sink_token": sink_tok, "sink_piece": sink_piece, "sink_attn": sink_attn,
+            "q_pos": round(q_pos, 2) if q_pos is not None else None,
             "bytes": b_bytes,
         })
 
-    if n_full_blocks > 0:
-        tok_k_norms /= n_full_blocks
-        tok_v_norms /= n_full_blocks
-    if n_attn_blocks > 0:
-        tok_attn_in /= n_attn_blocks
-
-    top_sink_idx = int(tok_attn_in.argmax().item()) if T > 0 and n_attn_blocks > 0 else None
+    if n_norm:
+        acc["k"] /= n_norm
+        acc["v"] /= n_norm
+    if n_attn:
+        for k in ("attn", "same", "pos"):
+            acc[k] /= n_attn
+    top = int(acc["attn"].argmax()) if T and n_attn else None
+    q_pos_avg = q_pos_sum / q_pos_n if q_pos_n else None
     tokens = []
     for t in range(T):
         tid = int(cache.tokens[t])
         orig, lab = origins[t] if t < len(origins) else ("prompt", "")
-        attn_val = round(float(tok_attn_in[t].item()), 4) if n_attn_blocks > 0 else None
-        is_sink = bool(top_sink_idx == t and attn_val is not None and attn_val > (1.5 / max(1, T)))
+        stored = round(float(cache.pos[t]), 2)
+        seen = n_attn and t <= qi                 # keys after the query did not exist yet when it ran
+        att = round(float(acc["attn"][t]), 4) if seen else None
+        same = round(float(acc["same"][t]), 4) if seen else None
+        eff = round(float(acc["pos"][t]), 2) if seen else stored
         tokens.append({
-            "index": t,
-            "id": tid,
-            "piece": adapter.tok.piece(tid),
-            "position": round(float(cache.pos[t].item()), 2),
-            "origin": orig,
-            "label": lab,
-            "k_norm": round(float(tok_k_norms[t].item()), 3),
-            "v_norm": round(float(tok_v_norms[t].item()), 3),
-            "attn_received": attn_val,
-            "is_sink": is_sink,
+            "index": t, "id": tid, "piece": adapter.tok.piece(tid),
+            "position": stored,                     # position stored in the cache
+            "eff_position": eff,                    # position RoPE actually used in the selected blocks
+            "distance": round(q_pos_avg - eff, 2) if q_pos_avg is not None else None,
+            "origin": orig, "label": lab,
+            "k_norm": round(float(acc["k"][t]), 3),
+            "v_norm": round(float(acc["v"][t]), 3),
+            "attn_received": att,                   # share of the newest query's attention
+            "attn_same_pos": same,                  # the same, if this key sat at the query's own position
+            "rope_effect": round(att - same, 4) if seen else None,   # < 0: attention lost to RoPE distance
+            "is_sink": bool(top == t and att is not None and att > 1.5 / max(1, T)),
         })
 
     return {
-        "n_tokens": T,
-        "n_slots": S,
-        "n_heads": n_heads,
-        "n_kv_heads": n_kv,
-        "head_dim": hd,
-        "gqa_ratio": gqa_ratio,
-        "gqa_saving_pct": gqa_saving_pct,
-        "bytes_total": bytes_total,
-        "bytes_per_token": bytes_per_token,
-        "mha_bytes_total": mha_bytes_total,
-        "segments": summary["segments"],
-        "linear_slots": summary["linear_slots"],
+        "n_tokens": T, "n_slots": S, "n_heads": n_heads, "n_kv_heads": n_kv, "head_dim": hd,
+        "rot_dim": getattr(cfg, "rot_dim", None) or hd, "rope_theta": cfg.theta, "max_context": getattr(cfg, "max_pos", None),
+        "gqa_ratio": gqa_ratio, "gqa_saving_pct": gqa_saving_pct,
+        "bytes_total": bytes_total, "bytes_per_token": bytes_per_token, "mha_bytes_total": mha_bytes_total,
+        "segments": summary["segments"], "linear_slots": summary["linear_slots"],
         "block_overrides": summary.get("block_overrides") or {},
+        "selected": sorted(selected), "n_used": n_norm, "n_attn_used": n_attn,
+        "query": {"index": qi, "piece": adapter.tok.piece(int(cache.tokens[qi])) if T else "",
+                  "position": round(q_pos_avg, 2) if q_pos_avg is not None else (round(float(cache.pos[qi]), 2) if T else None),
+                  "result_id": result, "result_piece": adapter.tok.piece(result) if result is not None else None,
+                  "result_kind": next_origin,      # generated = sampled by this pass; else the text just continues
+                  "is_last": qi == last_qi, "last_index": last_qi,
+                  "first_available": available[0] if available else None},
         "tokens": tokens,
-        "blocks": blocks,
+        "blocks": out_blocks,
     }
 
 

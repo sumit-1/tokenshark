@@ -9,6 +9,8 @@ from ..flow import Plan
 from ..kvcache import BlockKVCache, KVCache
 from ..tokenizer import LLMTokenizer
 from .analysis import LLMAnalysisMixin
+from .arch import ArchHooks
+from .media import MediaEncoder
 from .model import RawLLM
 from .stepper import Stepper
 
@@ -16,48 +18,83 @@ from .stepper import Stepper
 class LLMAdapter(LLMAnalysisMixin):
     family = "causal_lm"
 
-    def __init__(self, spec: dict, root: Path, device: str, dtype: torch.dtype, policy="auto", keep_layers=0):
+    def __init__(self, spec: dict, root: Path, device: str, dtype: torch.dtype, policy="auto", keep_layers=0,
+                 arch: ArchHooks | None = None):
+        """arch: a model plugin's additions to the generic engine (llm/arch.py); None for the built-in families."""
         self.spec = spec
         from ..weights import report_phase
         report_phase("reading config")
-        self.model = RawLLM(root, device, dtype, policy, keep_layers)
+        self.model = RawLLM(root, device, dtype, policy, keep_layers, arch)
         report_phase("loading tokenizer")
         self.tok = LLMTokenizer(root)
         self.cfg = self.model.cfg
         self.device = device
         self.cache_device = device if self.model.W.policy == "device" else "cpu"
+        self.media: MediaEncoder | None = arch.media_encoder(self.model) if arch is not None else None
+        self._media_cache = None
+
+    def _mlp_label(self) -> str:
+        act = self.cfg.act
+        return "SwiGLU" if act == "silu" else "GeGLU" if act.startswith("gelu") else f"{act} GLU"
+
+    def _attn_label(self, l: int | None = None) -> str:
+        """What the attention of layer l is (l=None: the model as a whole)."""
+        c = self.cfg
+        if l is not None and c.is_linear(l):
+            return "Gated DeltaNet (linear attn)"
+        mixed = c.heterogeneous()
+        if c.mla:
+            base = "MLA (latent attention)"
+        elif l is None and mixed:
+            base = "sliding/global attention"
+        else:
+            kv = c.layer_n_kv(l)
+            base = ("MHA" if kv == c.n_heads else f"GQA {c.n_heads}q/{kv}kv") + (" K=V" if c.k_eq_v(l) else "")
+        if self.model.attn_gate:
+            base = "gated " + base
+        if l is not None and mixed:
+            w = c.layer_window(l)
+            base = (f"sliding {w} · " if w else "global · ") + base + f" · hd {c.layer_head_dim(l)}"
+        return base + (" · QK-norm" if self.model.qk_norm else "")
 
     def info(self) -> dict:
         c = self.cfg
-        attn = ("MLA (latent attention)" if c.mla else
-                "MHA" if c.n_kv == c.n_heads else f"GQA {c.n_heads}q/{c.n_kv}kv")
-        return {
+        mlp = self._mlp_label()
+        out = {
             "family": self.family, "arch": c.arch, "n_layers": c.n_layers, "d_model": c.hidden,
             "n_heads": c.n_heads, "n_kv_heads": c.n_kv, "head_dim": c.head_dim, "vocab": c.vocab,
             "d_ff": c.inter, "rope_theta": c.theta,
             "tokenizer": "tiktoken" if self.tok.kind == "tiktoken" else "BPE tokenizer",
-            "norm": "RMSNorm", "block_sub": f"{attn}{' · QK-norm' if self.model.qk_norm else ''} · SwiGLU",
+            "norm": "RMSNorm (pre + post)" if self.model.sandwich else "RMSNorm",
+            "block_sub": f"{self._attn_label()} · {mlp}",
             "moe": ({"n_experts": c.moe["n"], "top_k": c.moe["k"], "norm_topk": c.moe["norm_topk"],
                      "expert_d_ff": c.moe["inter"], "layers": sorted(self.model.moe_layers),
                      "shared": any(v["shared"] for v in self.model.moe_layers.values())} if c.moe else None),
             "has_chat_template": bool(self.tok.chat_template),
-            "block_subs": [("Gated DeltaNet (linear attn)" if c.is_linear(i) else
-                            f"{'gated ' if self.model.attn_gate else ''}{attn}{' · QK-norm' if self.model.qk_norm else ''}")
+            "block_subs": [self._attn_label(i)
                            + (f" · MoE {c.moe['k']} of {self.model.moe_layers[i]['n']} experts"
                               + (" + shared" if self.model.moe_layers[i]["shared"] else "")
-                              if i in self.model.moe_layers else " · SwiGLU")
+                              if i in self.model.moe_layers else f" · {mlp}")
                            for i in range(c.n_layers)],
             "hybrid": bool(c.layer_types),
             "kv_layers": [i for i in range(c.n_layers) if not c.is_linear(i)],
             "linear_layers": [i for i in range(c.n_layers) if c.is_linear(i)],
             "extra_blocks": list(getattr(self, "extra_blocks", None) or []),
             "vision": bool(c.vision),
+            "image_input": self.media is not None,
+            "media_marker": self.media.marker if self.media is not None else None,
+            "final_logit_softcap": c.final_softcap,
             "weights": self.model.W.describe(),
             "capabilities": {"repeat_blocks": True, "reorder_blocks": True, "remove_blocks": True,
-                             "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": bool(c.moe)},
+                             "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": bool(c.moe),
+                             "image_input": self.media is not None},
             "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_heads", "attn_out",
                       *(["router", "expert_out"] if c.moe else []), "mlp_neurons", "mlp_out", "resid_post", "weights"],
         }
+        if c.heterogeneous():
+            out["sliding_window"] = next((la.window for la in c.layers if la.window), None)
+            out["global_layers"] = [l for l, la in enumerate(c.layers) if not la.window]
+        return out
 
     def fingerprint(self):
         return {**self.cfg.fingerprint(), "model_id": self.spec["id"]}
@@ -92,7 +129,63 @@ class LLMAdapter(LLMAnalysisMixin):
             hist.append({"role": "user", "content": p.get("prompt", "")})
         return hist
 
+    # -------------------------------------------------------------- media input (images)
+    def _media_items(self, p: dict) -> list | None:
+        """The prepared media of p["images"] (the encoder's prepare()), cached for the last set."""
+        srcs = list(p.get("images") or [])
+        if not srcs:
+            return None
+        if self.media is None:
+            raise ValueError("This model doesn't take image input.")
+        key = tuple(hash(x) if isinstance(x, (str, bytes)) else id(x) for x in srcs)
+        if self._media_cache is None or self._media_cache[0] != key:
+            self._media_cache = [key, [self.media.prepare(x) for x in srcs], None]
+        return self._media_cache[1]
+
+    def media_features(self, p: dict) -> torch.Tensor | None:
+        """Soft-token embeddings of all media in the prompt, concatenated in prompt order."""
+        items = self._media_items(p)
+        if not items:
+            return None
+        if self._media_cache[2] is None:
+            self._media_cache[2] = torch.cat([self.media.encode(it) for it in items])
+        return self._media_cache[2]
+
+    def _with_media_marks(self, p: dict, n: int) -> dict:
+        """One marker per media item in the text; with none, the markers go in front of the newest user turn."""
+        mark = self.media.marker
+        texts = [p.get("system") or "", p.get("prompt") or ""] + [m.get("content") or "" for m in (p.get("history") or [])]
+        have = sum(str(t).count(mark) for t in texts)
+        if have == n:
+            return p
+        if have:
+            raise ValueError(f"The prompt places {have} {mark} markers but {n} image(s) were given.")
+        return {**p, "prompt": mark * n + (p.get("prompt") or "")}
+
+    def _expand_media(self, ids: list[int], items: list) -> list[int]:
+        """Each marker token becomes begin + token x n_tokens(item) + end."""
+        enc = self.media
+        if ids.count(enc.token_id) != len(items):
+            raise ValueError(f"Found {ids.count(enc.token_id)} {enc.marker} tokens after tokenizing but "
+                             f"{len(items)} image(s) were given.")
+        wrap = lambda t: [t] if t is not None else []              # noqa: E731
+        out, i = [], 0
+        for t in ids:
+            if t == enc.token_id:
+                out += wrap(enc.begin_id) + [enc.token_id] * enc.n_tokens(items[i]) + wrap(enc.end_id)
+                i += 1
+            else:
+                out.append(t)
+        return out
+
     def build_ids(self, p: dict) -> tuple[list[int], list[int]]:
+        items = self._media_items(p)
+        if not items:
+            return self._build_text_ids(p)
+        prompt_ids, prefill_ids = self._build_text_ids(self._with_media_marks(p, len(items)))
+        return self._expand_media(prompt_ids, items), prefill_ids
+
+    def _build_text_ids(self, p: dict) -> tuple[list[int], list[int]]:
         tok = self.tok
         has_prefix = bool(p.get("prefix_cache"))
         extra = self.template_extra(p)
@@ -192,7 +285,7 @@ class LLMAdapter(LLMAnalysisMixin):
             tmp_cache = self.new_cache(S_)
             ctx = RunContext(interventions=[])
             self.model.forward(mod_ids, positions, "prompt", tmp_cache, plan.schedule, ctx, 0,
-                               lambda iv, o, n: [])
+                               lambda iv, o, n: [], media=self.media_features(mod_p))
             last_ov = ovs[-1]
             op_summary = " + ".join(o.get("op", "") for o in ovs)
             text_summary = last_ov.get("text", "")
@@ -270,6 +363,7 @@ class LLMAdapter(LLMAnalysisMixin):
                 "moe_k": dict(ctx.store.get("moe_k") or {}), "moe_temp": dict(ctx.store.get("moe_temp") or {}),
                 "moe_noshared": set(ctx.store.get("moe_noshared") or ()),
                 "rope": dict(ctx.store.get("rope") or {}), "rope_pos": dict(ctx.store.get("rope_pos") or {}),
+                "last_q": dict(ctx.store.get("last_q") or {}),
                 "interventions": list(plan.interventions), "sources": dict(ctx.sources),
                 "token_ranges": dict(ctx.token_ranges),
                 "unit_range": dict(ctx.store.get("unit_range", {})), "code": dict(ctx.store.get("code", {})),

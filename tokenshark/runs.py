@@ -182,15 +182,17 @@ class RunStore:
             busy=True,
             task=task.id,
         )
-        last_pub, n_pub = 0.0, -1
+        last_pub, n_pub, pub_cost = 0.0, -1, 0.0
 
         def publish():
-            nonlocal last_pub, n_pub
+            nonlocal last_pub, n_pub, pub_cost
+            t1 = time.time()
             with TASKS.slot(task, force=True):
                 res = st.snapshot()
             run.outputs, run.captures, run.cache = res["outputs"], res["captures"], {}
             run.version += 1
             last_pub, n_pub = time.time(), st.n_generated
+            pub_cost = last_pub - t1
             DEBUG["state"] = {**st.state(), "run_id": run.id}
 
         try:
@@ -222,7 +224,7 @@ class RunStore:
                     more = st.step_block()
                 if not more:
                     break
-                if st.x is None and st.n_generated != n_pub and time.time() - last_pub > 1.0:
+                if st.x is None and st.n_generated != n_pub and time.time() - last_pub > max(0.1, 2 * pub_cost):
                     publish()
         except Cancelled:
             if st.logits_rows or st.x is not None:

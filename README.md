@@ -42,7 +42,7 @@ Plain logit lens (final norm + unembedding applied directly to an early layer) r
 - **Flow editor.** Each model is drawn as boxes and arrows (`prompt → tokenizer → embed → blocks → norm → head → sampler`, `prompt → CLIP → UNet stages → VAE`, or `prompt → Qwen3-VL → 32 single-stream DiT blocks → Wan VAE`). Re-wire arrows to remove, repeat, or re-order transformer blocks; wire intervention boxes into a block's top port to zero, scale, add noise, mean-ablate, patch, steer, or clamp an activation.
 - **Bypass keeps the block.** A bypassed block stays on the canvas, struck through; the residual stream skips it. Restore it from the right-click menu or the inspector.
 - **Raw PyTorch engine.** No `transformers`, no `diffusers` at runtime. Every matmul is in `tokenshark/llm/`, `tokenshark/sd.py`, and `tokenshark/qimage.py`, small enough to read in class.
-- **Declarative model & feature plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `stable_diffusion.py`, `qwen_image_21.py`), and every specialized analysis or intervention feature is a modular extension in `tokenshark/extensions/` (`patching`, `steering`, `neurons`, `moe`, `introspect`, `lora`, `quant`, `training`, `guardrail_fork`, `attn_traceback`, `datasets`) built on `tokenshark/sdk.py` and toggleable live from the **Extensions ▾** header menu.
+- **Declarative model & feature plugin architecture.** Each model family is a self-contained plugin in `tokenshark/plugins/` (`causal_lm.py`, `gemma4.py`, `stable_diffusion.py`, `qwen_image_21.py`), and every specialized analysis or intervention feature is a modular extension in `tokenshark/extensions/` (`patching`, `steering`, `neurons`, `moe`, `introspect`, `lora`, `quant`, `training`, `guardrail_fork`, `attn_traceback`, `datasets`) built on `tokenshark/sdk.py` and toggleable live from the **Extensions ▾** header menu.
 
 ### Editable Box Code & Export to Python Script
 - **Editable box code (`tokenshark/blockcode.py`).** Click **View / edit code** on any language-model box (`Embed`, any `Block`, `Final norm`, `LM head`, `Sampler`) to view the exact ~15 lines of Python it runs (`rms_norm`, `heads`, `remember(k, v)`, `rope`, `softmax`, `silu`, `unembed`). Edit the code in the browser (e.g., remove `x = x + mlp_out`, scale `attn_out`, or write a custom sampler) and the engine executes your Python in place of the built-in step, capturing `print(...)` output.
@@ -175,6 +175,7 @@ Built-in catalog (`tokenshark/models.json` & `tokenshark/plugins/*.py`):
 | `qwen2.5-1.5b-instruct` | `causal_lm` (text → text) | 3.1 GB | 28 blocks; noticeably better answers |
 | `qwen3-1.7b` | `causal_lm` (text → text) | 3.4 GB | 28 blocks, per-head QK RMSNorm |
 | `llama-3.2-1b-instruct` | `causal_lm` (text → text) | 2.5 GB | gated: accept the licence and run `hf auth login` |
+| `gemma-4-12b-it` | `gemma4` (image + text → text) | 24.0 GB | 48 blocks, 5 sliding-window : 1 global; global layers use one shared K=V head and partial RoPE; encoder-free image input |
 | `qwen3.6-27b` | `causal_lm` (text → text) | 55.0 GB | hybrid: 48 Gated DeltaNet (linear-attention) + 16 gated-attention blocks (64 total); stream from disk |
 | `olmoe-1b-7b-instruct` | `causal_lm` (text → text) | 12.9 GB | **mixture of experts**: 16 blocks × 64 experts, 8 per token; best first MoE model |
 | `qwen1.5-moe-a2.7b-chat` | `causal_lm` (text → text) | 26.7 GB | **MoE**: 60 experts (4 per token) + a shared expert |
@@ -189,6 +190,7 @@ Built-in catalog (`tokenshark/models.json` & `tokenshark/plugins/*.py`):
 
 Click **+** next to the model picker to add any Hugging Face repo or local folder (`data/models.local.json`). The raw engine supports:
 - **Text (`causal_lm`):** Llama 2/3/3.1/3.2, Qwen2/2.5, Qwen3, Mistral, SmolLM, **Qwen3.5/3.6 hybrids** (Gated DeltaNet linear attention + gated full attention), and **mixture-of-experts** models: Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE and DeepSeek-V2 (MLA). Supports Hugging Face `.safetensors` and Meta `consolidated.00.pth` + `params.json` + `tokenizer.model`.
+- **Image + text (`gemma4`):** dense Gemma-4 (e.g. `gemma-4-12B`) with image input. Add images in the Prompt box or with `lab.run(prompt, images=[...])`; each fills one `<|image|>` marker in the text (or goes in front of the prompt). Video and audio are not supported.
 - **Image (`stable_diffusion` & `qwen_image_21`):** Stable Diffusion 1.x / 2.x UNets (including distilled variants) and Qwen-Image 2.1 single-stream DiT pipelines.
 
 ---
@@ -262,7 +264,9 @@ tokenshark/
     model.py            RawLLM forward pass, MoE router/experts, and side-branch fork execution
     stepper.py          Interactive token/block Stepper (unified with Run/Pause/Stop/Continue)
     analysis.py         Logit lens, through-last-k-blocks decoding, word clouds, and DLA word tracking
-    adapter.py          LLMAdapter entry point
+    adapter.py          LLMAdapter entry point (prompt building, media placeholders, info for the UI)
+    arch.py             ArchHooks / LayerAttn: the contract a model plugin uses to describe an architecture
+    media.py            MediaEncoder contract for image input + image I/O helpers
   kvcache.py          Pre-RoPE KV cache, per-block recreated caches, hybrid linear memory, prepend/edit
   sd.py               Raw Stable Diffusion: CLIP text encoder, UNet, VAE, Euler scheduler, cross-attn & stage maps
   qimage.py           Raw Qwen-Image 2.1: Qwen3-VL text encoder, 32-block single-stream DiT, Wan VAE, ImageStepper
@@ -280,7 +284,8 @@ tokenshark/
   api.py              Lab & RunResult Python API for scripts and notebooks (extensible via sdk.py)
   mcp_server.py       Pure-stdlib stdio MCP server for AI tutoring
   server/             FastAPI server package (app.py, models_api.py, runs_api.py, kv_api.py, debug_api.py)
-  plugins/            Modular model-family plugins (causal_lm.py, stable_diffusion.py, qwen_image_21.py)
+  plugins/            Modular model-family plugins (causal_lm.py, gemma4.py, stable_diffusion.py, qwen_image_21.py)
+                      All model-specific knowledge lives here, never in llm/, server/ or web/ (see below)
   extensions/         Modular feature plugins & auto-discovery (patching, steering, neurons, moe, introspect,
                       lora, quant, training, guardrail_fork, attn_traceback, datasets)
   web/                Browser UI in plain ES modules + HTML/CSS (core.js, flow.js, paint.js, ui/*, tabs/*)
@@ -294,7 +299,29 @@ tests/
   test_routes.py        End-to-end HTTP API tests for all lab, quantization, code, and training endpoints
   test_extensions.py    Extension discovery/toggling, custom ops, guardrail forks, attention traceback, CoT datasets, stepper sync
   test_architecture.py  Plugin contract & declarative UI schema verification
+  test_gemma4.py        Gemma-4 plugin (text + image) vs transformers, per-layer KV shapes, patchify, plugin selection
 ```
+
+### Adding a language model family
+
+`tokenshark/llm/` holds generic building blocks and never names a model. A decoder whose `config.json` the generic
+reader understands (Llama / Qwen / Mistral style, standard `layer_types`, `sliding_window`, per-layer-type
+`rope_parameters`, `per_layer_config`, `final_logit_softcapping`) loads through `causal_lm.py` with no code.
+Anything else gets **one plugin file**:
+
+1. `tokenshark/plugins/<family>.py`: subclass `CausalLMPlugin`, set `id`, `priority` (above 0, so it wins over the
+   catch-all `causal_lm`), `default_models`, and `matches()` on the checkpoint's `model_type`.
+2. Return an `ArchHooks` from `arch_hooks()` (`tokenshark/llm/arch.py`):
+   `normalize_config()` rewrites the family's config keys into the generic ones, `configure()` sets engine knobs
+   (`cfg.layers[l]` head size / KV heads / window / RoPE / K=V, `embed_scale`, `attn_scale`, `v_norm`,
+   `media_token_ids`, `media_bidir`, ...), `media_encoder()` returns a `MediaEncoder`
+   (`tokenshark/llm/media.py`) for image input, and `weight_skip_prefixes` lists tower weights the text path
+   never reads.
+3. Add an oracle test against `transformers` on a tiny random model (`tests/make_tiny.py`, `tests/test_gemma4.py`).
+
+If the engine lacks a building block, add it to `tokenshark/llm/` as a generic, named knob (default off) and set
+it from the plugin. Never branch on a model name or `model_type` in `tokenshark/llm/`, `tokenshark/server/` or
+`tokenshark/web/`. `gemma4.py` is the worked example.
 
 ---
 
@@ -305,4 +332,4 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The test suite (**157 tests** across 10 test modules) verifies numerical equivalence against `transformers` and `diffusers` on random weights, hybrid linear/full attention math, Qwen-Image 2.1 DiT bit-exact schedules and latents, step-by-step debugging, unified Run/Stop/Step/Continue state preservation, activation patching, steering, neuron clamping/wiring, center-layer guardrail forks, previous-token attention attribution, quantization, in-browser training, adaptation methods, and UI/extension plugin contracts.
+The test suite (**170 tests** across 11 test modules) verifies numerical equivalence against `transformers` and `diffusers` on random weights, hybrid linear/full attention math, Qwen-Image 2.1 DiT bit-exact schedules and latents, step-by-step debugging, unified Run/Stop/Step/Continue state preservation, activation patching, steering, neuron clamping/wiring, center-layer guardrail forks, previous-token attention attribution, quantization, in-browser training, adaptation methods, and UI/extension plugin contracts.

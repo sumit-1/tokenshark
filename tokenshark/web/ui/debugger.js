@@ -56,6 +56,18 @@ export async function pollDebug() {
     showDebugProgress(st)
     // show which block is running on the canvas
     flow.setActive(st.progress?.node || null, [])
+    // show the text produced so far while a long step (▶ Continue, appending tokens) is still running
+    const rid = S.debug?.run_id || S.run?.id
+    if (rid) {
+      try {
+        const r = await GET(`/api/runs/${rid}?since=${S.run?.id === rid ? (S.runVersion ?? -1) : -1}`)
+        if (r.outputs !== undefined && r.version !== S.runVersion) {
+          S.runVersion = r.version
+          S.run = r
+          applyRunBadges(); renderInspector(); renderTab()
+        }
+      } catch {}
+    }
     S.dbgPoll = setTimeout(pollDebug, 500); return
   }
   showDebugProgress(null)

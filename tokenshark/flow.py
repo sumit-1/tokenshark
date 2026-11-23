@@ -244,6 +244,9 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
         rope_step_stride=_num(s.get("rope_step_stride"), 1.0, float) if s.get("rope_step_stride") not in (None, "") else 1.0,
         rope_prompt_scale=_num(s.get("rope_prompt_scale"), 1.0, float) if s.get("rope_prompt_scale") not in (None, "") else 1.0,
     )
+    # RoPE jump for every block: the first generated token is placed at this position (later ones follow from it).
+    if s.get("rope_gen_start") not in (None, ""):
+        params["rope_gen_start"] = _num(s.get("rope_gen_start"), 0.0, float)
     # Earlier turns of the conversation (the Prompt box's list): [{"role": "user" | "assistant", "content": …}].
     hist = []
     for m in p.get("history") or []:
@@ -254,7 +257,12 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
             hist.append({"role": role, "content": content})
     if hist:
         params["history"] = hist
-    # KV prefixes: a saved cache (kv_import) wired into Embed's "cache" port.
+    # Images (models whose plugin provides a media encoder): data: URLs / base64 strings, one per prompt marker.
+    imgs = [str(i) for i in (p.get("images") or []) if i]
+    if imgs:
+        if not caps.get("image_input"):
+            raise FlowError([{"message": "This model doesn't take image input.", "node": find_kind("input_prompt")[0]}])
+        params["images"] = imgs
     kv = [nid for nid in find_kind("kv_import")
           if any(e["source"] == nid and e["target"] in find_kind("embed") and e.get("targetHandle") == "cache"
                  for e in edges)]
@@ -369,10 +377,35 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
             qo_val = _num(d.get("rope_q_offset"), 0.0, float)
             if qo_val != 0.0:
                 r_entry["q_offset"] = qo_val
+        if d.get("rope_gen_start") not in (None, ""):
+            r_entry["gen_start"] = _num(d.get("rope_gen_start"), 0.0, float)
         if r_entry:
             rope[nid] = r_entry
     if rope:
         params["rope"] = rope
+    # Zeroed KV records: cache rows (token index in the run's KV cache) whose key and value are set to 0,
+    # in every block (Sampler box's kv_zero) and/or in single blocks (a block box's kv_zero).
+    def _rows(spec) -> set[int]:
+        out = set()
+        for part in str(spec or "").replace(" ", "").split(","):
+            if part.isdigit():
+                out.add(int(part))
+            elif ":" in part:
+                a, _, b = part.partition(":")
+                if a.isdigit() and b.isdigit():
+                    out.update(range(int(a), int(b)))
+        return out
+    every = _rows(s.get("kv_zero"))
+    kv_zero = {}
+    for nid in chain:
+        d = nodes[nid]["data"]
+        if d.get("kind") != "block":
+            continue
+        rows = every | _rows(d.get("kv_zero"))
+        if rows:
+            kv_zero[nid] = sorted(rows)
+    if kv_zero:
+        params["kv_zero"] = kv_zero
     return params
 
 

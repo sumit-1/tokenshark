@@ -109,9 +109,14 @@ class RunResult:
     def neuron(self, block: int, index: int) -> dict:
         return interp.neuron_detail(self.lab.adapter, self.captures, self.plan.schedule, block, index)
 
-    def kv_analysis(self) -> dict:
-        """Analyze this run's KV cache: GQA memory savings, per-block & per-token K/V norms, and attention sinks."""
-        return interp.kv_analysis(self.lab.adapter, self.captures, self.plan.schedule, self.plan.schedule_nodes)
+    def kv_analysis(self, blocks: str = "all", query: int | None = None) -> dict:
+        """Analyze this run's KV cache: GQA memory savings, per-block & per-token K/V norms, attention sinks,
+        and how much attention each cached token lost (or gained) to its RoPE distance from one query.
+        Per-token columns are averaged over `blocks` (schedule positions: all | 5 | 3,7 | 10:14). Attention
+        columns are for one forward pass: by default the one that produced the last output token; `query`
+        picks the pass at another cache index (it predicted the token after it)."""
+        return interp.kv_analysis(self.lab.adapter, self.captures, self.plan.schedule, self.plan.schedule_nodes,
+                                  blocks, query)
 
     def trace_attention(self, query_token: int = -1, key_token: int | None = None,
                         target_word: str = "", top_k: int = 30) -> dict:
@@ -220,10 +225,11 @@ class Lab:
 
     # ---------------------------------------------------------------- flows and runs
     def flow(self, prompt: str | None = None, **kw) -> FlowBuilder:
-        """The model's default flow. Keyword arguments go to the prompt box (system, prefill, chat) or the sampler
+        """The model's default flow. Keyword arguments go to the prompt box (system, prefill, chat, images) or the sampler
         (max_new_tokens, temperature, top_k, top_p, seed)."""
         fb = FlowBuilder(self.plugin.default_flow(self.info))
-        pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt", "history") if k in kw}
+        pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt", "history", "images")
+              if k in kw}
         if prompt is not None or pk:
             fb.prompt(prompt=prompt, **pk)
         if kw:

@@ -55,14 +55,11 @@ export const FIELDS = {
        ['add_bos', 'Add BOS (no template)', 'checkbox']],
   sampler: () => [['max_new_tokens', 'Max new tokens', 'number'], ['temperature', 'Temperature (0 = greedy)', 'number'],
     ['top_k', 'Top-k (0 = off)', 'number'], ['top_p', 'Top-p (1 = off)', 'number'], ['seed', 'Seed', 'number'],
-    ['rope_step_stride', 'RoPE step stride per generated token (1 = normal, 0 = freeze pos, 50 = fast-forward / forget)', 'number'],
-    ['rope_prompt_scale', 'RoPE prompt position scale (1 = normal, 0 = bag-of-words prompt)', 'number']],
+    ['rope_step_stride', 'RoPE clock speed while generating (positions per new token: 1 = normal, 0 = frozen, 50 = fast-forward)', 'number'],
+    ['rope_prompt_scale', 'RoPE clock speed over the prompt (1 = normal, 0 = every prompt token at position 0)', 'number']],
   noise: () => [['seed', 'Seed', 'number'], ['width', 'Width', 'number'], ['height', 'Height', 'number']],
   scheduler: () => [['steps', 'Steps', 'number'], ['guidance_scale', 'Guidance (CFG, ≤1 = off)', 'number']],
   block: (m, n) => [['layer', 'Weights of layer', 'number'], ['label', 'Label', 'text'],
-    ['rope_scale', 'RoPE position scale (empty/1 = normal, 0 = off / no RoPE, −1 = reverse)', 'number'],
-    ['rope_theta', `RoPE base θ override (empty = model’s ${S.info?.rope_theta ?? 10000}; try 100 to desync)`, 'number'],
-    ['rope_q_offset', 'RoPE query shift Δpos (shifts Q relative to K in this block)', 'number'],
     ...(n?.data.moe ? [['moe_k', `Experts per token (empty = the model’s own ${S.info?.moe?.top_k ?? ''}; 1 … ${n.data.moe})`, 'number'],
       ['moe_temp', 'Router temperature (empty = 1; higher = flatter choice, lower = sharper)', 'number'],
       ...(S.info?.moe?.shared ? [['moe_shared', 'Use the shared expert (the one every token goes through)', 'checkbox']] : [])] : [])],
@@ -258,15 +255,11 @@ export function renderInspector() {
   if (k === 'init_image') box.appendChild(startImageEditor(n))
   else (FIELDS[k]?.(schema().modality, n) || []).forEach(f => box.appendChild(field(n, f)))
   if (k === 'input_prompt' && schema().modality !== 'image') box.appendChild(historyEditor(n))
+  if (k === 'input_prompt' && S.info?.capabilities?.image_input) box.appendChild(promptImagesEditor(n))
   const actions = el('div', { className: 'row' })
   if (k === 'block') {
-    const ropeOff = n.data.rope_scale === 0
     actions.append(btn('Repeat block', () => duplicateBlock(n)), btn(n.data.bypass ? 'Restore' : 'Bypass', () => bypassBlock(n)),
-      btn(ropeOff ? 'RoPE: Restore' : 'RoPE: Turn off (0×)', () => {
-        flow.updateNodeData(n.id, { rope_scale: ropeOff ? '' : 0 })
-        hooks.refreshBadges?.()
-        renderInspector()
-      }),
+      ...(tabAvailable('kv') && n.data.has_kv !== false ? [btn('RoPE & KV cache…', () => openKVFor(n))] : []),
       btn('+ Interceptor', () => addIntervention(n)),
       btn('+ Fork Head', () => addForkHead(n)),
       btn('Debug: run to here', () => debugRunTo(n)))
@@ -307,6 +300,13 @@ export function renderInspector() {
   codeSection(n, box)
   if ((k === 'tokenizer' || k === 'input_prompt') && schema().modality !== 'image') renderRightPaneTokenDict(box)
   renderNodeResults(n, box)
+}
+
+// Open the KV caches tab with only this block selected (RoPE and KV settings live there, not in this pane).
+function openKVFor(n) {
+  const i = (S.planNodes || []).indexOf(n.id)
+  S.kvBlocks = [i >= 0 ? i : flow.nodes.filter(x => x.data.kind === 'block').findIndex(x => x.id === n.id)].filter(x => x >= 0)
+  setTab('kv')
 }
 
 let _dictTimer = null
@@ -353,6 +353,32 @@ async function populateRightPaneTokenDict(wrap) {
 export function genSize() {
   const nz = flow.nodes.find(x => x.data.kind === 'noise')?.data || {}
   return [+nz.width || S.info?.default_size || 512, +nz.height || S.info?.default_size || 512]
+}
+
+// Images for a language model with image input (info.capabilities.image_input): each fills one marker in the
+// prompt text, or goes in front of the prompt when the text has no markers.
+function promptImagesEditor(n) {
+  const wrap = el('div', { className: 'sec' })
+  const imgs = n.data.images || []
+  const save = list => { flow.updateNodeData(n.id, { images: list }); renderInspector() }
+  wrap.appendChild(el('h4', { textContent: `Images (${imgs.length})` }))
+  wrap.appendChild(el('div', { className: 'small', textContent: `Each image becomes a run of image tokens. Put ${S.info.media_marker || 'a marker'} in the prompt to place them; otherwise they go first.` }))
+  const strip = el('div', { className: 'row prompt-images' })
+  imgs.forEach((url, i) => {
+    const cell = el('div', { className: 'prompt-image' })
+    cell.append(el('img', { src: url, title: `image ${i + 1}` }), btn('✕', () => save(imgs.filter((_, j) => j !== i)), 'mini'))
+    strip.appendChild(cell)
+  })
+  if (imgs.length) wrap.appendChild(strip)
+  const file = el('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' })
+  file.onchange = async () => {
+    const read = f => new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f) })
+    save([...imgs, ...await Promise.all([...file.files].map(read))])
+  }
+  const row = el('div', { className: 'row' })
+  row.append(btn('📂 Add image…', () => file.click()), ...(imgs.length ? [btn('Remove all', () => save([]), 'ghost')] : []))
+  wrap.append(file, row)
+  return wrap
 }
 
 export function startImageEditor(n) {
@@ -429,27 +455,8 @@ export function renderNodeResults(n, box) {
       <span>lens @ last token</span><b>${esc(st.lens_last ?? '')}</b></div>`
     const row = el('div', { className: 'row' })
     row.append(btn('Attention of this block', () => { S.attnPos = st.pos; setTab('attn') }),
-      btn('Open KV caches tab', () => setTab('kv')))
+      ...(o.cache && n.data.has_kv !== false && tabAvailable('kv') ? [btn('This block’s KV cache & RoPE', () => openKVFor(n))] : []))
     sec.appendChild(row)
-    if (o.cache && n.data.has_kv !== false) {
-      const bOv = o.cache.block_overrides?.[st.pos] || o.cache.block_overrides?.[String(st.pos)]
-      const kvSrc = bOv || o.cache
-      const segOf = i => (kvSrc.segments || []).find(s => i >= s.start && i < s.end)?.origin || 'prompt'
-      const kvHead = el('h4', {
-        textContent: bOv
-          ? `Block KV cache (${bOv.op} · ${bOv.n_tokens} tokens, ${bOv.n_prompt} recreated prompt)`
-          : `Block KV cache (shared · ${kvSrc.n_tokens} tokens)`,
-      })
-      const kvToks = el('div', { className: 'tokens compact' })
-      ;(kvSrc.tokens || []).forEach((t, i) => {
-        const pos = kvSrc.positions?.[i] ?? i
-        kvToks.appendChild(el('span', {
-          className: `tok seg-${segOf(i)}`,
-          title: `#${i} · origin: ${segOf(i)} · RoPE pos ${pos}`,
-        }, `${esc(t)}<sub>${pos}</sub>`))
-      })
-      sec.append(kvHead, kvToks)
-    }
     if (S.lens) {
       const li = S.lens.layers.findIndex(l => l.node === n.id)
       if (li >= 0) {

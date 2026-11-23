@@ -32,6 +32,7 @@ class Stepper:
         if not prompt_ids and not prefill_ids:
             raise ValueError("Nothing to run: empty prompt.")
         self.prompt_ids, self.prefill_ids = prompt_ids, prefill_ids
+        self.media = ad.media_features(p)        # soft tokens for the prompt's media placeholders (or None)
         self.n_in = len(prompt_ids) + len(prefill_ids)
         self.total = p["max_new_tokens"]
         planned = self.planned = self.n_in + self.total
@@ -72,6 +73,8 @@ class Stepper:
         ctx.store["code"] = {pos: self.code[nid] for pos, nid in enumerate(plan.schedule_nodes) if nid in self.code}
         rope_per = p.get("rope") or {}
         ctx.store["rope"] = {pos: dict(rope_per[nid]) for pos, nid in enumerate(plan.schedule_nodes) if nid in rope_per}
+        zero_per = p.get("kv_zero") or {}
+        ctx.store["kv_zero"] = {pos: list(zero_per[nid]) for pos, nid in enumerate(plan.schedule_nodes) if nid in zero_per}
         self.box_code = {c.kind: c for c in self.code.values() if c.kind != "block"}
         cache, start_pos, spans = ad.new_cache(S_), 0.0, []
         for c, sp in zip(prefixes, specs):
@@ -95,6 +98,8 @@ class Stepper:
         cache.init_states = KVCache._clone_states(cache.states)
         self.prompt_scale = float(p.get("rope_prompt_scale", 1.0))
         self.step_stride = float(p.get("rope_step_stride", 1.0))
+        self.gen_start = p.get("rope_gen_start")          # RoPE jump: first generated token sits at this position
+        self.jumped = False
         if p.get("kv_overrides"):
             cache.block_caches = ad.recreate_block_caches(plan, start_pos=start_pos, prompt_scale=self.prompt_scale)
         max_bc_len = max([len(bc) for bc in cache.block_caches.values()], default=0)
@@ -111,11 +116,39 @@ class Stepper:
         self.last_pos = None
         self.x, self.bp, self.chunk = None, 0, None
         self.n_generated, self.done, self.forced = 0, False, None
+        self.eos_stop = False
         self.trace: list[dict] = []
         self.progress = progress
         self.steps = 0
         self.trace_on = trace
         self.last_lens: dict[int, str] = {}
+
+    def update_rope(self, params: dict) -> list[str]:
+        """Take new RoPE / zeroed-record settings from a recompiled flow, mid-session. Keys sit in the cache
+        before RoPE, so new speeds and gears apply to every cached key from the next step on. Zeroing is
+        permanent for this session (the record is erased); restoring one needs a fresh run."""
+        p, plan, ctx, changed = params, self.plan, self.ctx, []
+        rope_per = p.get("rope") or {}
+        rope = {pos: dict(rope_per[nid]) for pos, nid in enumerate(plan.schedule_nodes) if nid in rope_per}
+        if rope != (ctx.store.get("rope") or {}):
+            ctx.store["rope"] = rope
+            changed.append("block RoPE")
+        zero_per = p.get("kv_zero") or {}
+        zero = {pos: list(zero_per[nid]) for pos, nid in enumerate(plan.schedule_nodes) if nid in zero_per}
+        if zero != (ctx.store.get("kv_zero") or {}):
+            ctx.store["kv_zero"] = zero
+            changed.append("zeroed records")
+        stride, gs = float(p.get("rope_step_stride", 1.0)), p.get("rope_gen_start")
+        if stride != self.step_stride:
+            self.step_stride = stride
+            changed.append("generation speed")
+        if gs != self.gen_start:                  # a new jump target: the next generated token lands there
+            self.gen_start, self.jumped = gs, False
+            changed.append("jump")
+        if self.n_generated == 0 and float(p.get("rope_prompt_scale", 1.0)) != self.prompt_scale:
+            changed.append("prompt speed (only before the prompt is read)")
+            self.prompt_scale = float(p.get("rope_prompt_scale", 1.0))
+        return changed
 
     # ---------------------------------------------------------------- helpers
     def _idx(self, iv, offset, n):
@@ -145,7 +178,7 @@ class Stepper:
         forced, self.forced = self.forced is not None, None
         if nxt in self.eos and not self.p_.get("ignore_eos") and not forced:
             self.seq.append(nxt)
-            self.done = True
+            self.done = self.eos_stop = True
             return None
         self.n_generated += 1
         return ([nxt], "generated")
@@ -170,8 +203,12 @@ class Stepper:
             if ch is None:
                 return False
             ids, origin = ch
+            jump = 0.0
             if origin == "generated":
                 base_p = (self.last_pos + self.step_stride) if self.last_pos is not None else self.pos_next
+                if self.gen_start is not None and not self.jumped:
+                    jump, base_p = float(self.gen_start) - base_p, float(self.gen_start)
+                self.jumped = True
                 positions = [base_p + i * self.step_stride for i in range(len(ids))]
             else:
                 base_p = (self.last_pos + self.prompt_scale) if self.last_pos is not None else self.pos_next
@@ -182,7 +219,7 @@ class Stepper:
             if origin != "prompt" and self.cache.block_caches:
                 stride = self.step_stride if origin == "generated" else self.prompt_scale
                 for bc in self.cache.block_caches.values():
-                    b_base = (float(bc.pos[-1]) + stride) if len(bc.pos) else 0.0
+                    b_base = ((float(bc.pos[-1]) + stride) if len(bc.pos) else 0.0) + jump
                     b_pos = [b_base + i * stride for i in range(len(ids))]
                     bc.add_tokens(ids, b_pos, origin)
             if "embed" in self.box_code:
@@ -190,6 +227,8 @@ class Stepper:
                 self.x = run_embed(self.model, self.box_code["embed"], ids, self.ctx)
             else:
                 self.x = self.model.embed(ids)
+            if origin == "prompt" and self.media is not None:
+                self.x = self.model.inject_media(self.x, ids, self.media)
             self.chunk, self.bp, self.trace = ch, 0, []
             if self.trace_on:
                 self.trace.append({"pos": -1, "node": "embed", "label": "Embed", "top": self._lens_top(self.x),
@@ -271,6 +310,20 @@ class Stepper:
                 return False
         return True
 
+    def extend(self, total: int) -> None:
+        """Raise the token budget of a run that stopped at its limit, so it can go on appending tokens."""
+        total = int(total)
+        if total <= self.total:
+            return
+        if self.x is not None:
+            raise ValueError("Finish the current token first (a block is mid-way).")
+        if self.eos_stop or self.ctx.store.get("fork_gate_halt"):
+            raise ValueError("The run ended on its own (end-of-text or a guardrail gate), so there is nothing to append to.")
+        self.total = self.p_["max_new_tokens"] = total
+        self.planned = self.n_in + total
+        self.ctx.token_ranges["generated"] = range(self.n_in, self.planned)
+        self.done = False
+
     def force(self, token_id: int):
         self.forced = int(token_id)
 
@@ -283,6 +336,7 @@ class Stepper:
               "chunk": [tok.piece(i) for i in self.chunk[0]] if self.chunk else [],
               "chunk_origin": self.chunk[1] if self.chunk else None,
               "tokens": [tok.piece(i) for i in self.seq], "n_in": self.n_in, "n_generated": self.n_generated,
+              "total": self.total, "can_extend": self.done and not self.eos_stop and self.x is None,
               "trace": self.trace, "forced": self.forced, "steps": self.steps,
               "text": tok.decode(self.seq[self.n_in:], skip_special=True)}
         if self.x is None and self.logits_rows and not self.done:

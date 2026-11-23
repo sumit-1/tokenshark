@@ -121,9 +121,9 @@ def tokenize(req: TokenizeReq):
 
 
 @app.get("/api/runs/{run_id}/kv_analysis")
-def run_kv_analysis(run_id: str):
+def run_kv_analysis(run_id: str, blocks: str = "all", query: int | None = None):
     r, cap = _llm_run(run_id)
-    return _guard(interp.kv_analysis, LOADED.adapter, cap, r.plan.schedule, r.plan.schedule_nodes)
+    return _guard(interp.kv_analysis, LOADED.adapter, cap, r.plan.schedule, r.plan.schedule_nodes, blocks, query)
 
 
 @app.get("/api/tokens/search")

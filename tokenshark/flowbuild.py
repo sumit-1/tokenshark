@@ -80,12 +80,17 @@ class FlowBuilder:
 
     # ---------------------------------------------------------------- inputs and sampling
     def prompt(self, prompt=None, system=None, prefill=None, chat=None, thinking=None, negative_prompt=None,
-               history=None):
+               history=None, images=None):
         """history: the conversation so far, [{"role": "user" | "assistant", "content": …}, …]; `prompt` is then the
-        newest user turn (leave it "" to have the model answer the last turn of the history)."""
+        newest user turn (leave it "" to have the model answer the last turn of the history).
+        images (models whose plugin provides image input): file paths, PIL images, bytes or data: URLs. Each one
+        fills a `<|image|>` marker in the text; without markers they go in front of the prompt."""
+        if images is not None:
+            from .llm.media import to_data_url
+            images = [to_data_url(i) for i in images]
         return self._set("input_prompt", prompt=prompt, system=system, prefill=prefill, use_chat_template=chat,
                          thinking=thinking, negative_prompt=negative_prompt,
-                         history=[dict(m) for m in history] if history is not None else None)
+                         history=[dict(m) for m in history] if history is not None else None, images=images)
 
     def say(self, role: str, content: str):
         """Append one earlier turn to the conversation: flow.say("user", "Hi").say("assistant", "Hello!")."""
@@ -94,18 +99,23 @@ class FlowBuilder:
         return self
 
     def sampler(self, max_new_tokens=None, temperature=None, top_k=None, top_p=None, seed=None,
-                rope_step_stride=None, rope_prompt_scale=None):
+                rope_step_stride=None, rope_prompt_scale=None, rope_gen_start=None, kv_zero=None):
+        """rope_gen_start: RoPE jump - the first generated token sits at this position in every block.
+        kv_zero: KV cache rows (token indices, '3,7' or '0:4') whose key and value are zeroed in every block."""
         return self._set("sampler", max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p,
-                         seed=seed, rope_step_stride=rope_step_stride, rope_prompt_scale=rope_prompt_scale)
+                         seed=seed, rope_step_stride=rope_step_stride, rope_prompt_scale=rope_prompt_scale,
+                         rope_gen_start=rope_gen_start, kv_zero=kv_zero)
 
     def rope_step(self, stride: float | None = None, prompt_scale: float | None = None):
         """Change how RoPE positions advance per generation step (stride=0 freezes decode position; stride=50
         fast-forwards so earlier turns fade fast; prompt_scale=0 collapses prompt positions to 0)."""
         return self.sampler(rope_step_stride=stride, rope_prompt_scale=prompt_scale)
 
-    def rope(self, block="all", scale: float | None = None, theta: float | None = None, q_offset: float | None = None):
+    def rope(self, block="all", scale: float | None = None, theta: float | None = None, q_offset: float | None = None,
+             gen_start: float | None = None, kv_zero: str | None = None):
         """Change RoPE on one block, a list of blocks, or a slice spec ('all', '12:24', '1,2'):
-        scale=0 turns off RoPE on those blocks; theta overrides base frequency; q_offset shifts Q positions vs K."""
+        scale=0 turns off RoPE on those blocks (clock speed); theta overrides base frequency; q_offset shifts
+        Q positions vs K; gen_start jumps generated tokens to that position; kv_zero zeroes KV rows ('3,7')."""
         chain = walk_chain(self.flow)
         if isinstance(block, int):
             targets = [self.node(block)]
@@ -119,7 +129,8 @@ class FlowBuilder:
             targets = [chain[i] for i in idx]
         for n in targets:
             d = n["data"]
-            for key, v in (("rope_scale", scale), ("rope_theta", theta), ("rope_q_offset", q_offset)):
+            for key, v in (("rope_scale", scale), ("rope_theta", theta), ("rope_q_offset", q_offset),
+                           ("rope_gen_start", gen_start), ("kv_zero", kv_zero)):
                 if v is not None:
                     d[key] = v
         return self

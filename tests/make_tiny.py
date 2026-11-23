@@ -20,12 +20,13 @@ CHAT = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<
         "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}")
 
 
-def make_tokenizer(out: Path, vocab=400):
+def make_tokenizer(out: Path, vocab=400, extra_special=()):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
     tk = Tokenizer(models.BPE())
     tk.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tk.decoder = decoders.ByteLevel()
-    tr = trainers.BpeTrainer(vocab_size=vocab, special_tokens=["<|endoftext|>", "<|im_start|>", "<|im_end|>"],
+    tr = trainers.BpeTrainer(vocab_size=vocab, special_tokens=["<|endoftext|>", "<|im_start|>", "<|im_end|>",
+                                                               *extra_special],
                              initial_alphabet=pre_tokenizers.ByteLevel.alphabet())
     tk.train_from_iterator([CORPUS], tr)
     out.mkdir(parents=True, exist_ok=True)
@@ -79,6 +80,44 @@ def make_llm(out: Path, arch="qwen2", seed=0):
             if name.endswith((".gate.weight", "shared_expert_gate.weight")) and p.abs().max() == 0:
                 p.copy_(torch.randn_like(p) * 0.3)     # routers that start at zero would route every token alike
     m.save_pretrained(out, safe_serialization=True)
+    return m
+
+
+GEMMA4_IMAGE_TOKENS = ("<|image>", "<|image|>", "<image|>")     # ids 3, 4, 5 in the tiny tokenizer
+
+
+def make_gemma4(out: Path, seed=0):
+    """Tiny Gemma-4 'unified' model (the gemma-4-12B layout): sliding + global layers with different head sizes,
+    K=V global attention, proportional partial RoPE, logit soft-capping and the encoder-free image embedder."""
+    import transformers as T
+    torch.manual_seed(seed)
+    vocab = make_tokenizer(out, extra_special=GEMMA4_IMAGE_TOKENS)
+    boi, img, eoi = 3, 4, 5
+    tc = dict(vocab_size=vocab, hidden_size=64, intermediate_size=128, num_hidden_layers=5, num_attention_heads=4,
+              num_key_value_heads=2, head_dim=16, global_head_dim=32, num_global_key_value_heads=1,
+              attention_k_eq_v=True, sliding_window=6, max_position_embeddings=512, rms_norm_eps=1e-6,
+              layer_types=["sliding_attention", "sliding_attention", "full_attention", "sliding_attention",
+                           "full_attention"],
+              rope_parameters={"sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+                               "full_attention": {"rope_type": "proportional", "partial_rotary_factor": 0.25,
+                                                  "rope_theta": 1000000.0}},
+              final_logit_softcapping=3.0, use_bidirectional_attention="vision", hidden_size_per_layer_input=0,
+              pad_token_id=0, eos_token_id=2, bos_token_id=1, tie_word_embeddings=True)
+    vc = dict(patch_size=4, pooling_kernel_size=2, mm_embed_dim=32, mm_posemb_size=64, output_proj_dims=32)
+    cfg = T.Gemma4UnifiedConfig(text_config=tc, vision_config=vc, audio_config=None, image_token_id=img,
+                                boi_token_id=boi, eoi_token_id=eoi, video_token_id=vocab + 1, audio_token_id=vocab + 2,
+                                tie_word_embeddings=True)
+    m = T.Gemma4UnifiedForConditionalGeneration(cfg)
+    with torch.no_grad():
+        for name, p in m.named_parameters():
+            if p.ndim >= 2:
+                p.mul_(3.0)
+            elif "norm" in name or "ln" in name:        # non-trivial norm scales (Gemma-4 stores them as-is)
+                p.copy_(1.0 + torch.randn_like(p) * 0.3)
+        for i, lay in enumerate(m.model.language_model.layers):
+            lay.layer_scalar.fill_(0.5 + 0.25 * i)
+    m.save_pretrained(out, safe_serialization=True)
+    (out / "processor_config.json").write_text(json.dumps({"image_processor": {"max_soft_tokens": 12}}))
     return m
 
 

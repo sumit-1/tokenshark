@@ -412,3 +412,62 @@ def test_unet_noisy_input_preview(sd):
     cap = res["captures"]
     for s in (0, 3):
         assert ad.step_input_preview(cap, s)[:4] == b"\x89PNG"
+
+
+def test_kv_analysis_rope_jump_and_zeroed_records(llm):
+    """KV tab: per-block selection, last-query RoPE effect, RoPE jump and zeroed KV records."""
+    ad, info, flow = llm
+    import copy
+    from tokenshark import interp
+    from tokenshark.flowbuild import FlowBuilder
+    fb = FlowBuilder(copy.deepcopy(flow))
+    fb.prompt(prompt="Where is Paris?", chat=False)
+    fb.sampler(max_new_tokens=3, temperature=0.0, seed=0)
+    plan = compile_flow(fb.flow, info)
+    res = ad.run(plan)
+    cap = res["captures"]
+    n_in = cap["token_ranges"]["generated"].start
+    every = interp.kv_analysis(ad, cap, plan.schedule, plan.schedule_nodes)
+    one = interp.kv_analysis(ad, cap, plan.schedule, plan.schedule_nodes, "1")
+    assert one["selected"] == [1] and every["n_attn_used"] == len(plan.schedule)
+    att = [t["attn_received"] for t in one["tokens"] if t["attn_received"] is not None]
+    assert abs(sum(att) - 1) < 1e-3                       # one query's attention sums to 1
+    assert all(abs(t["rope_effect"] - (t["attn_received"] - t["attn_same_pos"])) < 1e-3 for t in one["tokens"][:-1])
+    assert one["query"]["index"] == len(cap["cache"]) - 2          # the pass that produced the last token
+    assert one["query"]["result_id"] == res["outputs"]["token_ids"][-1]
+    assert one["tokens"][-1]["attn_received"] is None
+    # Any earlier query can be analysed: it sees only the keys up to itself and predicted the next token
+    early = interp.kv_analysis(ad, cap, plan.schedule, plan.schedule_nodes, "1", query=3)
+    assert early["query"]["index"] == 3 and not early["query"]["is_last"]
+    assert early["query"]["result_id"] == int(cap["cache"].tokens[4])
+    seen = [t["attn_received"] for t in early["tokens"]]
+    assert all(v is not None for v in seen[:4]) and all(v is None for v in seen[4:])
+    assert abs(sum(seen[:4]) - 1) < 1e-3
+    # RoPE settings applied while stepping take effect on the next token
+    st = ad.stepper(plan)
+    st.step_token()
+    fb.sampler(rope_gen_start=700)
+    assert "jump" in st.update_rope(compile_flow(fb.flow, info).params)
+    st.step_token()
+    assert st.cache.pos.tolist()[n_in] == 700
+    fb.node("sampler")["data"]["rope_gen_start"] = ""
+    # RoPE jump for every block: generated tokens continue from 1000
+    fb.sampler(rope_gen_start=1000)
+    plan2 = compile_flow(fb.flow, info)
+    assert plan2.params["rope_gen_start"] == 1000
+    pos = ad.run(plan2)["captures"]["cache"].pos.tolist()
+    assert pos[n_in] == 1000 and pos[n_in + 1] == 1001 and pos[n_in - 1] < 100
+    # RoPE jump on one block only: its keys move, the stored positions do not
+    fb.node("sampler")["data"]["rope_gen_start"] = ""
+    fb.rope(1, gen_start=500)
+    plan3 = compile_flow(fb.flow, info)
+    cap3 = ad.run(plan3)["captures"]
+    assert cap3["rope_pos"][1][1][n_in].item() == 500 and cap3["rope_pos"][0][1][n_in].item() == n_in
+    # Zeroed KV record in every block
+    fb.node(1)["data"]["rope_gen_start"] = ""
+    fb.sampler(kv_zero="2")
+    plan4 = compile_flow(fb.flow, info)
+    cache4 = ad.run(plan4)["captures"]["cache"]
+    assert all(float(cache4.k[p][:, 2].abs().sum()) == 0 and float(cache4.v[p][:, 2].abs().sum()) == 0
+               for p in range(len(plan4.schedule)))
+    assert float(cache4.k[0][:, 3].abs().sum()) > 0

@@ -19,6 +19,16 @@ How to add a new model plugin (for students, educators, or model creators):
      automatically!
    - `create_adapter(spec, root, device, dtype, policy, keep_layers)`: returns the runtime
      adapter instance.
+   - `priority` (optional): plugins whose `matches()` is specific (one `model_type`) set it above 0 so they win
+     over catch-all plugins such as `causal_lm`, which accepts any decoder `config.json`.
+
+A new decoder-only language model usually needs NO engine change: subclass `CausalLMPlugin` (causal_lm.py) and
+return an `ArchHooks` object from `arch_hooks()` (see `tokenshark/llm/arch.py`). The hooks translate the model's
+config keys into the generic ones, set engine knobs (per-layer attention shapes, embedding scale, value norm,
+logit soft-cap, ...), and may supply a `MediaEncoder` (`tokenshark/llm/media.py`) for image input.
+`gemma4.py` is the worked example. Model names and model-specific branches never go into `tokenshark/llm/`,
+the server, or the web UI: if the engine lacks a building block, add it as a generic, named knob and set it from
+the plugin.
 
 To remove a plugin, simply delete its `.py` file from `tokenshark/plugins/`.
 """
@@ -46,6 +56,9 @@ class ModelPlugin:
 
     # Built-in model catalog entries provided by this plugin (replaces monolithic models.json)
     default_models: list[dict[str, Any]] = []
+
+    # Plugins with a higher priority are asked first whether they match a model folder.
+    priority: int = 0
 
     # Declarative UI schema so the frontend knows what tabs, node kinds, and interactive
     # features this plugin supports without hardcoding model names in app.js
@@ -186,7 +199,7 @@ def find_plugin_for(root: Path | None, spec: dict | None = None) -> type[ModelPl
             if any(m["id"] == spec.get("id") for m in cls.default_models):
                 return cls
     if root is not None and root.exists():
-        for cls in _PLUGINS.values():
+        for cls in sorted(_PLUGINS.values(), key=lambda c: -c.priority):
             if cls.matches(root, spec):
                 return cls
     # Fallback by family

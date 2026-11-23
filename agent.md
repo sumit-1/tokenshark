@@ -14,6 +14,7 @@ Think of it as **Wireshark + x64dbg for neural network weights and activations**
 
 ### Supported Model Architectures
 - **Dense Causal Language Models (`causal_lm`):** Llama 2/3/3.1/3.2, Qwen2/2.5, Qwen3 (QK-norm), Mistral, SmolLM2.
+- **Dense Multimodal Language Models (`gemma4`):** Gemma-4 dense (e.g. gemma-4-12B): image + text -> text, sliding-window + global layers.
 - **Hybrid Linear + Full Attention Models (`causal_lm`):** Qwen3.5 / Qwen3.6 (Gated DeltaNet linear attention + gated softmax attention).
 - **Mixture-of-Experts Models (`causal_lm`):** OLMoE, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, Mixtral, DeepSeek-V2 (Multi-Head Latent Attention + YaRN + shared experts).
 - **Image Diffusion Models (`stable_diffusion`, `qwen_image_21`):** Stable Diffusion 1.5 / SD-Turbo / Tiny-SD UNets, and Qwen-Image 2.1 (32-block single-stream DiT + Qwen3-VL text encoder + Wan VAE).

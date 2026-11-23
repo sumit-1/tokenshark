@@ -47,7 +47,8 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
     if s and s0:
         d = _diff(s["data"], s0["data"], {"max_new_tokens": "max_new_tokens", "temperature": "temperature",
                                          "top_k": "top_k", "top_p": "top_p", "seed": "seed",
-                                         "rope_step_stride": "rope_step_stride", "rope_prompt_scale": "rope_prompt_scale"})
+                                         "rope_step_stride": "rope_step_stride", "rope_prompt_scale": "rope_prompt_scale",
+                                         "rope_gen_start": "rope_gen_start", "kv_zero": "kv_zero"})
         if d:
             out.append(f"{var}.sampler({_kw(d)})")
     for kind in ("noise", "scheduler"):                      # image models: set the box fields directly
@@ -81,8 +82,9 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
     if byp:
         out.append(f"{var}.bypass({', '.join(_lit(b) for b in byp)})")
     for n in chain:
-        rd = _diff(n["data"], {"rope_scale": 1.0, "rope_theta": None, "rope_q_offset": 0.0},
-                   {"rope_scale": "scale", "rope_theta": "theta", "rope_q_offset": "q_offset"})
+        rd = _diff(n["data"], {"rope_scale": 1.0, "rope_theta": None, "rope_q_offset": 0.0, "rope_gen_start": None, "kv_zero": None},
+                   {"rope_scale": "scale", "rope_theta": "theta", "rope_q_offset": "q_offset",
+                    "rope_gen_start": "gen_start", "kv_zero": "kv_zero"})
         rd = [(k, v) for k, v in rd if v != ""]
         if rd:
             out.append(f"{var}.rope({_lit(ref(n['id']))}, {_kw(rd)})")

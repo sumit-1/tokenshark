@@ -227,6 +227,21 @@ def debug_step(req: DebugStepReq):
         raise HTTPException(409, "Still computing the previous step.")
     if req.mode not in ("block", "token", "to", "all"):
         raise HTTPException(400, "mode must be block | token | to | all")
+    if hasattr(st, "extend") and req.flow:
+        # A finished language-model run keeps its stepper: raising Max new tokens appends to it.
+        for n in req.flow.get("nodes", []):
+            if (n.get("data") or {}).get("kind") == "sampler":
+                try:
+                    want = min(512, int(n["data"].get("max_new_tokens") or 0))
+                except (TypeError, ValueError):
+                    want = 0
+                if want > st.total and st.x is None:
+                    try:
+                        st.extend(want)
+                        if DEBUG.get("run") is not None:
+                            DEBUG["run"].flow = req.flow
+                    except ValueError as e:
+                        raise HTTPException(409, str(e))
     if getattr(st, "done", False) and hasattr(st, "extend_steps"):
         target = None
         if req.flow:
@@ -248,6 +263,12 @@ def debug_step(req: DebugStepReq):
                             st.extend_steps(target_steps=target)
                 except (TypeError, ValueError):
                     pass
+    if req.flow and hasattr(st, "update_rope"):
+        # RoPE and zeroed-record edits made while stepping take effect on the next step.
+        try:
+            st.update_rope(compile_flow(req.flow, LOADED.info).params)
+        except FlowError:
+            pass
     if req.force_token is not None:
         st.force(req.force_token)
     nb = len(st.plan.schedule)
@@ -299,8 +320,29 @@ def debug_step(req: DebugStepReq):
         if req.mode == "to":
             return run_to(int(req.pos or 0))
         while token():
-            pass
+            live_publish()
         return False
+
+    pub = {"t": 0.0, "dt": 0.0, "n": -1}
+
+    def live_publish():
+        """Show the text so far while a long step is still running (snapshot cost sets how often)."""
+        run = DEBUG.get("run")
+        if run is None or st.done or st.n_generated == pub["n"] or not hasattr(st, "extend"):
+            return
+        if time.time() - pub["t"] < max(0.15, 2 * pub["dt"]):
+            return
+        t1 = time.time()
+        try:
+            with TASKS.slot(task):
+                res = st.snapshot()
+            run.outputs, run.captures, run.cache = res["outputs"], res["captures"], {}
+            run.version += 1
+            run.status = "stepping"
+        except ValueError:
+            return
+        pub["n"], pub["t"] = st.n_generated, time.time()
+        pub["dt"] = pub["t"] - t1
 
     def work():
         err = None

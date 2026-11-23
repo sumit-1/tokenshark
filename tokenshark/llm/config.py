@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from ..weights import read_json
+from .arch import ArchHooks, LayerAttn
 
 
 class LLMConfig:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, arch: ArchHooks | None = None):
         hf = read_json(root / "config.json")
+        top = hf
         self.meta_format = False
         self.layer_types = None          # hybrid models: "linear_attention" | "full_attention" per layer
         self.norm_offset = 0.0           # Qwen3.5/3.6 store RMSNorm weights as (w - 1): scale = 1 + w
@@ -16,16 +18,28 @@ class LLMConfig:
         self.moe = None                  # mixture of experts: {"n": experts, "k": per token, "norm_topk", "inter"}
         self.mla = None                  # DeepSeek multi-head latent attention: {"nope", "rope", "v", "rank"}
         self.clip_qkv = None
+        # Engine knobs a plugin's ArchHooks may set (see llm/arch.py); the defaults are a plain decoder.
+        self.layers: list[LayerAttn] = []        # per-layer attention shape, filled at the end of __init__
+        self.final_softcap = None
+        self.embed_scale = None
+        self.attn_scale = None
+        self.v_norm = False
+        self.media_token_ids: set[int] = set()
+        self.media_bidir = None
+        self.pad_id = 0
+        self.vlm_tokens = {}
         if hf and "text_config" in hf:   # multimodal checkpoint: the language model lives in text_config
             self.vision = hf.get("vision_config")
             self.vlm_tokens = {k: hf.get(k) for k in ("image_token_id", "video_token_id", "vision_start_token_id",
                                                      "vision_end_token_id")}
-            arch = (hf.get("architectures") or [""])[0]
+            arch_name = (hf.get("architectures") or [""])[0]
             tc = dict(hf["text_config"])
-            tc.setdefault("architectures", [arch])
+            tc.setdefault("architectures", [arch_name])
             tc.setdefault("tie_word_embeddings", hf.get("tie_word_embeddings", False))
             tc["model_type"] = tc.get("model_type") or hf.get("model_type")
             hf = tc
+        if hf and arch is not None:
+            hf = arch.normalize_config(dict(hf), top)
         if hf:
             n_exp = int(hf.get("num_experts") or hf.get("num_local_experts") or hf.get("n_routed_experts") or 0)
             if n_exp and "intermediate_size" not in hf:
@@ -49,7 +63,7 @@ class LLMConfig:
             self.rope_scaling = hf.get("rope_scaling") or hf.get("rope_parameters")
             self.tied = bool(hf.get("tie_word_embeddings", False))
             self.sliding_window = hf.get("sliding_window") if hf.get("use_sliding_window", self.model_type == "mistral") else None
-            self.act = hf.get("hidden_act", "silu")
+            self.act = hf.get("hidden_act") or hf.get("hidden_activation") or "silu"
             self.attn_bias = bool(hf.get("attention_bias", self.model_type == "qwen2"))
             self.eos = hf.get("eos_token_id")
             self.max_pos = hf.get("max_position_embeddings", 4096)
@@ -84,10 +98,13 @@ class LLMConfig:
                             "hv": hf.get("linear_num_value_heads", 32)}
             elif self.model_type not in ("llama", "qwen2", "qwen3", "mistral", "olmo2", "qwen3_vl", "qwen3_vl_text",
                                          "mixtral", "qwen2_moe", "qwen3_moe", "olmoe", "tiny_moe", "deepseek_v2") \
-                    and "Llama" not in self.arch:
+                    and "Llama" not in self.arch and arch is None:
                 raise ValueError(f"Architecture '{self.arch}' is not supported by the raw engine yet "
                                  f"(supported: Llama, Qwen2/2.5, Qwen3, Qwen3.5/3.6, Mistral, SmolLM; mixture of "
-                                 f"experts: Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, DeepSeek-V2).")
+                                 f"experts: Mixtral, Qwen1.5/2-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, DeepSeek-V2; "
+                                 f"plus the model plugins in tokenshark/plugins/).")
+            self.final_softcap = hf.get("final_logit_softcapping")
+            self.pad_id = int(hf.get("pad_token_id") or 0)
         else:
             p = read_json(root / "params.json")
             if not p:
@@ -110,6 +127,9 @@ class LLMConfig:
                                  if p.get("use_scaled_rope") else None)
             self.tied, self.sliding_window, self.act, self.attn_bias = False, None, "silu", False
             self.eos, self.max_pos = None, 8192
+        self.layers = self._layer_table(hf or {})
+        if arch is not None:
+            arch.configure(self, hf or {}, top or {})
         gen = read_json(root / "generation_config.json")
         self.eos_ids = set()
         for e in (self.eos, gen.get("eos_token_id")):
@@ -117,6 +137,58 @@ class LLMConfig:
                 self.eos_ids.update(e)
             elif e is not None:
                 self.eos_ids.add(e)
+
+    def _layer_table(self, hf: dict) -> list[LayerAttn]:
+        """Per-layer attention shape from the generic Hugging Face keys: layer_types with "sliding_attention"
+        entries (+ sliding_window), rope_parameters keyed by layer type, and per_layer_config overrides."""
+        lt = hf.get("layer_types") or []
+        window = hf.get("sliding_window")
+        rp = hf.get("rope_parameters") or {}
+        by_type = isinstance(rp, dict) and bool(lt) and all(isinstance(rp.get(t), dict) for t in set(lt))
+        if by_type:                     # model-wide theta / scaling do not apply; each layer type has its own
+            self.rope_scaling = None
+            self.theta = float(rp[lt[0]].get("rope_theta") or self.theta)
+        over = {int(k): v for k, v in (hf.get("per_layer_config") or {}).items() if str(k).lstrip("-").isdigit()}
+        out = []
+        for l in range(self.n_layers):
+            kind = lt[l] if l < len(lt) else None
+            o = over.get(l) or {}
+            out.append(LayerAttn(
+                head_dim=int(o.get("head_dim") or self.head_dim), n_kv=int(o.get("num_key_value_heads") or self.n_kv),
+                window=(int(window) if window and kind == "sliding_attention" else
+                        None if kind else self.sliding_window),
+                rope=dict(rp[kind]) if by_type and kind else None))
+        return out
+
+    # ------------------------------------------------------------------ per-layer attention shape
+    def _layer(self, layer: int | None) -> LayerAttn | None:
+        return self.layers[layer] if layer is not None and 0 <= layer < len(self.layers) else None
+
+    def layer_head_dim(self, layer: int | None) -> int:
+        la = self._layer(layer)
+        return la.head_dim if la else self.head_dim
+
+    def layer_n_kv(self, layer: int | None) -> int:
+        la = self._layer(layer)
+        return la.n_kv if la else self.n_kv
+
+    def k_eq_v(self, layer: int | None) -> bool:
+        la = self._layer(layer)
+        return bool(la and la.k_eq_v)
+
+    def layer_window(self, layer: int | None) -> int | None:
+        la = self._layer(layer)
+        return la.window if la else self.sliding_window
+
+    def layer_rope(self, layer: int | None) -> dict | None:
+        """This layer's own RoPE parameters, or None when it uses the model-wide theta / rope_scaling."""
+        la = self._layer(layer)
+        return la.rope if la else None
+
+    def heterogeneous(self) -> bool:
+        """True when layers differ in attention shape (sliding vs global, head size, KV heads, RoPE)."""
+        first = self.layers[0] if self.layers else None
+        return any(la != first for la in self.layers)
 
     def is_linear(self, layer: int) -> bool:
         return bool(self.layer_types) and self.layer_types[layer] == "linear_attention"

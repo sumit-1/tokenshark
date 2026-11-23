@@ -19,6 +19,9 @@ How to add a new Causal LM model:
 ---------------------------------
 Add an entry to `default_models` below (or click `+` in the UI with a Hugging Face repo ID),
 or drop a folder with `config.json` + `*.safetensors` into `models/`.
+
+A model family the generic reader does not cover gets its own plugin file: subclass `CausalLMPlugin`, give it a
+`priority`, a `matches()` on its `model_type`, and an `arch_hooks()` (see gemma4.py and tokenshark/llm/arch.py).
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from pathlib import Path
 import torch
 
 from ..llm import LLMAdapter
+from ..llm.arch import ArchHooks
 from ..weights import read_json
 from . import ModelPlugin, register_plugin
 
@@ -213,9 +217,15 @@ class CausalLMPlugin(ModelPlugin):
         return bool(cfg.get("hidden_size") and cfg.get("num_hidden_layers"))
 
     @classmethod
+    def arch_hooks(cls) -> ArchHooks | None:
+        """Additions to the generic engine for this plugin's architecture (llm/arch.py). Subclasses that add a model
+        family override this instead of touching tokenshark/llm/."""
+        return None
+
+    @classmethod
     def create_adapter(cls, spec: dict, root: Path, device: str, dtype: torch.dtype,
                        policy: str = "auto", keep_layers: int = 0) -> LLMAdapter:
-        ad = LLMAdapter(spec, root, device, dtype, policy, keep_layers)
+        ad = LLMAdapter(spec, root, device, dtype, policy, keep_layers, cls.arch_hooks())
         ad.plugin_id = cls.id
         ad.ui_schema = cls.ui_schema
         return ad

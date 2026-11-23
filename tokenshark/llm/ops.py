@@ -14,7 +14,28 @@ def rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     return (xf * w.float()).to(x.dtype)
 
 
-def rope_inv_freq(cfg: LLMConfig, theta: float | None = None) -> torch.Tensor:
+def rope_inv_freq_params(params: dict, head_dim: int, theta: float | None = None) -> torch.Tensor:
+    """RoPE frequencies for one layer from a Hugging Face rope-parameter dict (layers that carry their own).
+    rope_type: default | linear | proportional. 'proportional' rotates only the first partial_rotary_factor share
+    of the frequency pairs, with exponents taken over the FULL head size, and leaves the rest at frequency 0 - so
+    the rotated dims are (j, j + head_dim/2) for small j, not a contiguous leading block."""
+    base = float(theta) if theta is not None else float(params.get("rope_theta") or 10000.0)
+    kind = params.get("rope_type") or params.get("type") or "default"
+    if kind == "proportional":
+        n_rot = int(float(params.get("partial_rotary_factor", 1.0)) * head_dim // 2)
+        inv = 1.0 / (base ** (torch.arange(0, 2 * n_rot, 2, dtype=torch.float32) / head_dim))
+        return torch.cat([inv, torch.zeros(head_dim // 2 - n_rot)]) / float(params.get("factor", 1.0))
+    if kind not in ("default", "linear"):
+        raise ValueError(f"Per-layer RoPE type '{kind}' is not supported (default, linear, proportional are).")
+    inv = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+    return inv / float(params.get("factor", 1.0)) if kind == "linear" else inv
+
+
+def rope_inv_freq(cfg: LLMConfig, theta: float | None = None, layer: int | None = None) -> torch.Tensor:
+    """RoPE frequencies of the model (or of one layer, for models whose layers carry their own RoPE parameters)."""
+    params = cfg.layer_rope(layer) if layer is not None else None
+    if params is not None:
+        return rope_inv_freq_params(params, cfg.layer_head_dim(layer), theta)
     d = cfg.rot_dim or cfg.head_dim
     base_theta = float(theta) if theta is not None else cfg.theta
     inv = 1.0 / (base_theta ** (torch.arange(0, d, 2, dtype=torch.float32) / d))

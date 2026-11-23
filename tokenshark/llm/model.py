@@ -16,18 +16,25 @@ from ..engine import RunContext, apply_op
 from ..flow import parse_index_spec
 from ..kvcache import KVCache
 from ..weights import WeightStore
+from .arch import ArchHooks
 from .config import LLMConfig, meta_name_map, meta_transform
 from .ops import _act, apply_rope, rms_norm, rope_inv_freq, yarn_scales
 
 
+# Memory kept for the KV tab's per-query analysis (all queries of a run; the oldest are dropped past this budget).
+_Q_HISTORY_BYTES = 256 * 2 ** 20
+
 class RawLLM:
-    def __init__(self, root: Path, device: str, dtype: torch.dtype, policy: str, keep_layers: int):
+    def __init__(self, root: Path, device: str, dtype: torch.dtype, policy: str, keep_layers: int,
+                 arch: ArchHooks | None = None):
+        """arch: what a model plugin adds to the generic reader (see llm/arch.py); None for the built-in families."""
         self.root = Path(root)
-        self.cfg = cfg = LLMConfig(self.root)
+        self.arch = arch
+        self.cfg = cfg = LLMConfig(self.root, arch)
         self.device, self.dtype = device, dtype
-        kw = {}
+        kw = {"skip_prefixes": arch.weight_skip_prefixes} if arch is not None else {}
         if cfg.meta_format:
-            kw = {"name_map": meta_name_map(cfg), "transform": meta_transform(cfg)}
+            kw.update(name_map=meta_name_map(cfg), transform=meta_transform(cfg))
         self.W = WeightStore(self.root, device, dtype, policy, keep_layers, **kw)
         self.inv_freq = rope_inv_freq(cfg).to(device)
         self.rope_mult, self.score_mult = yarn_scales(cfg)
@@ -35,12 +42,15 @@ class RawLLM:
         self.qk_norm = self.W.has(f"model.layers.{fa}.self_attn.q_norm.weight")
         self.has_bias = self.W.has(f"model.layers.{fa}.self_attn.q_proj.bias")
         qshape = self.W.shape(f"model.layers.{fa}.self_attn.q_proj.weight")
-        self.attn_gate = bool(qshape) and qshape[0] == 2 * cfg.n_heads * cfg.head_dim   # Qwen3.5 gated attention
+        self.attn_gate = bool(qshape) and qshape[0] == 2 * cfg.n_heads * cfg.layer_head_dim(fa)   # gated attention
         self.tied = cfg.tied or not self.W.has("lm_head.weight")
         self.act = _act(cfg.act)
         qn = self.W.shape(f"model.layers.{fa}.self_attn.q_norm.weight") if self.qk_norm else None
         self.qk_norm_flat = bool(qn) and qn[0] == cfg.n_heads * cfg.head_dim and cfg.n_heads > 1
         self.moe_layers = {l: lay for l in range(cfg.n_layers) if (lay := self._moe_layout(l))} if cfg.moe else {}
+        # "Sandwich" blocks: norms after attention / MLP as well as before them (detected from the weight names)
+        self.sandwich = self.W.has(f"model.layers.{fa}.pre_feedforward_layernorm.weight")
+        self._inv: dict = {}
         if cfg.moe and not self.moe_layers:
             raise ValueError("config.json describes a mixture-of-experts model but no router weights "
                              "(…mlp.gate.weight / …block_sparse_moe.gate.weight) were found in the checkpoint.")
@@ -77,7 +87,37 @@ class RawLLM:
 
     # -------------------------------------------------------------- pieces
     def embed(self, ids: list[int]) -> torch.Tensor:
-        return self.W.rows("model.embed_tokens.weight", ids)
+        cfg = self.cfg
+        if cfg.media_token_ids:            # media placeholders may lie outside the vocabulary: embed them as pad
+            ids = [cfg.pad_id if i in cfg.media_token_ids else i for i in ids]
+        x = self.W.rows("model.embed_tokens.weight", ids)
+        if cfg.embed_scale is not None:
+            x = x * torch.tensor(cfg.embed_scale, dtype=x.dtype)           # the scale is rounded to the weight dtype
+        return x
+
+    def inject_media(self, x: torch.Tensor, ids: list[int], feats: torch.Tensor | None) -> torch.Tensor:
+        """Overwrite the rows of media placeholder tokens with the media soft-token embeddings, in order."""
+        rows = [i for i, t in enumerate(ids) if t in self.cfg.media_token_ids]
+        if feats is None or not rows:
+            return x
+        if len(rows) != feats.shape[0]:
+            raise ValueError(f"The prompt has {len(rows)} media tokens but the media give {feats.shape[0]} "
+                             f"soft tokens.")
+        x = x.clone()
+        x[torch.tensor(rows, device=x.device)] = feats.to(x.device, x.dtype)
+        return x
+
+    def layer_inv_freq(self, l: int | None, theta: float | None = None) -> torch.Tensor:
+        """RoPE frequencies of decoder layer l (layers may carry their own RoPE), optionally with another theta."""
+        if theta is None and self.cfg.layer_rope(l) is None:
+            return self.inv_freq
+        key = (l if self.cfg.layer_rope(l) is not None else None, theta)
+        if key not in self._inv:
+            self._inv[key] = rope_inv_freq(self.cfg, theta=theta, layer=l).to(self.inv_freq.device)
+        return self._inv[key]
+
+    def attn_scale(self, l: int | None) -> float:
+        return self.cfg.attn_scale if self.cfg.attn_scale is not None else 1.0 / math.sqrt(self.cfg.layer_head_dim(l))
 
     def unembed_weight(self) -> torch.Tensor:
         if getattr(self, "_w_out", None) is None:
@@ -97,10 +137,14 @@ class RawLLM:
     def unembed(self, h: torch.Tensor, w_out=None) -> torch.Tensor:
         W = w_out if w_out is not None else self.unembed_weight()
         if W.dtype == h.dtype and W.device == h.device:
-            return (h @ W.T).float()
-        out = torch.empty(h.shape[0], W.shape[0], dtype=h.dtype, device=h.device)
-        for i in range(0, W.shape[0], 32768):
-            out[:, i:i + 32768] = h @ W[i:i + 32768].to(h.device, h.dtype).T
+            out = h @ W.T
+        else:
+            out = torch.empty(h.shape[0], W.shape[0], dtype=h.dtype, device=h.device)
+            for i in range(0, W.shape[0], 32768):
+                out[:, i:i + 32768] = h @ W[i:i + 32768].to(h.device, h.dtype).T
+        cap = self.cfg.final_softcap
+        if cap:                                  # logit soft-capping: squashed into (-cap, cap)
+            out = torch.tanh(out.float() / cap) * cap
         return out.float()
 
     def _lin(self, x, pre, ctx=None):
@@ -162,13 +206,31 @@ class RawLLM:
             attn_out = self._mla_attn(p, pre, h, cache, ctx, idx_of)
         else:
             attn_out = self._full_attn(p, pre, h, cache, ctx, idx_of)
+        if self.sandwich:
+            attn_out = rms_norm(attn_out, self.norm_w(pre + "post_attention_layernorm.weight"), cfg.eps)
         for iv in ctx.active("attn_out"):
             attn_out = apply_op(attn_out, iv, ctx, 0, idx_of(iv))
         x = x + attn_out
         return self._mlp_and_finish(p, pre, x, attn_out, ctx, idx_of, cap)
 
+    def _media_blocks(self, tokens: list[int], T: int, device) -> torch.Tensor | None:
+        """Per key: index of the contiguous run of media tokens it belongs to, -1 for text (None: no media)."""
+        mm = self.cfg.media_token_ids
+        toks = list(tokens[:T])
+        if not mm or not any(t in mm for t in toks):
+            return None
+        out, g, prev = [], -1, False
+        for t in toks:
+            cur = t in mm
+            if cur and not prev:
+                g += 1
+            out.append(g if cur else -1)
+            prev = cur
+        return torch.tensor(out + [-1] * (T - len(out)), device=device)
+
     def attn_allowed(self, p: int, n: int, T: int, cache: KVCache, device,
-                     ctx: RunContext | None = None) -> torch.Tensor:
+                     ctx: RunContext | None = None, l: int | None = None) -> torch.Tensor:
+        window = self.cfg.layer_window(l)
         bc = cache.block_caches.get(p)
         if bc is not None:
             if ctx is not None and ctx.store.get("chunk_origin") == "prompt":
@@ -178,15 +240,20 @@ class RawLLM:
                 qi = torch.arange(t0, T, device=device)[:, None]
             kj = torch.arange(T, device=device)[None, :]
             allowed = kj <= qi
-            if self.cfg.sliding_window:
-                allowed &= kj > qi - self.cfg.sliding_window
+            if window:
+                allowed &= kj > qi - window
             return allowed
         t0 = T - n
         qi = torch.arange(t0, T, device=device)[:, None]
         kj = torch.arange(T, device=device)[None, :]
         allowed = kj <= qi
-        if self.cfg.sliding_window:
-            allowed &= kj > qi - self.cfg.sliding_window
+        bidir = self.cfg.media_bidir
+        if bidir == "all" or (bidir == "sliding" and window):
+            blk = self._media_blocks(cache.tokens, T, device)     # one media item's tokens see each other
+            if blk is not None:
+                allowed |= (blk[t0:, None] == blk[None, :]) & (blk[t0:, None] >= 0)
+        if window:
+            allowed &= kj > qi - window
         for a, b, slots in cache.prefix_spans:
             if slots is not None and p not in slots:
                 allowed &= (kj < a) | (kj >= b)
@@ -198,16 +265,18 @@ class RawLLM:
         old = rng.get((p, hook))
         rng[(p, hook)] = (lo, hi) if old is None else (torch.minimum(old[0], lo), torch.maximum(old[1], hi))
 
-    def _rope_for_block(self, p: int, n: int, T: int, cache: KVCache, ctx: RunContext):
+    def _rope_for_block(self, p: int, n: int, T: int, cache: KVCache, ctx: RunContext, l: int | None = None):
         bc = cache.block_caches.get(p)
         r_cfg = (ctx.store.get("rope") or {}).get(p) or {}
-        inv_freq = self.inv_freq
-        if r_cfg.get("theta"):
-            inv_freq = rope_inv_freq(self.cfg, theta=float(r_cfg["theta"])).to(self.inv_freq.device)
+        inv_freq = self.layer_inv_freq(l, float(r_cfg["theta"]) if r_cfg.get("theta") else None)
         if bc is not None:
             pos_k = bc.pos[:T].to(self.inv_freq.device).float().clone()
             if "scale" in r_cfg:
                 pos_k = pos_k * float(r_cfg["scale"])
+            if r_cfg.get("gen_start") is not None:
+                g0 = next((sg.start for sg in bc.segments if sg.origin == "generated"), None)
+                if g0 is not None and g0 < T:
+                    pos_k[g0:] += float(r_cfg["gen_start"]) - pos_k[g0]
             for iv in ctx.active("rope"):
                 if T > 0:
                     sub = pos_k[:, None]
@@ -232,6 +301,11 @@ class RawLLM:
         if "scale" in r_cfg:
             pos_k = pos_k * float(r_cfg["scale"])
         n_pre = sum(b - a for a, b, _ in cache.prefix_spans)
+        if r_cfg.get("gen_start") is not None:       # RoPE jump on this block: generated tokens continue from gen_start
+            gen = (ctx.token_ranges or {}).get("generated")
+            g0 = n_pre + gen.start if gen is not None else T
+            if g0 < T:
+                pos_k[g0:] += float(r_cfg["gen_start"]) - pos_k[g0]
         for iv in ctx.active("rope"):
             run_len = max(0, T - n_pre)
             if run_len > 0:
@@ -256,24 +330,32 @@ class RawLLM:
         cfg = self.cfg
         n = h.shape[0]
         cap = ctx.capture
+        l = int(pre.split(".")[2])
+        hd, n_kv = cfg.layer_head_dim(l), cfg.layer_n_kv(l)
         q_all = self._lin(h, pre + "self_attn.q_proj", ctx)
         gate = None
         if self.attn_gate:
-            q_all = q_all.view(n, cfg.n_heads, 2 * cfg.head_dim)
-            q, gate = q_all[..., :cfg.head_dim], q_all[..., cfg.head_dim:]
+            q_all = q_all.view(n, cfg.n_heads, 2 * hd)
+            q, gate = q_all[..., :hd], q_all[..., hd:]
             q = q.transpose(0, 1)
         else:
-            q = q_all.view(n, cfg.n_heads, cfg.head_dim).transpose(0, 1)
-        k = self._lin(h, pre + "self_attn.k_proj", ctx).view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
-        v = self._lin(h, pre + "self_attn.v_proj", ctx).view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
+            q = q_all.view(n, cfg.n_heads, hd).transpose(0, 1)
+        k = self._lin(h, pre + "self_attn.k_proj", ctx).view(n, n_kv, hd).transpose(0, 1)
+        if cfg.k_eq_v(l):                         # no v_proj: values are the (un-normed) keys
+            v = k
+        else:
+            v = self._lin(h, pre + "self_attn.v_proj", ctx).view(n, n_kv, hd).transpose(0, 1)
         if self.qk_norm and self.qk_norm_flat:
             q = rms_norm(q.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
             k = rms_norm(k.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
-            q = q.view(n, cfg.n_heads, cfg.head_dim).transpose(0, 1)
-            k = k.view(n, cfg.n_kv, cfg.head_dim).transpose(0, 1)
+            q = q.view(n, cfg.n_heads, hd).transpose(0, 1)
+            k = k.view(n, n_kv, hd).transpose(0, 1)
         elif self.qk_norm:
             q = rms_norm(q, self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
             k = rms_norm(k, self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
+        if cfg.v_norm:                            # values get a weight-free RMSNorm
+            vf = v.float()
+            v = (vf * torch.rsqrt(vf.pow(2).mean(-1, keepdim=True) + cfg.eps)).to(v.dtype)
         if cfg.clip_qkv:
             q, k, v = (t.clamp(-cfg.clip_qkv, cfg.clip_qkv) for t in (q, k, v))
         q = self._head_hook(p, "q", q, ctx, idx_of, cap)
@@ -296,18 +378,30 @@ class RawLLM:
                 cache.k[p] = self._head_hook(p, "kv_k", cache.k[p].to(x.device), ctx, idx_of, False).to(cache.device)
             if ctx.active("kv_v"):
                 cache.v[p] = self._head_hook(p, "kv_v", cache.v[p].to(x.device), ctx, idx_of, False).to(cache.device)
+            rows = [i for i in (ctx.store.get("kv_zero") or {}).get(p, ()) if i < cache.k[p].shape[1]]
+            if rows:                              # zeroed KV records: that token's key and value are erased
+                cache.k[p][:, rows] = 0
+                cache.v[p][:, rows] = 0
             K = cache.k[p].to(x.device)
             V = cache.v[p].to(x.device)
         T = K.shape[1]
-        pos_q, pos_k, inv_freq = self._rope_for_block(p, n, T, cache, ctx)
+        pos_q, pos_k, inv_freq = self._rope_for_block(p, n, T, cache, ctx, l)
+        if cap:                                   # every query (pre-RoPE, fp16) + position by cache index, for the KV tab
+            hist = ctx.store.setdefault("last_q", {}).setdefault(p, {})
+            qs = q.detach().to("cpu", torch.float16)
+            for i in range(n):
+                hist[T - n + i] = (qs[:, i], float(pos_q[i]))
+            keep = max(2, _Q_HISTORY_BYTES // max(1, cfg.n_layers * qs[:, 0].numel() * 2))
+            while len(hist) > keep:               # over budget: forget the oldest queries first
+                del hist[next(iter(hist))]
         qr = apply_rope(q, pos_q, inv_freq)
         kr = apply_rope(K, pos_k, inv_freq)
-        rep = cfg.n_heads // cfg.n_kv
+        rep = cfg.n_heads // n_kv
         if rep > 1:
             kr = kr.repeat_interleave(rep, 0)
             V = V.repeat_interleave(rep, 0)
-        scores = (qr.float() @ kr.float().transpose(1, 2)) / math.sqrt(cfg.head_dim)
-        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, x.device, ctx), float("-inf"))
+        scores = (qr.float() @ kr.float().transpose(1, 2)) * self.attn_scale(l)
+        scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, x.device, ctx, l), float("-inf"))
         probs = torch.softmax(scores, -1)
         if cap and ctx.store.get("want_attn", True):
             ctx.store.setdefault("attn", {}).setdefault(p, []).append(probs.detach().to(torch.float16).cpu())
@@ -320,7 +414,7 @@ class RawLLM:
             zt = zt.clone()
             zt[:, heads] = sub
             z = zt.transpose(0, 1)
-        zf = z.transpose(0, 1).reshape(n, cfg.n_heads * cfg.head_dim)
+        zf = z.transpose(0, 1).reshape(n, cfg.n_heads * hd)
         if gate is not None:
             zf = zf * torch.sigmoid(gate.reshape(n, -1))
         return zf @ self._w(pre + "self_attn.o_proj.weight", ctx).T
@@ -434,7 +528,8 @@ class RawLLM:
 
     def _mlp_and_finish(self, p, pre, x, attn_out, ctx, idx_of, cap):
         cfg, W = self.cfg, self.W
-        h2 = rms_norm(x, self.norm_w(pre + "post_attention_layernorm.weight"), cfg.eps)
+        h2 = rms_norm(x, self.norm_w(pre + ("pre_feedforward_layernorm.weight" if self.sandwich
+                                            else "post_attention_layernorm.weight")), cfg.eps)
         lay = self.moe_layers.get(int(pre.split(".")[2]))
         if lay is not None:
             mlp_out = self._moe_mlp(p, lay, h2, ctx, idx_of, cap)
@@ -444,11 +539,15 @@ class RawLLM:
             neurons = self.act(gate) * up
             neurons = self.neuron_hook(p, neurons, ctx, idx_of, cap)
             mlp_out = neurons @ self._w(pre + "mlp.down_proj.weight", ctx).T
+        if self.sandwich:
+            mlp_out = rms_norm(mlp_out, self.norm_w(pre + "post_feedforward_layernorm.weight"), cfg.eps)
         for iv in ctx.active("mlp_out"):
             mlp_out = apply_op(mlp_out, iv, ctx, 0, idx_of(iv))
         x = x + mlp_out
         if W.has(pre + "adapter.down.weight"):
             x = x + self.act(x @ self._w(pre + "adapter.down.weight", ctx).T) @ self._w(pre + "adapter.up.weight", ctx).T
+        if W.has(pre + "layer_scalar"):          # per-layer rescaling of the whole residual stream
+            x = x * W(pre + "layer_scalar").to(x.dtype)
         return self._finish(p, x, attn_out, mlp_out, ctx, idx_of, cap)
 
     # -------------------------------------------------------------- mixture of experts
@@ -622,10 +721,12 @@ class RawLLM:
         return x
 
     def forward(self, ids: list[int], positions: list[float], origin: str, cache: KVCache, schedule: list[int],
-                ctx: RunContext, run_offset: int, idx_planner, w_out=None) -> torch.Tensor:
-        """Process new tokens `ids` (run-relative index run_offset..). Returns logits [n, vocab] (float32)."""
+                ctx: RunContext, run_offset: int, idx_planner, w_out=None, media: torch.Tensor | None = None
+                ) -> torch.Tensor:
+        """Process new tokens `ids` (run-relative index run_offset..). Returns logits [n, vocab] (float32).
+        `media`: soft-token embeddings that replace the media placeholder tokens among `ids`, in order."""
         cache.add_tokens(ids, positions, origin)
-        x = self.embed(ids)
+        x = self.inject_media(self.embed(ids), ids, media)
         n = len(ids)
 
         def idx_of(iv):

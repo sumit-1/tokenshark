@@ -120,7 +120,8 @@ class _SafetensorsFile:
 class WeightStore:
     def __init__(self, root: str | Path, device: str, dtype: torch.dtype, policy: str = "auto",
                  keep_layers: int = 0, name_map: dict[str, str] | None = None,
-                 transform: Callable[[str, torch.Tensor], torch.Tensor] | None = None, files: list[Path] | None = None):
+                 transform: Callable[[str, torch.Tensor], torch.Tensor] | None = None, files: list[Path] | None = None,
+                 skip_prefixes: tuple[str, ...] = ()):
         self.root = Path(root)
         self.device = device
         self.dtype = dtype
@@ -144,7 +145,8 @@ class WeightStore:
         self.alias = None
         if "model.embed_tokens.weight" not in self._index and "model.language_model.embed_tokens.weight" in self._index:
             self.alias = ("model.", "model.language_model.")
-        self.skip_prefixes = ("mtp.", "model.visual.", "visual.", "model.mtp.")
+        # Keys the language path never reads (not preloaded, not aliased); model plugins add their own.
+        self.skip_prefixes = ("mtp.", "model.visual.", "visual.", "model.mtp.", *skip_prefixes)
         self.total_bytes = self._estimate_bytes()
         self.policy = self._choose(policy)
         report_phase(f"weights: {self.total_bytes / 2**30:.1f} GB in {len(set(self._index.values()))} files · policy "
@@ -217,7 +219,9 @@ class WeightStore:
         if self.name_map:
             return self.name_map.get(name, name)
         if self.alias and name not in self._index and name.startswith(self.alias[0]):
-            return self.alias[1] + name[len(self.alias[0]):]
+            aliased = self.alias[1] + name[len(self.alias[0]):]
+            if aliased in self._index or not name.startswith(self.skip_prefixes):
+                return aliased
         return name
 
     def shape(self, name: str):
