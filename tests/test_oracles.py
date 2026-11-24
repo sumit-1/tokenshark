@@ -262,3 +262,118 @@ def test_sd_pipeline_matches_diffusers(sd):
                                 "parent_x0": cap["x0"]})
     assert res2["outputs"]["image"] == res["outputs"]["image"]
     assert res["captures"]["xattn"]["all"]
+
+
+# ======================================================================================
+# End-to-End Model Execution & Real Pretrained Hugging Face Oracle Verification
+# ======================================================================================
+
+def test_llm_end_to_end_generation_and_states_match_hf_oracle(llm):
+    """Run the full Lab pipeline (tokenizer, chat template, autoregressive generation, per-layer
+    residual streams, attention maps, and logit lens) and verify against Hugging Face transformers."""
+    import transformers as T
+    from tokenshark.api import Lab
+
+    d, _ = llm
+    ref = T.AutoModelForCausalLM.from_pretrained(d, attn_implementation="eager", dtype=torch.float32).eval()
+    tok = T.AutoTokenizer.from_pretrained(d)
+    lab = Lab(str(d), device="cpu", dtype="fp32", policy="device")
+
+    prompt = "The capital of France is"
+    # 1. Tokenizer & chat-template parity against AutoTokenizer
+    inp = tok(prompt, return_tensors="pt", add_special_tokens=False)
+    assert lab.tokenize(prompt, chat=False)["ids"] == inp.input_ids[0].tolist()
+    chat_msgs = [{"role": "user", "content": prompt}]
+    hf_chat = tok.apply_chat_template(chat_msgs, tokenize=False, add_generation_prompt=True)
+    ts_chat_ids, _ = lab.adapter.build_ids({"prompt": prompt, "use_chat_template": True, "system": ""})
+    assert ts_chat_ids == tok.encode(hf_chat, add_special_tokens=False)
+
+    # 2. Multi-token greedy generation parity against AutoModelForCausalLM.generate()
+    run = lab.run(prompt, chat=False, max_new_tokens=6, temperature=0.0)
+    with torch.no_grad():
+        gen = ref.generate(**inp, max_new_tokens=6, do_sample=False, repetition_penalty=1.0)
+        full_out = ref(gen, output_hidden_states=True, output_attentions=True)
+
+    assert run.token_ids == gen[0].tolist()
+    assert run.text == tok.decode(gen[0][inp.input_ids.shape[1]:], skip_special_tokens=True)
+
+    # 3. Per-position logits parity across prompt + generated tokens
+    for pos in range(len(run.token_ids)):
+        assert torch.allclose(run.logits(pos).float(), full_out.logits[0, pos], atol=3e-4, rtol=1e-3)
+
+    # 4. Per-block residual stream (hidden_states) & attention matrix parity
+    n_layers = lab.info["n_layers"]
+    for l in range(n_layers - 1):
+        # Captures store residual streams in fp16 for memory efficiency
+        assert torch.allclose(run.resid(l, "post").float(), full_out.hidden_states[l + 1][0], atol=2e-2, rtol=1e-2)
+    normed_last = lab.adapter.model.final_norm(run.resid(n_layers - 1, "post").float())
+    assert torch.allclose(normed_last, full_out.hidden_states[n_layers][0], atol=2e-2, rtol=1e-2)
+    for l in range(n_layers):
+        assert torch.allclose(run.attention(l).float(), full_out.attentions[l][0], atol=2e-3, rtol=1e-2)
+
+
+def test_real_pretrained_hf_model_matches_transformers_oracle():
+    """Run a real pretrained Hugging Face checkpoint (Qwen/Qwen2.5-0.5B-Instruct) through Tokenshark
+    and verify exact token-for-token generation, hidden states, attention weights, and logits against
+    Hugging Face transformers."""
+    import os
+    import transformers as T
+    from tokenshark.api import Lab
+    from tokenshark.registry import get_spec
+    from tokenshark.weights import resolve_model_dir
+
+    model_id = os.environ.get("TOKENSHARK_HF_ORACLE_MODEL", "qwen2.5-0.5b-instruct")
+    allow_dl = os.environ.get("TOKENSHARK_OFFLINE_TESTS", "0") != "1"
+    try:
+        spec = get_spec(model_id)
+        model_dir = resolve_model_dir(spec, allow_download=allow_dl)
+    except Exception as exc:
+        pytest.skip(f"Pretrained HF model {model_id!r} unavailable offline ({exc})")
+
+    lab = Lab(str(model_dir), device="cpu", dtype="fp32", policy="device")
+    tok = T.AutoTokenizer.from_pretrained(model_dir)
+    ref = T.AutoModelForCausalLM.from_pretrained(
+        model_dir, attn_implementation="eager", dtype=torch.float32
+    ).eval()
+
+    prompt = "The capital of France is"
+    inp = tok(prompt, return_tensors="pt", add_special_tokens=False)
+    assert lab.tokenize(prompt, chat=False)["ids"] == inp.input_ids[0].tolist()
+
+    run = lab.run(prompt, chat=False, max_new_tokens=6, temperature=0.0)
+    with torch.no_grad():
+        gen = ref.generate(
+            **inp,
+            max_new_tokens=6,
+            do_sample=False,
+            repetition_penalty=1.0,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+        )
+        full_out = ref(gen, output_hidden_states=True, output_attentions=True)
+
+    # Exact token-for-token and decoded text match on the real 24-layer pretrained model
+    assert run.token_ids == gen[0].tolist(), (run.token_ids, gen[0].tolist())
+    assert run.text == tok.decode(gen[0][inp.input_ids.shape[1]:], skip_special_tokens=True)
+    assert "Paris" in run.text
+
+    # Every position's 151,936-vocab logit vector matches Hugging Face transformers
+    for pos in range(len(run.token_ids)):
+        mine_logits = run.logits(pos).float()
+        hf_logits = full_out.logits[0, pos]
+        assert torch.allclose(mine_logits, hf_logits, atol=5e-4, rtol=1e-3), (
+            pos,
+            float((mine_logits - hf_logits).abs().max()),
+        )
+        assert int(mine_logits.argmax()) == int(hf_logits.argmax())
+
+    # Every transformer block's residual stream and GQA attention weights match Hugging Face
+    n_layers = lab.info["n_layers"]
+    for l in range(n_layers - 1):
+        assert torch.allclose(run.resid(l, "post").float(), full_out.hidden_states[l + 1][0], atol=5e-2, rtol=1e-2)
+    normed_last = lab.adapter.model.final_norm(run.resid(n_layers - 1, "post").float())
+    assert torch.allclose(normed_last, full_out.hidden_states[n_layers][0], atol=5e-2, rtol=1e-2)
+    for l in range(n_layers):
+        assert torch.allclose(run.attention(l).float(), full_out.attentions[l][0], atol=5e-3, rtol=1e-2)
+

@@ -107,6 +107,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .blockparts td:first-child { white-space: nowrap; width: 1%; }
 .kvmini { display: inline-block; width: 8px; height: 10px; border: 1.4px solid var(--kv); border-radius: 4px / 2px; margin-right: 4px; vertical-align: -1px; background: rgba(79,209,197,.35); }
 .kvmini.shared { border-style: dotted; background: none; }
+.rpgrid { width: 100%; max-width: 1090px; margin: 6px 0; background: #07090c; border: 1px solid var(--line); border-radius: 8px; padding: 4px 0; }
+.rpcanvas { display: block; }
+.rptip { min-height: 16px; color: var(--text); }
+.seg { display: inline-flex; gap: 2px; }
 .fe-edge.sel .line { stroke-width: 4; filter: drop-shadow(0 0 4px currentColor); }
 .fe-edge-label { fill: var(--muted); font-size: 11px; text-anchor: middle; }
 .fe-nodes { position: absolute; left: 0; top: 0; }

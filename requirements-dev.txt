@@ -1,5 +1,7 @@
 -r requirements.txt
-# Test-only numerical oracles: the raw engine is checked against these on random weights.
+# Test-only numerical oracles: the raw engine is checked against these on random and pretrained HF weights.
 pytest
+httpx
 transformers>=4.51
 diffusers>=0.30
+

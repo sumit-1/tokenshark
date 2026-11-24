@@ -471,3 +471,24 @@ def test_kv_analysis_rope_jump_and_zeroed_records(llm):
     assert all(float(cache4.k[p][:, 2].abs().sum()) == 0 and float(cache4.v[p][:, 2].abs().sum()) == 0
                for p in range(len(plan4.schedule)))
     assert float(cache4.k[0][:, 3].abs().sum()) > 0
+
+
+def test_rope_pairs_rebuild_the_rotated_key(llm):
+    """RoPE clocks tab: each pair turned by position x speed gives exactly what attention used."""
+    import math
+    from tokenshark import interp
+    from tokenshark.llm.ops import apply_rope, rope_inv_freq
+    ad, info, flow = llm
+    plan = compile_flow(flow, info)
+    cap = ad.run(plan)["captures"]
+    out = interp.rope_pairs(ad, cap, plan.schedule, 1, 3, 0, "k")
+    K = cap["cache"].slot_kv(1)[0][:, 3:4].float().cpu()
+    inv = rope_inv_freq(ad.cfg, layer=plan.schedule[1]).cpu()
+    ref = apply_rope(K, torch.tensor([out["eff_position"]]), inv)[0, 0]
+    half = out["n_pairs"]
+    for p in out["pairs"]:
+        ang = math.atan2(p["im"], p["re"]) + out["eff_position"] * p["freq"]
+        assert abs(p["mag"] * math.cos(ang) - float(ref[p["i"]])) < 1e-3
+        assert abs(p["mag"] * math.sin(ang) - float(ref[p["i"] + half])) < 1e-3
+    q = interp.rope_pairs(ad, cap, plan.schedule, 1, 3, 0, "q")
+    assert q["kind"] == "q" and len(q["pairs"]) == half and q["n_heads"] == info["n_heads"]

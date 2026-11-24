@@ -1,5 +1,10 @@
 # Tokenshark
 
+[![CI & HuggingFace Oracles](https://github.com/sumit-1/tokenshark/actions/workflows/ci.yml/badge.svg)](https://github.com/sumit-1/tokenshark/actions/workflows/ci.yml)
+[![Publish to PyPI](https://github.com/sumit-1/tokenshark/actions/workflows/publish-pypi.yml/badge.svg)](https://github.com/sumit-1/tokenshark/actions/workflows/publish-pypi.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+
 Open, inspect, edit, and train how open-weight language and image models compute in the browser, from pure Python.
 
 ![Tokenshark Walkthrough](https://raw.githubusercontent.com/sumit-1/tokenshark/main/docs/walkthrough.gif)
@@ -290,7 +295,7 @@ tokenshark/
                       lora, quant, training, guardrail_fork, attn_traceback, datasets)
   web/                Browser UI in plain ES modules + HTML/CSS (core.js, flow.js, paint.js, ui/*, tabs/*)
 tests/
-  test_oracles.py       Raw LLM & SD engines vs transformers / diffusers on random weights; KV-cache maths
+  test_oracles.py       Raw LLM & SD engines vs transformers / diffusers on pretrained Qwen2.5-0.5B & random weights; KV-cache maths
   test_features.py      Stepper, bypass, word through-k decoding, DLA tracking, region locks, model discovery
   test_hybrid.py        Qwen3.5/3.6 hybrid Gated DeltaNet + gated attention vs transformers & cache roundtrips
   test_moe.py           Mixtral / Qwen-MoE / OLMoE / DeepSeek-V2 vs transformers, router & expert interceptors, introspection
@@ -332,4 +337,4 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The test suite (**170 tests** across 11 test modules) verifies numerical equivalence against `transformers` and `diffusers` on random weights, hybrid linear/full attention math, Qwen-Image 2.1 DiT bit-exact schedules and latents, step-by-step debugging, unified Run/Stop/Step/Continue state preservation, activation patching, steering, neuron clamping/wiring, center-layer guardrail forks, previous-token attention attribution, quantization, in-browser training, adaptation methods, and UI/extension plugin contracts.
+The test suite (**176 tests** across 11 test modules) runs on every git commit in GitHub Actions CI and verifies numerical equivalence against `transformers` and `diffusers` on both real pretrained Hugging Face checkpoints (`Qwen/Qwen2.5-0.5B-Instruct`) and every supported architecture (`Qwen2`, `Qwen3`, `Llama-3`, `Qwen3.5/3.6` hybrid linear/full attention, `Mixtral`, `Qwen-MoE`, `OLMoE`, `DeepSeek-V2` MLA, `Gemma-4`, `Stable Diffusion`, and `Qwen-Image 2.1` DiT), plus step-by-step debugging, unified Run/Stop/Step/Continue state preservation, activation patching, steering, neuron clamping/wiring, center-layer guardrail forks, previous-token attention attribution, quantization, in-browser training, adaptation methods, and UI/extension plugin contracts.

@@ -120,6 +120,12 @@ def tokenize(req: TokenizeReq):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/runs/{run_id}/rope_pairs")
+def run_rope_pairs(run_id: str, block: int = 0, token: int = 0, head: int = 0, kind: str = "k"):
+    r, cap = _llm_run(run_id)
+    return _guard(interp.rope_pairs, LOADED.adapter, cap, r.plan.schedule, block, token, head, kind)
+
+
 @app.get("/api/runs/{run_id}/kv_analysis")
 def run_kv_analysis(run_id: str, blocks: str = "all", query: int | None = None):
     r, cap = _llm_run(run_id)

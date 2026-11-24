@@ -421,6 +421,66 @@ def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[st
     }
 
 
+def rope_pairs(adapter, cap: dict, schedule: list[int], block: int, token: int, head: int = 0,
+               kind: str = "k") -> dict:
+    """One token's key (or query) vector of one block and head, cut into its RoPE pairs.
+
+    RoPE treats dims (j, j + half) as one 2-D point and turns it by position x frequency_j ("rotate half").
+    For each pair: its size (hand length), its angle before any rotation, and its speed in radians per position.
+    Keys come from the cache (stored before RoPE); queries from the run's query history."""
+    from .llm.ops import rope_inv_freq
+    cache: KVCache | None = cap.get("cache")
+    if cache is None:
+        raise ValueError("This run has no KV cache.")
+    cfg = adapter.cfg
+    S = len(schedule)
+    if not 0 <= block < S:
+        raise ValueError(f"Block #{block} is not in this run (0..{S - 1}).")
+    layer = schedule[block]
+    if cfg.is_linear(layer) or getattr(cfg, "mla", None):
+        raise ValueError(f"Block #{block} has no RoPE keys (linear or latent attention).")
+    T = len(cache)
+    if not 0 <= token < T:
+        raise ValueError(f"Token #{token} is outside the cache (0..{T - 1}).")
+    if kind == "q":
+        hist = (cap.get("last_q") or {}).get(block) or {}
+        if token not in hist:
+            raise ValueError(f"The query of token #{token} was not kept for block #{block}.")
+        vecs = hist[token][0].float()                         # [n_heads, hd]
+    else:
+        K, _ = cache.slot_kv(block)
+        if K is None or token >= K.shape[1]:
+            raise ValueError(f"Block #{block} has no key for token #{token}.")
+        vecs = K[:, token].float().cpu()                      # [n_kv, hd]
+    n_h = vecs.shape[0]
+    if not 0 <= head < n_h:
+        raise ValueError(f"Head {head} does not exist ({n_h} {'query' if kind == 'q' else 'key/value'} heads).")
+    theta = ((cap.get("rope") or {}).get(block) or {}).get("theta")
+    inv = rope_inv_freq(cfg, theta=float(theta) if theta else None, layer=layer).float().cpu()
+    x = vecs[head]
+    hd = x.shape[-1]
+    half = inv.shape[0]                                       # rotated dims: [0, 2*half); the rest never turn
+    re, im = x[:half], x[half:2 * half]
+    mag = (re ** 2 + im ** 2).sqrt()
+    rest = float(x[2 * half:].norm()) if 2 * half < hd else 0.0
+    rp = (cap.get("rope_pos") or {}).get(block)
+    eff = float(rp[1][token]) if rp is not None and token < len(rp[1]) else float(cache.pos[token])
+    lr = cfg.layer_rope(layer) or {}
+    pairs = [{"i": j, "re": round(float(re[j]), 5), "im": round(float(im[j]), 5), "mag": round(float(mag[j]), 5),
+              "freq": float(inv[j])} for j in range(half)]
+    return {
+        "block": block, "layer": layer, "token": token, "piece": adapter.tok.piece(int(cache.tokens[token])),
+        "kind": kind, "head": head, "n_heads": n_h, "head_dim": hd, "n_pairs": half, "unrotated_norm": round(rest, 5),
+        "position": round(float(cache.pos[token]), 3), "eff_position": round(eff, 3),
+        "theta": float(theta) if theta else float(lr.get("rope_theta") or cfg.theta),
+        "rope_type": lr.get("rope_type") or (cfg.rope_scaling or {}).get("rope_type") or "default",
+        "max_context": getattr(cfg, "max_pos", None), "norm": round(float(x.norm()), 5),
+        "tokens": [adapter.tok.piece(int(t)) for t in cache.tokens], "n_blocks": S,
+        "linear_blocks": [p for p, l in enumerate(schedule) if cfg.is_linear(l)],
+        "pairs": pairs,
+    }
+
+
 def _pieces(adapter) -> list[str]:
     if getattr(adapter, "_vocab_pieces", None) is None:
         adapter._vocab_pieces = [adapter.tok.piece(i) for i in range(adapter.tok.vocab_size)]
