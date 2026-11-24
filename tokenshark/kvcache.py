@@ -145,6 +145,8 @@ class KVCache:
     # Per-block recreated KV caches: {slot: BlockKVCache}. When present for a full-attention slot, that block owns
     # its own recreated K/V sequence (e.g. replaced/appended system or user prompt) and grows gradually per token.
     block_caches: dict[int, BlockKVCache] = field(default_factory=dict)
+    # Cross-layer KV sharing: {slot: source slot}. A shared slot stores nothing; it reads its source's K/V.
+    shared: dict[int, int] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.k:
@@ -192,7 +194,7 @@ class KVCache:
 
     # ---------------------------------------------------------------- edits (all return new caches)
     def _empty_like(self):
-        return KVCache(dict(self.fingerprint), self.n_slots, device=self.device)
+        return KVCache(dict(self.fingerprint), self.n_slots, device=self.device, shared=dict(self.shared))
 
     def select(self, idx: list[int], _prefix_states: bool = False, slots: set[int] | None = None) -> "KVCache":
         whole = list(idx) == list(range(len(self)))
@@ -414,7 +416,9 @@ class KVCache:
         return c, json.loads(meta.get("extra", "{}"))
 
     def slot_kv(self, s: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Return (K, V) for slot s - from its per-block recreated cache if overridden, else main cache."""
+        """Return (K, V) for slot s - from its per-block recreated cache if overridden, else main cache.
+        A slot that shares another slot's cache returns that slot's K/V."""
+        s = self.shared.get(s, s)
         if s in self.block_caches:
             bc = self.block_caches[s]
             return bc.k, bc.v

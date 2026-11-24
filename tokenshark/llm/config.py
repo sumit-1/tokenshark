@@ -158,7 +158,38 @@ class LLMConfig:
                 window=(int(window) if window and kind == "sliding_attention" else
                         None if kind else self.sliding_window),
                 rope=dict(rp[kind]) if by_type and kind else None))
+        # Cross-layer KV sharing (Gemma-3n, small Gemma-4): the last num_kv_shared_layers layers compute no keys or
+        # values; each reads the cache of the last earlier layer of its own type (as transformers does).
+        n_shared = int(hf.get("num_kv_shared_layers") or 0)
+        first = self.n_layers - n_shared
+        if n_shared and first > 0:
+            kinds = [lt[l] if l < len(lt) else None for l in range(self.n_layers)]
+            for l in range(first, self.n_layers):
+                src = next((j for j in range(first - 1, -1, -1) if kinds[j] == kinds[l]), None)
+                if src is None:
+                    raise ValueError(f"Layer {l} shares its KV cache but no earlier layer has its type ({kinds[l]}).")
+                out[l].kv_source = src
         return out
+
+    def kv_sharing(self, schedule: list[int]) -> dict[int, int]:
+        """{block slot: source slot} for the slots whose layer reads an earlier layer's KV cache. The source is the
+        latest slot before it in the flow that runs the source layer."""
+        out = {}
+        for p, l in enumerate(schedule):
+            src = self.kv_source(l)
+            if src is None:
+                continue
+            sp = next((j for j in range(p - 1, -1, -1) if schedule[j] == src), None)
+            if sp is None:
+                raise ValueError(f"Block #{p} (layer {l}) has no keys or values of its own: it reads the KV cache of "
+                                 f"layer {src}, so layer {src} must run before it in the flow.")
+            out[p] = sp
+        return out
+
+    def kv_source(self, layer: int | None) -> int | None:
+        """The earlier layer whose KV cache this layer reads (cross-layer KV sharing), or None."""
+        la = self._layer(layer)
+        return la.kv_source if la else None
 
     # ------------------------------------------------------------------ per-layer attention shape
     def _layer(self, layer: int | None) -> LayerAttn | None:

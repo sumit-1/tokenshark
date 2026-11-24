@@ -13,7 +13,9 @@ from `config.json` and the checkpoint's weight names. A plugin covers the rest b
 Generic knobs on LLMConfig a plugin may set (defaults keep a plain Llama-style decoder):
 
     cfg.layers[l]        LayerAttn per layer: head_dim, n_kv, window (sliding-window size or None),
-                         rope (per-layer RoPE parameter dict or None = model-wide), k_eq_v (values = raw keys)
+                         rope (per-layer RoPE parameter dict or None = model-wide), k_eq_v (values = raw keys),
+                         kv_source (shared KV: the earlier layer whose cache this one reads; set from
+                         num_kv_shared_layers automatically)
     cfg.embed_scale      multiply token embeddings by this (rounded to the weight dtype); None = off
     cfg.attn_scale       attention score scale; None = 1/sqrt(head_dim)
     cfg.v_norm           RMS-normalise values (no weight) before attention
@@ -39,6 +41,7 @@ class LayerAttn:
     window: int | None = None          # sliding-window size (None: sees the whole context)
     rope: dict | None = None           # this layer's RoPE parameters (None: the model-wide theta / scaling)
     k_eq_v: bool = False               # no v_proj: values are the key projection (before key norm and RoPE)
+    kv_source: int | None = None       # cross-layer KV sharing: no k/v of its own, reads this earlier layer's cache
 
 
 class ArchHooks:

@@ -50,6 +50,9 @@ function handlesFor(node) {
 }
 
 const NODE_W = 172
+// A small database (cylinder) icon: this block keeps a KV cache. Hollow = it reads another block's cache.
+const KV_ICON = (shared) => `<svg class="fe-kv${shared ? ' shared' : ''}" viewBox="0 0 12 14" width="11" height="13" aria-hidden="true">` +
+  `<ellipse cx="6" cy="3" rx="5" ry="2"/><path d="M1 3v8c0 1.1 2.2 2 5 2s5-.9 5-2V3"/><path d="M1 7c0 1.1 2.2 2 5 2s5-.9 5-2"/></svg>`
 
 export class FlowEditor {
   constructor(el, { onSelect, onChange, onContext, onBadge } = {}) {
@@ -185,7 +188,10 @@ export class FlowEditor {
       : k === 'prompt_kv' ? `${n.data.role === 'prepend' ? `hidden · ${n.data.mode || 'shift'}` : 'replaces the prompt'} · blocks ${n.data.blocks || 'all'} · “${(n.data.prompt || '').slice(0, 28)}”`
       : k === 'input_prompt' && n.data.history?.length ? `${n.data.history.length} earlier turn${n.data.history.length > 1 ? 's' : ''} · then the prompt`
       : (n.data.sub || '')
-    d.innerHTML = `<div class="fe-title">${esc(n.data.label || k)}</div><div class="fe-sub">${esc(sub)}</div>${badge ? `<div class="fe-badge">${badge}</div>` : ''}`
+    const kvFrom = this.kvFrom(n)
+    const kvIcon = k === 'block' && n.data.has_kv !== false
+      ? `<span class="fe-kvwrap" title="${kvFrom != null ? `No KV cache of its own: reads the keys and values of layer ${kvFrom} (shared KV cache)` : 'Keeps a KV cache: the keys and values of every token so far'}">${KV_ICON(kvFrom != null)}</span>` : ''
+    d.innerHTML = `<div class="fe-title">${kvIcon}${esc(n.data.label || k)}</div><div class="fe-sub">${esc(sub)}</div>${badge ? `<div class="fe-badge">${badge}</div>` : ''}`
     const hs = handlesFor(n)
     const bySide = {}
     hs.forEach(h => (bySide[h.side] ||= []).push(h))
@@ -222,8 +228,26 @@ export class FlowEditor {
     return { x: x + dim.w * frac, y: y + dim.h, dx: 0, dy: 1 }
   }
 
+  // Layer whose KV cache this block reads (cross-layer KV sharing), or null.
+  kvFrom(n) {
+    if (n.data.kind !== 'block') return null
+    const v = n.data.kv_from ?? this.kvSources?.[n.data.layer]
+    return v == null ? null : v
+  }
+
   renderEdges() {
     const parts = []
+    // Shared KV caches: a dotted line from the block that owns the cache to each block that reads it.
+    for (const n of this.nodes) {
+      const src = this.kvFrom(n)
+      if (src == null) continue
+      const owner = this.nodes.find(m => m.data.kind === 'block' && m.data.layer === src && this.kvFrom(m) == null)
+      if (!owner) continue
+      const da = this.dims[owner.id] || { w: NODE_W, h: 64 }, db = this.dims[n.id] || { w: NODE_W, h: 64 }
+      const a = { x: owner.position.x + da.w * 0.85, y: owner.position.y + da.h, dx: 0, dy: 1 }
+      const b = { x: n.position.x + db.w * 0.85, y: n.position.y + db.h, dx: 0, dy: 1 }
+      parts.push(`<g class="fe-edge kvshare"><path class="line" d="${curve(a, b)}"><title>Block ${esc(n.data.label || n.id)} reads the KV cache of layer ${src}</title></path></g>`)
+    }
     for (const e of this.edges) {
       const a = this.portPos(e.source, e.sourceHandle || 'out', 'source')
       const b = this.portPos(e.target, e.targetHandle || 'in', 'target')

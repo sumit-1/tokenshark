@@ -161,6 +161,8 @@ def default_llm_flow(info: dict) -> dict:
                            (f"added after block {extra[i]['after']} · " if i in extra else "")
                            + (subs[i] if i < len(subs) else info.get("block_sub", "")), layer=i,
                            has_kv=(i in kv_layers),
+                           **({"kv_from": (info.get("kv_sources") or [])[i]}
+                              if i < len(info.get("kv_sources") or []) and (info.get("kv_sources") or [])[i] is not None else {}),
                            **({"moe": moe_n} if i in moe_layers else {})))
     rows = (n + 5) // 6
     yb = 210 + rows * (140 if not moe else 170) + 10

@@ -86,9 +86,10 @@ def make_llm(out: Path, arch="qwen2", seed=0):
 GEMMA4_IMAGE_TOKENS = ("<|image>", "<|image|>", "<image|>")     # ids 3, 4, 5 in the tiny tokenizer
 
 
-def make_gemma4(out: Path, seed=0):
+def make_gemma4(out: Path, seed=0, kv_shared: int = 0):
     """Tiny Gemma-4 'unified' model (the gemma-4-12B layout): sliding + global layers with different head sizes,
-    K=V global attention, proportional partial RoPE, logit soft-capping and the encoder-free image embedder."""
+    K=V global attention, proportional partial RoPE, logit soft-capping and the encoder-free image embedder.
+    kv_shared > 0: the last kv_shared layers reuse an earlier layer's KV cache (with double-wide MLPs)."""
     import transformers as T
     torch.manual_seed(seed)
     vocab = make_tokenizer(out, extra_special=GEMMA4_IMAGE_TOKENS)
@@ -102,7 +103,8 @@ def make_gemma4(out: Path, seed=0):
                                "full_attention": {"rope_type": "proportional", "partial_rotary_factor": 0.25,
                                                   "rope_theta": 1000000.0}},
               final_logit_softcapping=3.0, use_bidirectional_attention="vision", hidden_size_per_layer_input=0,
-              pad_token_id=0, eos_token_id=2, bos_token_id=1, tie_word_embeddings=True)
+              pad_token_id=0, eos_token_id=2, bos_token_id=1, tie_word_embeddings=True,
+              num_kv_shared_layers=kv_shared, use_double_wide_mlp=bool(kv_shared))
     vc = dict(patch_size=4, pooling_kernel_size=2, mm_embed_dim=32, mm_posemb_size=64, output_proj_dims=32)
     cfg = T.Gemma4UnifiedConfig(text_config=tc, vision_config=vc, audio_config=None, image_token_id=img,
                                 boi_token_id=boi, eoi_token_id=eoi, video_token_id=vocab + 1, audio_token_id=vocab + 2,

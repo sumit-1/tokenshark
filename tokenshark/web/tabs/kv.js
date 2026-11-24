@@ -468,7 +468,8 @@ function drawLive(box, a) {
     const ov = b.override
       ? `<span class="chip" style="border-color:var(--kv)" title="${esc(b.override.text || '')}">${esc(b.override.op || 'rewrite')} · ${b.n_tokens} tok</span>`
       : '<span class="small">–</span>'
-    tr.innerHTML = `<td><b>${esc(b.label)}</b></td><td>${ov}</td>
+    const shares = b.shares != null ? ` <span class="chip" style="border-style:dotted;border-color:var(--kv)" title="no cache of its own: reads block #${b.shares}’s keys and values">shares #${b.shares}</span>` : ''
+    tr.innerHTML = `<td><b>${esc(b.label)}</b>${shares}</td><td>${ov}</td>
       <td>${b.k_norm_mean}</td><td class="small">${b.k_norm_max}</td>
       <td>${b.v_norm_mean}</td><td class="small">${b.v_norm_max}</td>
       <td>${b.sink_token != null ? `#${b.sink_token} “${esc(b.sink_piece)}” (${pct(b.sink_attn)})` : '–'}</td>`

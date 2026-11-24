@@ -218,3 +218,29 @@ def test_rope_theta_override_is_per_layer(gemma):
     base = run(None)
     assert torch.allclose(run(1000000.0), base, atol=1e-5)
     assert (run(50.0) - base).abs().max() > 1e-3
+
+
+def test_kv_shared_layers_match_transformers(tmp_path):
+    """Cross-layer KV sharing: the last layers read an earlier same-type layer's cache and store nothing."""
+    ref = make_gemma4(tmp_path, kv_shared=2).eval()
+    model = _model(tmp_path)
+    assert [la.kv_source for la in model.cfg.layers] == [None, None, None, 1, 2]
+    ids = list(range(10, 30))
+    full, cache = _raw(model, ids)
+    assert torch.allclose(full, _reference(ref, ids), atol=2e-4, rtol=1e-3)
+    assert cache.shared == {3: 1, 4: 2} and cache.k[3] is None and cache.slot_kv(3)[0] is cache.k[1]
+    rows, (a, c) = [], _raw(model, ids[:9])                    # incremental decoding reads the shared cache too
+    rows.append(a)
+    for t in ids[9:]:
+        r, c = _raw(model, [t], cache=c)
+        rows.append(r)
+    assert torch.allclose(torch.cat(rows), full, atol=1e-4)
+    ad = Gemma4Plugin.create_adapter({"id": "g4s"}, tmp_path, "cpu", torch.float32, "device")
+    plan = compile_flow(default_llm_flow(ad.info()), ad.info())
+    cap = ad.run(plan)["captures"]                            # the stepper path sets up the sharing as well
+    assert cap["cache"].shared == {3: 1, 4: 2}
+    from tokenshark import interp
+    kva = interp.kv_analysis(ad, cap, plan.schedule, plan.schedule_nodes)
+    assert [b["shares"] for b in kva["blocks"]] == [None, None, None, 1, 2] and kva["blocks"][3]["bytes"] == 0
+    with pytest.raises(ValueError, match="layer 2 must run before"):
+        ad.cfg.kv_sharing([0, 1, 4, 2])

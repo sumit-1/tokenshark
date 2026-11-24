@@ -55,7 +55,40 @@ class LLMAdapter(LLMAnalysisMixin):
         if l is not None and mixed:
             w = c.layer_window(l)
             base = (f"sliding {w} · " if w else "global · ") + base + f" · hd {c.layer_head_dim(l)}"
+        if l is not None and c.kv_source(l) is not None:
+            base += f" · KV of {c.kv_source(l)}"
         return base + (" · QK-norm" if self.model.qk_norm else "")
+
+    def _block_detail(self, l: int) -> dict:
+        """What layer l is made of, for the block inspector: attention shape, KV cache, RoPE, norms and MLP."""
+        c, m = self.cfg, self.model
+        d = {"layer": l, "linear": c.is_linear(l), "norm": "sandwich" if m.sandwich else "pre",
+             "norm_offset": getattr(c, "norm_offset", None), "mlp": self._mlp_label(), "act": c.act}
+        try:
+            shp = m.W.shape(f"model.layers.{l}.mlp.down_proj.weight")
+            d["d_ff"] = int(shp[-1])
+        except Exception:
+            d["d_ff"] = c.inter
+        if l in m.moe_layers:
+            lay = m.moe_layers[l]
+            d["moe"] = {"n": lay["n"], "k": c.moe["k"], "shared": lay["shared"]}
+        if m.W.has(f"model.layers.{l}.layer_scalar"):
+            d["layer_scalar"] = True
+        if d["linear"]:
+            return d
+        rope = c.layer_rope(l) or {}
+        theta = float(rope.get("rope_theta") or c.theta)
+        frac = rope.get("partial_rotary_factor")
+        hd = c.layer_head_dim(l)
+        rot = int(hd * float(frac)) if frac else (c.rot_dim or hd)
+        d.update({"window": c.layer_window(l), "n_heads": c.n_heads, "n_kv": c.layer_n_kv(l), "head_dim": hd,
+                  "k_eq_v": c.k_eq_v(l), "qk_norm": bool(m.qk_norm), "v_norm": bool(c.v_norm),
+                  "attn_gate": bool(m.attn_gate), "mla": bool(c.mla), "kv_source": c.kv_source(l),
+                  "attn_bias": bool(getattr(c, "attn_bias", False)),
+                  "attn_scale": c.attn_scale,
+                  "rope": {"theta": theta, "type": rope.get("rope_type") or (c.rope_scaling or {}).get("rope_type")
+                           or "default", "rot_dim": rot}})
+        return d
 
     def info(self) -> dict:
         c = self.cfg
@@ -77,6 +110,8 @@ class LLMAdapter(LLMAnalysisMixin):
                               if i in self.model.moe_layers else f" · {mlp}")
                            for i in range(c.n_layers)],
             "hybrid": bool(c.layer_types),
+            "kv_sources": [c.kv_source(i) for i in range(c.n_layers)],
+            "block_details": [self._block_detail(i) for i in range(c.n_layers)],
             "kv_layers": [i for i in range(c.n_layers) if not c.is_linear(i)],
             "linear_layers": [i for i in range(c.n_layers) if c.is_linear(i)],
             "extra_blocks": list(getattr(self, "extra_blocks", None) or []),

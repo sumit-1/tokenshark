@@ -166,6 +166,55 @@ export const DIT_HELP = {
 }
 export const HELP_SETS = { dit: DIT_HELP }
 
+// What this block is made of, from the loaded model: the data path in one line, then each part explained.
+function blockDetails(d, n) {
+  const wrap = el('div', { className: 'help blockinfo' })
+  const kvFrom = d.kv_source
+  const mlpName = d.moe ? `mixture of experts (${d.moe.k} of ${d.moe.n})` : `${d.mlp} MLP`
+  const attnName = d.linear ? 'Gated DeltaNet (linear attention)'
+    : `${d.window ? `sliding-window (${d.window})` : 'global'} attention (q·kᵀ${d.rope?.rot_dim ? ' with RoPE' : ''})`
+  const path = d.norm === 'sandwich'
+    ? `RMSNorm → ${attnName} → RMSNorm → add → RMSNorm → ${mlpName} → RMSNorm → add`
+    : `RMSNorm → ${attnName} → add → RMSNorm → ${mlpName} → add`
+  wrap.appendChild(el('div', {}, `<b>Block ${n.data.layer}</b>: ${esc(path)}${d.layer_scalar ? ' → × layer scale' : ''}.`))
+  const rows = []
+  const add = (chip, text) => rows.push(`<tr><td><span class="chip">${chip}</span></td><td>${text}</td></tr>`)
+  if (d.linear) {
+    add('linear attention', 'No per-token KV cache: a fixed-size running memory (a matrix per head) is updated token by token, so the cost stays flat however long the text gets. It cannot be cut or re-positioned like a KV cache.')
+  } else {
+    if (d.window) add(`sliding ${d.window}`, `Each token sees only the last ${d.window} tokens. Cheap, and good for local detail; the global layers in between see the whole context.`)
+    else add('global', 'Each token can attend to every earlier token in the context.')
+    const kv = d.n_kv, h = d.n_heads, g = h / kv
+    if (d.mla) add('MLA', 'Multi-head latent attention: keys and values are rebuilt from one small compressed vector per token, so the cache is tiny.')
+    else if (kv === h) add(`MHA ${h}q/${kv}kv`, 'Multi-head attention: every query head has its own key and value head.')
+    else if (kv === 1) add(`MQA ${h}q/1kv`, `Multi-query attention: all ${h} query heads share a single key/value head, so the cache is ${h}× smaller than with one per head.`)
+    else add(`GQA ${h}q/${kv}kv`, `Grouped-query attention: every ${g} query heads share one key/value head. The KV cache is ${g}× smaller than full multi-head attention.`)
+    add(`h${d.head_dim}`, `Head size: each head works on vectors of ${d.head_dim} numbers.`)
+    if (d.k_eq_v) add('K=V', 'No value projection: the values are the keys (taken before key norm and RoPE). Saves the value weights; the cache still holds both.')
+    if (d.qk_norm) add('QK-norm', 'Queries and keys are RMS-normalised per head before RoPE, which keeps attention scores in a steady range.')
+    if (d.v_norm) add('V-norm', 'Values are RMS-normalised too (no learned scale).')
+    if (d.attn_scale != null && Math.abs(d.attn_scale - 1 / Math.sqrt(d.head_dim)) > 1e-6) add(`scale ${d.attn_scale}`, `Scores are multiplied by ${d.attn_scale} instead of the usual 1/√${d.head_dim}; QK-norm already keeps them in range.`)
+    if (d.attn_gate) add('gated', 'Each head’s output is multiplied by a learned sigmoid gate before it goes back into the stream.')
+    if (d.attn_bias) add('bias', 'The q, k and v projections have bias terms.')
+    if (d.rope) {
+      const part = d.rope.rot_dim < d.head_dim ? ` Only ${d.rope.rot_dim} of the ${d.head_dim} dimensions rotate; the rest carry content with no position in it.` : ''
+      add(`RoPE θ ${Number(d.rope.theta).toLocaleString()}`, `Position is added by rotating pairs of query/key dimensions by an angle that grows with position (${esc(d.rope.type)} RoPE).${part} A larger θ makes the slow pairs turn even slower, which suits long contexts.`)
+    }
+    const bytes = 2 * d.n_kv * d.head_dim * 2
+    if (kvFrom != null) add('<span class="kvmini shared"></span>shared KV', `No keys or values of its own and no k/v projections: it reads the KV cache of layer ${kvFrom} (dotted line on the canvas), so it uses no cache memory.`)
+    else add('<span class="kvmini"></span>KV cache', `Keeps the key and value of every token: ${d.n_kv} heads × ${d.head_dim} numbers × 2 (K and V) = ${bytes.toLocaleString()} bytes per token at 16-bit.`)
+  }
+  const act = d.mlp === 'GeGLU' ? 'GELU' : d.mlp === 'SwiGLU' ? 'SiLU (swish)' : d.act
+  if (d.moe) add(`MoE ${d.moe.k}/${d.moe.n}`, `A router picks ${d.moe.k} of ${d.moe.n} small expert MLPs for each token${d.moe.shared ? ', plus one shared expert every token uses' : ''}. Click a cell on the box to work with one expert.`)
+  else add(esc(d.mlp), `Gated MLP: ${esc(act)}(x·W<sub>gate</sub>) ⊙ (x·W<sub>up</sub>) → W<sub>down</sub>, ${Number(d.d_ff).toLocaleString()} hidden units${S.info?.d_ff && d.d_ff !== S.info.d_ff ? ` (${(d.d_ff / S.info.d_ff).toFixed(0)}× the usual ${Number(S.info.d_ff).toLocaleString()})` : ''}. The gate decides how much of each unit passes.`)
+  if (d.norm === 'sandwich') add('pre + post norm', 'RMSNorm before and after both attention and the MLP: their outputs are normalised before they are added back.')
+  else add('pre-norm', 'RMSNorm before attention and before the MLP.')
+  if (d.layer_scalar) add('layer scale', 'The whole stream is multiplied by a learned per-layer number after the block.')
+  wrap.appendChild(el('table', { className: 'blockparts' }, rows.join('')))
+  wrap.appendChild(el('div', { className: 'small' }, 'Rewire arrows to remove, repeat or reorder blocks. Wire an interceptor into the top port.'))
+  return wrap
+}
+
 export function renderInspectorHeaderOnly() {
   const n = selectedNode()
   if (!n) return
@@ -251,7 +300,9 @@ export function renderInspector() {
   }
   const k = n.data.kind
   box.appendChild(el('h3', { id: 'insp-title', textContent: n.data.label || k }))
-  box.appendChild(el('div', { className: 'help', textContent: (k === 'block' && n.data.moe ? KIND_HELP.block_moe : HELP_SETS[texts()]?.[k]) || KIND_HELP[k] || '' }))
+  const detail = k === 'block' ? S.info?.block_details?.[n.data.layer] : null
+  if (detail) box.appendChild(blockDetails(detail, n))
+  else box.appendChild(el('div', { className: 'help', textContent: (k === 'block' && n.data.moe ? KIND_HELP.block_moe : HELP_SETS[texts()]?.[k]) || KIND_HELP[k] || '' }))
   if (k === 'init_image') box.appendChild(startImageEditor(n))
   else (FIELDS[k]?.(schema().modality, n) || []).forEach(f => box.appendChild(field(n, f)))
   if (k === 'input_prompt' && schema().modality !== 'image') box.appendChild(historyEditor(n))

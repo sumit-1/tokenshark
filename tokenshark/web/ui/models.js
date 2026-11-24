@@ -78,6 +78,7 @@ export async function pollStatus(loading) {
   showLoadProgress(null)
   if (m && (!S.info || S.info.model_id !== m.model_id || loading)) {
     S.info = m
+    flow.kvSources = m.kv_sources || null           // the canvas draws shared KV caches from this
     S.lora = m.lora || null
     document.body.dataset.family = m.family          // styling only (colours of the canvas); behaviour comes from the schema
     document.body.dataset.denoiser = m.denoiser || ''
@@ -169,6 +170,7 @@ export async function refreshInfo() {
   if (!st.model || !S.info) return
   const before = JSON.stringify(S.info.extra_blocks || [])
   S.info = st.model
+  flow.kvSources = st.model.kv_sources || null
   S.lora = st.model.lora || null
   const now = st.model.extra_blocks || []
   if (JSON.stringify(now) !== before) {

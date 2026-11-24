@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .adapter import LLMAdapter
 
 
+
 class Stepper:
     """Executes a plan in the smallest steps the model has:
 
@@ -88,6 +89,7 @@ class Stepper:
             spans.append((a, len(cache), slots))
             start_pos = max(start_pos, st)
         cache.prefix_spans = spans
+        cache.shared = ad.cfg.kv_sharing(plan.schedule)
         cache.states, self.notes = {}, []
         for c, (a, b, slots) in zip(prefixes, spans):
             for slot, stt in c.states.items():
@@ -251,7 +253,7 @@ class Stepper:
             if rows:
                 row = rows[-1][:, -1, :].float().mean(0)
                 v, i = row.topk(min(5, row.shape[0]))
-                bc = self.cache.block_caches.get(p)
+                bc = self.cache.block_caches.get(self.cache.shared.get(p, p))
                 tok_list = bc.tokens if bc is not None else self.cache.tokens
                 snap["attends_to"] = [[int(j), self.ad.tok.piece(tok_list[int(j)]) if int(j) < len(tok_list) else "", round(float(w), 3)]
                                       for w, j in zip(v, i)]

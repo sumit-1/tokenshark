@@ -15,7 +15,7 @@ this plugin maps the checkpoint onto them through `ArchHooks` (tokenshark/llm/ar
   directions in the sliding-window layers.
 
 Not supported here: video and audio input; per-layer input embeddings (E2B/E4B), mixture-of-experts blocks
-(26B-A4B), KV-shared layers; the SigLIP-style vision tower of non-unified Gemma-4 checkpoints.
+(26B-A4B); the SigLIP-style vision tower of non-unified Gemma-4 checkpoints.
 """
 from __future__ import annotations
 
@@ -112,7 +112,6 @@ class Gemma4Hooks(ArchHooks):
         unsupported = [why for why, bad in (
             ("per-layer input embeddings (E2B/E4B)", int(hf.get("hidden_size_per_layer_input") or 0) > 0),
             ("mixture-of-experts blocks (26B-A4B)", bool(hf.get("enable_moe_block"))),
-            ("KV-shared layers", int(hf.get("num_kv_shared_layers") or 0) > 0),
             ("bidirectional attention over all tokens", hf.get("use_bidirectional_attention") == "all")) if bad]
         if unsupported:
             raise ValueError("This Gemma-4 variant isn't supported yet: " + ", ".join(unsupported) + ".")

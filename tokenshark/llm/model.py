@@ -231,7 +231,7 @@ class RawLLM:
     def attn_allowed(self, p: int, n: int, T: int, cache: KVCache, device,
                      ctx: RunContext | None = None, l: int | None = None) -> torch.Tensor:
         window = self.cfg.layer_window(l)
-        bc = cache.block_caches.get(p)
+        bc = cache.block_caches.get(cache.shared.get(p, p))
         if bc is not None:
             if ctx is not None and ctx.store.get("chunk_origin") == "prompt":
                 qi = torch.linspace(0, max(0, T - 1), steps=n, device=device).floor()[:, None]
@@ -266,7 +266,7 @@ class RawLLM:
         rng[(p, hook)] = (lo, hi) if old is None else (torch.minimum(old[0], lo), torch.maximum(old[1], hi))
 
     def _rope_for_block(self, p: int, n: int, T: int, cache: KVCache, ctx: RunContext, l: int | None = None):
-        bc = cache.block_caches.get(p)
+        bc = cache.block_caches.get(cache.shared.get(p, p))
         r_cfg = (ctx.store.get("rope") or {}).get(p) or {}
         inv_freq = self.layer_inv_freq(l, float(r_cfg["theta"]) if r_cfg.get("theta") else None)
         if bc is not None:
@@ -340,30 +340,43 @@ class RawLLM:
             q = q.transpose(0, 1)
         else:
             q = q_all.view(n, cfg.n_heads, hd).transpose(0, 1)
-        k = self._lin(h, pre + "self_attn.k_proj", ctx).view(n, n_kv, hd).transpose(0, 1)
-        if cfg.k_eq_v(l):                         # no v_proj: values are the (un-normed) keys
-            v = k
-        else:
-            v = self._lin(h, pre + "self_attn.v_proj", ctx).view(n, n_kv, hd).transpose(0, 1)
+        src = cache.shared.get(p)                 # cross-layer KV sharing: this block has no k/v projections
+        k = v = None
+        if src is None:
+            k = self._lin(h, pre + "self_attn.k_proj", ctx).view(n, n_kv, hd).transpose(0, 1)
+            if cfg.k_eq_v(l):                     # no v_proj: values are the (un-normed) keys
+                v = k
+            else:
+                v = self._lin(h, pre + "self_attn.v_proj", ctx).view(n, n_kv, hd).transpose(0, 1)
         if self.qk_norm and self.qk_norm_flat:
             q = rms_norm(q.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
-            k = rms_norm(k.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
             q = q.view(n, cfg.n_heads, hd).transpose(0, 1)
-            k = k.view(n, n_kv, hd).transpose(0, 1)
+            if k is not None:
+                k = rms_norm(k.transpose(0, 1).reshape(n, -1), self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
+                k = k.view(n, n_kv, hd).transpose(0, 1)
         elif self.qk_norm:
             q = rms_norm(q, self.norm_w(pre + "self_attn.q_norm.weight"), cfg.eps)
-            k = rms_norm(k, self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
-        if cfg.v_norm:                            # values get a weight-free RMSNorm
+            if k is not None:
+                k = rms_norm(k, self.norm_w(pre + "self_attn.k_norm.weight"), cfg.eps)
+        if cfg.v_norm and v is not None:          # values get a weight-free RMSNorm
             vf = v.float()
             v = (vf * torch.rsqrt(vf.pow(2).mean(-1, keepdim=True) + cfg.eps)).to(v.dtype)
         if cfg.clip_qkv:
-            q, k, v = (t.clamp(-cfg.clip_qkv, cfg.clip_qkv) for t in (q, k, v))
+            q = q.clamp(-cfg.clip_qkv, cfg.clip_qkv)
+            if k is not None:
+                k, v = k.clamp(-cfg.clip_qkv, cfg.clip_qkv), v.clamp(-cfg.clip_qkv, cfg.clip_qkv)
         q = self._head_hook(p, "q", q, ctx, idx_of, cap)
-        k = self._head_hook(p, "k", k, ctx, idx_of, cap)
-        v = self._head_hook(p, "v", v, ctx, idx_of, cap)
+        if k is not None:
+            k = self._head_hook(p, "k", k, ctx, idx_of, cap)
+            v = self._head_hook(p, "v", v, ctx, idx_of, cap)
         x = h
-        bc = cache.block_caches.get(p)
-        if bc is not None:
+        bc = cache.block_caches.get(src if src is not None else p)
+        if src is not None:                       # read the source block's cache as it stands (it ran earlier)
+            K, V = cache.slot_kv(p)
+            if K is None:
+                raise ValueError(f"Block #{p} shares the KV cache of block #{src}, which has not run yet.")
+            K, V = K.to(x.device), V.to(x.device)
+        elif bc is not None:
             if ctx.store.get("chunk_origin") != "prompt":
                 bc.append(k, v)
             if ctx.active("kv_k") and bc.k is not None:
@@ -725,6 +738,8 @@ class RawLLM:
                 ) -> torch.Tensor:
         """Process new tokens `ids` (run-relative index run_offset..). Returns logits [n, vocab] (float32).
         `media`: soft-token embeddings that replace the media placeholder tokens among `ids`, in order."""
+        if not cache.shared:
+            cache.shared = self.cfg.kv_sharing(schedule)
         cache.add_tokens(ids, positions, origin)
         x = self.inject_media(self.embed(ids), ids, media)
         n = len(ids)

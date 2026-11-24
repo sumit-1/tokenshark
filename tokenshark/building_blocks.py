@@ -259,7 +259,7 @@ def _last_query_attention(adapter, cap: dict, cache: KVCache, p: int, K: torch.T
     s_rope = torch.einsum("hd,htd->ht", qr, kr) * scale
     s_same = torch.einsum("hd,htd->ht", qr, k0) * scale
     allowed = torch.ones(T, dtype=torch.bool)
-    if cache.block_caches.get(p) is None:
+    if cache.block_caches.get(cache.shared.get(p, p)) is None:
         for a, b, slots in cache.prefix_spans:
             if slots is not None and p not in slots:
                 allowed[a:min(b, T)] = False
@@ -324,10 +324,10 @@ def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[st
     for p in range(S):
         l = schedule[p]
         nid = schedule_nodes[p] if p < len(schedule_nodes) else f"block_{l}"
-        bc = cache.block_caches.get(p)
+        bc = cache.block_caches.get(cache.shared.get(p, p))
         k_t, v_t = cache.slot_kv(p)
         base = {"pos": p, "layer": l, "node": nid, "label": f"#{p} · L{l}", "selected": p in selected,
-                "rope": dict(rope_cfg.get(p) or {})}
+                "rope": dict(rope_cfg.get(p) or {}), "shares": cache.shared.get(p)}
         if k_t is None or v_t is None:
             out_blocks.append({**base, "linear": True, "override": None, "n_tokens": 0,
                                "k_norm_mean": None, "v_norm_mean": None, "k_norm_max": None, "v_norm_max": None,
@@ -358,7 +358,7 @@ def kv_analysis(adapter, cap: dict, schedule: list[int], schedule_nodes: list[st
                 q_pos_sum += q_pos
                 q_pos_n += 1
                 n_attn += 1
-        b_bytes = int(k_t.numel() * k_t.element_size() + v_t.numel() * v_t.element_size())
+        b_bytes = 0 if p in cache.shared else int(k_t.numel() * k_t.element_size() + v_t.numel() * v_t.element_size())
         out_blocks.append({
             **base, "linear": False, "n_tokens": T_b,
             "override": bc.summary(adapter.tok.piece) if bc is not None else None,

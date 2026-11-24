@@ -98,6 +98,15 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 .fe-edge.fork { color: var(--ok); } .fe-edge.fork .line { stroke-dasharray: 4 3; }
 .fe-edge.loop { color: var(--loop); } .fe-edge.loop .line { stroke-dasharray: 6 5; }
 .fe-edge.skip { color: var(--skip); } .fe-edge.skip .line { stroke-dasharray: 2 4; opacity: .7; }
+.fe-edge.kvshare { color: var(--kv); cursor: default; pointer-events: none; } .fe-edge.kvshare .line { stroke-dasharray: 1 4; stroke-linecap: round; stroke-width: 2; opacity: .85; }
+.fe-kvwrap { display: inline-block; vertical-align: -2px; margin-right: 4px; }
+.fe-kv { fill: none; stroke: var(--kv); stroke-width: 1.4; } .fe-kv ellipse { fill: rgba(79,209,197,.35); }
+.fe-kv.shared { stroke-dasharray: 1.5 1.5; } .fe-kv.shared ellipse { fill: none; }
+.blockinfo table.blockparts { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 12px; }
+.blockparts td { vertical-align: top; padding: 4px; border-top: 1px solid var(--line); line-height: 1.45; }
+.blockparts td:first-child { white-space: nowrap; width: 1%; }
+.kvmini { display: inline-block; width: 8px; height: 10px; border: 1.4px solid var(--kv); border-radius: 4px / 2px; margin-right: 4px; vertical-align: -1px; background: rgba(79,209,197,.35); }
+.kvmini.shared { border-style: dotted; background: none; }
 .fe-edge.sel .line { stroke-width: 4; filter: drop-shadow(0 0 4px currentColor); }
 .fe-edge-label { fill: var(--muted); font-size: 11px; text-anchor: middle; }
 .fe-nodes { position: absolute; left: 0; top: 0; }
