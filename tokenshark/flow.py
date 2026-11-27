@@ -23,7 +23,7 @@ from typing import Any
 # Plan data model (serialisable - stored in every run manifest)
 # --------------------------------------------------------------------------------------
 
-LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_heads", "attn_out", "router", "expert_out", "mlp_neurons",
+LLM_HOOKS = ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_probs", "attn_heads", "attn_out", "router", "expert_out", "mlp_neurons",
              "mlp_out", "resid_post", "weights"]
 MOE_HOOKS = ["router", "expert_out"]     # only on mixture-of-experts blocks: the router's scores · one expert's output
 UNET_HOOKS = ["out", "skip", "both", "word"]
@@ -62,7 +62,7 @@ class Intervention:
     positions: str = "all"   # token positions (LLM) - all | last | prompt | prefill | generated | a:b | 1,2,5
     steps: str = "all"       # step range (diffusion) - all | a:b | 3
     seed: int = 0
-    heads: str = "all"       # attention heads for hook attn_heads - all | a:b | 1,4
+    heads: str = "all"       # attention heads for hooks attn_heads / attn_probs - all | a:b | 1,4
     region: str = ""         # image models: painted mask (PNG data URL) - the intervention only acts there
     ref: str = ""            # patch: source run id · steer: steering-vector id · clamp: run whose min/max to use
     src_positions: str = ""  # patch: token(s) to copy from in the source run ("" = the same token index)
@@ -231,6 +231,10 @@ def _num(v, default, cast=float):
         return default
 
 
+CAPTURE_KEYS = ("attn_budget_mb", "neuron_budget_mb", "parts_budget_mb", "expert_budget_mb", "attn_layers",
+                "attn_queries")
+
+
 def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) -> dict:
     """Run parameters of a language-model flow: prompt, sampler, KV prefixes, edited box code."""
     params: dict[str, Any] = {}
@@ -239,6 +243,7 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
     params.update(
         system=p.get("system", ""), prompt=p.get("prompt", ""), prefill=p.get("prefill", ""),
         use_chat_template=bool(p.get("use_chat_template", False)), thinking=bool(p.get("thinking", False)),
+        literal_content=bool(p.get("literal_content", False)),
         max_new_tokens=max(0, min(512, _num(s.get("max_new_tokens"), 24, int))),
         temperature=max(0.0, _num(s.get("temperature"), 0.0)), top_k=max(0, _num(s.get("top_k"), 0, int)),
         top_p=min(1.0, max(0.0, _num(s.get("top_p"), 1.0))) or 1.0,
@@ -246,6 +251,10 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
         rope_step_stride=_num(s.get("rope_step_stride"), 1.0, float) if s.get("rope_step_stride") not in (None, "") else 1.0,
         rope_prompt_scale=_num(s.get("rope_prompt_scale"), 1.0, float) if s.get("rope_prompt_scale") not in (None, "") else 1.0,
     )
+    # What the run records (FlowBuilder.capture): memory budgets in MB and which attention rows to keep.
+    for key in CAPTURE_KEYS:
+        if s.get(key) not in (None, ""):
+            params[key] = _num(s[key], 0, int) if key.endswith("_mb") else str(s[key])
     # RoPE jump for every block: the first generated token is placed at this position (later ones follow from it).
     if s.get("rope_gen_start") not in (None, ""):
         params["rope_gen_start"] = _num(s.get("rope_gen_start"), 0.0, float)
@@ -659,7 +668,7 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if op in ("steer", "project_out") and not src.get("ref"):
             err("Choose a steering vector (make one in the Steering tab).", e["source"])
             continue
-        if op in ("steer", "project_out") and hook in ("attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v", "rope", "router"):
+        if op in ("steer", "project_out") and hook in ("attn_probs", "attn_heads", "mlp_neurons", "weights", "q", "k", "v", "kv_k", "kv_v", "rope", "router"):
             err("A steering vector lives in the residual stream: use resid_pre, attn_out, mlp_out or resid_post.",
                 e["source"])
             continue

@@ -203,8 +203,9 @@ def run_block(model, code: Code, p: int, l: int, x: torch.Tensor, cache, ctx):
         raise ValueError(f"{code.label} code must leave x as a [{n}, {d}] tensor (tokens × d_model); got {got}.")
     if ctx.capture:
         attn = _tensor(g, "attn")
-        if attn is not None and attn.ndim == 3 and attn.shape[1] == n and ctx.store.get("want_attn", True):
-            ctx.store.setdefault("attn", {}).setdefault(p, []).append(attn.detach().to(torch.float16).cpu())
+        if attn is not None and attn.ndim == 3 and attn.shape[1] == n:
+            from .engine import store_attention
+            store_attention(ctx, p, attn)
         chosen, weights, scores = _tensor(g, "chosen"), _tensor(g, "weights"), _tensor(g, "scores")
         if lay is not None and chosen is not None and weights is not None and chosen.shape == weights.shape \
                 and chosen.ndim == 2 and chosen.shape[0] == n:          # the routing, for the Experts tab

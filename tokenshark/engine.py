@@ -15,8 +15,9 @@ class Cancelled(RuntimeError):
     """The user stopped the run. Not an error: whatever was computed so far is kept."""
 
 
-def pick_device() -> str:
-    want = os.environ.get("TOKENSHARK_DEVICE", "auto").lower()
+def pick_device(want: str | None = None) -> str:
+    """`want` (cuda | mps | cpu | auto) wins; without it, TOKENSHARK_DEVICE; then the best available."""
+    want = (want or os.environ.get("TOKENSHARK_DEVICE", "auto")).lower()
     if want != "auto":
         return want
     if torch.cuda.is_available():
@@ -26,8 +27,9 @@ def pick_device() -> str:
     return "cpu"
 
 
-def pick_dtype(device: str) -> torch.dtype:
-    want = os.environ.get("TOKENSHARK_DTYPE", "auto").lower()
+def pick_dtype(device: str, want: str | None = None) -> torch.dtype:
+    """`want` (fp32 | fp16 | bf16 | auto) wins; without it, TOKENSHARK_DTYPE; then the device's default."""
+    want = (want or os.environ.get("TOKENSHARK_DTYPE", "auto")).lower()
     table = {"fp32": torch.float32, "float32": torch.float32, "fp16": torch.float16, "float16": torch.float16,
              "bf16": torch.bfloat16, "bfloat16": torch.bfloat16}
     if want in table:
@@ -88,6 +90,52 @@ class RunContext:
                     continue
             out.append(iv)
         return out
+
+
+# --------------------------------------------------------------------------------------
+# Moving captures to the host without stalling the GPU
+# --------------------------------------------------------------------------------------
+
+_ASYNC_MAX_BYTES = 4 * 2**20          # bigger captures (prefill attention, ...) copy synchronously: no pinned-RAM pile-up
+
+
+def to_host(t: torch.Tensor) -> torch.Tensor:
+    """Copy a capture to CPU. Small CUDA tensors are copied asynchronously, so the GPU keeps working while the
+    copy runs; their values are valid after host_sync(), which the run loop calls at the end of every token (and
+    before anything reads captures mid-token). Code that reads captures in the middle of a forward pass calls
+    host_sync() first."""
+    if t.is_cuda and t.numel() * t.element_size() <= _ASYNC_MAX_BYTES:
+        return t.to("cpu", non_blocking=True)
+    return t.cpu()
+
+
+def host_sync() -> None:
+    """Wait until every capture copied with to_host() has landed."""
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        torch.cuda.synchronize()
+
+
+# --------------------------------------------------------------------------------------
+# Attention capture: one rule for every attention implementation (engine, plugins, edited box code)
+# --------------------------------------------------------------------------------------
+
+def store_attention(ctx: RunContext, p: int, probs: torch.Tensor) -> None:
+    """Record one block's attention weights [heads, queries, keys] for this forward pass, honouring the run's
+    capture settings (set up by the run loop in ctx.store):
+      want_attn    False when capture is off or over budget
+      attn_slots   schedule positions to keep (None = every attention block)
+      attn_last    keep only the last query row of each forward pass; its token index goes to attn_rows
+    """
+    st = ctx.store
+    if not ctx.capture or not st.get("want_attn", True):
+        return
+    slots = st.get("attn_slots")
+    if slots is not None and p not in slots:
+        return
+    if st.get("attn_last"):
+        st.setdefault("attn_rows", {}).setdefault(p, []).append(ctx.offset + probs.shape[1] - 1)
+        probs = probs[:, -1:]
+    st.setdefault("attn", {}).setdefault(p, []).append(to_host(probs.detach().to(torch.float16)))
 
 
 def apply_op(x: torch.Tensor, iv: Intervention, ctx: RunContext, token_dim: int | None,

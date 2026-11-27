@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import torch
 
-from ..engine import Cancelled, RunContext, set_determinism
+from ..engine import Cancelled, RunContext, host_sync, set_determinism
 from ..flow import Plan, parse_index_spec
 from ..kvcache import KVCache
 
@@ -27,7 +27,10 @@ class Stepper:
         self.ad, self.model, self.plan = ad, ad.model, plan
         p = self.p_ = plan.params
         set_determinism(p["seed"])
-        prompt_ids, prefill_ids = ad.build_ids(p)
+        if hasattr(ad, "build_ids_with_roles"):
+            prompt_ids, prefill_ids, self.roles = ad.build_ids_with_roles(p)
+        else:                                    # adapters with their own build_ids: no role spans
+            (prompt_ids, prefill_ids), self.roles = ad.build_ids(p), []
         if not prompt_ids and not prefill_ids and prefix is None:
             prompt_ids = [ad.tok.bos_id or 0]
         if not prompt_ids and not prefill_ids:
@@ -55,8 +58,7 @@ class Stepper:
             specs += [{"mode": p.get("prefix_mode", "shift"), "offset": p.get("prefix_offset", 0),
                        "layers": p.get("prefix_layers", "all"), "label": p.get("prefix_label", "imported")}] * (len(prefixes) - len(specs))
         S_ = len(plan.schedule)
-        est = ad.cfg.n_heads * planned * (planned + sum(len(c) for c in prefixes)) * S_ * 2
-        ctx.store["want_attn"] = est < int(p.get("attn_budget_mb", 768)) * 2**20
+        self._attn_capture_setup(planned + sum(len(c) for c in prefixes))
         ctx.store["want_neurons"] = planned * ad.cfg.inter * S_ * 2 < int(p.get("neuron_budget_mb", 512)) * 2**20
         ctx.store["want_parts"] = planned * ad.cfg.hidden * S_ * 8 < int(p.get("parts_budget_mb", 768)) * 2**20
         if ad.cfg.moe:
@@ -105,8 +107,8 @@ class Stepper:
         if p.get("kv_overrides"):
             cache.block_caches = ad.recreate_block_caches(plan, start_pos=start_pos, prompt_scale=self.prompt_scale)
         max_bc_len = max([len(bc) for bc in cache.block_caches.values()], default=0)
-        est = ad.cfg.n_heads * planned * max(planned + sum(len(c) for c in prefixes), max_bc_len + len(prefill_ids) + self.total) * S_ * 2
-        ctx.store["want_attn"] = est < int(p.get("attn_budget_mb", 768)) * 2**20
+        self._attn_capture_setup(max(planned + sum(len(c) for c in prefixes), max_bc_len + len(prefill_ids) + self.total),
+                                 final=True)
         self.cache, self.n_prefix = cache, len(cache)
         self.gen = torch.Generator(device="cpu").manual_seed(p["seed"])
         self.eos = set(ad.cfg.eos_ids) | ({ad.tok.eos_id} if ad.tok.eos_id is not None else set())
@@ -124,6 +126,35 @@ class Stepper:
         self.steps = 0
         self.trace_on = trace
         self.last_lens: dict[int, str] = {}
+
+    def _attn_capture_setup(self, n_keys: int, final: bool = False) -> None:
+        """Decide what attention this run records, from the plan's capture settings:
+          attn_budget_mb  upper bound for the stored weights (0 = record none)
+          attn_layers     schedule positions to record ("all", "5", "3,7", "10:14")
+          attn_queries    "all" (full [heads, T, T]) or "last" (one row per forward pass: the token being predicted)
+        Only blocks that compute softmax attention count (linear-attention blocks store nothing). A run that would
+        go over the budget records no attention and says so in its notes, with the numbers."""
+        ad, p, plan, st = self.ad, self.p_, self.plan, self.ctx.store
+        S_ = len(plan.schedule)
+        lay = str(p.get("attn_layers") or "all").strip().lower()
+        slots = None if lay in ("all", "*", "") else set(parse_index_spec(lay, S_))
+        attn_blocks = [pp for pp, l in enumerate(plan.schedule)
+                       if not ad.cfg.is_linear(l) and (slots is None or pp in slots)]
+        last = str(p.get("attn_queries") or "all").strip().lower() == "last"
+        rows = (len(self._prompt_chunks()) + self.total) if last else self.planned
+        est = ad.cfg.n_heads * rows * n_keys * len(attn_blocks) * 2
+        budget = int(p.get("attn_budget_mb", 768))
+        st["attn_slots"], st["attn_last"] = slots, last
+        st["want_attn"] = est < budget * 2**20
+        if final and not st["want_attn"] and budget > 0 and attn_blocks:
+            self.notes.append(
+                f"attention not captured: it needs about {est / 2**20:,.0f} MB for {len(attn_blocks)} blocks but "
+                f"attn_budget_mb is {budget}. Raise attn_budget_mb, or record less with attn_layers (e.g. \"5,11\") "
+                f"or attn_queries=\"last\".")
+
+    def _prompt_chunks(self) -> list:
+        """The chunks the prompt is read in (one forward pass each): prompt, then prefill."""
+        return [c for c in (self.prompt_ids, self.prefill_ids) if c]
 
     def update_rope(self, params: dict) -> list[str]:
         """Take new RoPE / zeroed-record settings from a recompiled flow, mid-session. Keys sit in the cache
@@ -245,6 +276,7 @@ class Stepper:
         if not self.trace_on:
             snap = None
         else:
+            host_sync()                          # the trace reads this block's captures right away
             snap = {"pos": p, "layer": sched[p], "node": self.plan.schedule_nodes[p], "top": self._lens_top(self.x),
                     "resid_norm": round(float(st["resid"][-1][-1]), 3), "attn_norm": round(float(st["attn"][-1][-1]), 3),
                     "mlp_norm": round(float(st["mlp"][-1][-1]), 3)}
@@ -299,6 +331,7 @@ class Stepper:
             return False
         while self.x is not None:
             self.step_block()
+        host_sync()                              # one wait per token: every capture of this token is now readable
         return True
 
     def run_to(self, pos: int, limit: int = 100_000) -> bool:
@@ -419,6 +452,8 @@ class Stepper:
                          {"origin": "prefill", "start": len(self.prompt_ids), "end": n_in},
                          {"origin": "generated", "start": max(n_in, 0), "end": max(n_in, len(seq))},
                          {"origin": "inflight", "start": len(seq), "end": len(seq) + len(inflight)}],
+            # where each message's content sits in "tokens": [{"role", "index", "start", "end"}] (end exclusive)
+            "roles": [dict(r) for r in self.roles],
             "alternatives": alts,
             "block_stats": block_stats,
             "forks": dict(ctx.store.get("fork_outputs") or {}),

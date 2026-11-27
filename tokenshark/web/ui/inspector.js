@@ -96,9 +96,9 @@ export const FIELDS = {
       ['threshold', 'Threshold on source neuron before ReLU (0 = any positive activation)', 'number'],
     )
     if (op === 'scale' || op === 'add_noise' || op === 'quantize') f.push(['value', op === 'scale' ? 'Scale factor' : op === 'quantize' ? 'Bit width (1..16 bits)' : 'Noise size σ (× the activation’s spread)', 'number'])
-    if (hook !== 'weights') f.push(['positions', 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
-    if (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook)) f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
-    if (op !== 'wire' && hook !== 'weights' && hook !== 'router' && hook !== 'rope') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
+    if (hook !== 'weights') f.push(['positions', hook === 'attn_probs' ? 'Key tokens attended to (all | prompt | 3:9 | 1,4)' : 'Tokens (all | last | prompt | prefill | generated | 3:9 | 1,4)', 'text'])
+    if (['attn_probs', 'attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook)) f.push(['heads', 'Heads (all | 0:4 | 2)', 'text'])
+    if (op !== 'wire' && hook !== 'weights' && hook !== 'router' && hook !== 'rope' && hook !== 'attn_probs') f.push(['neurons', hook === 'mlp_neurons' ? 'Neurons (all | 1021 | 3,7 | 0:64)' : ['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(hook) ? 'Dimensions inside each head (all | 0:8)' : 'Dimensions of the stream (all | 12 | 0:64)', 'text'])
     if (op === 'add_noise') f.push(['seed', 'Noise seed', 'number'])
     return f
   },

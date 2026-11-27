@@ -404,7 +404,7 @@ export function ivSummary(d) {
     : d.op === 'clamp' ? ` → ${d.clamp === 'value' ? d.value : `${d.value && d.value !== 1 ? d.value + '× ' : ''}${d.clamp || 'max'}`}` : ''
   const units = (d.experts && d.experts !== 'all' ? ` expert ${d.experts}` : '')
     + (d.neurons && d.neurons !== 'all' ? ` ${d.hook === 'mlp_neurons' ? 'neuron' : 'dim'} ${d.neurons}` : '')
-  const where = (['attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(d.hook) && d.heads && d.heads !== 'all' ? ` heads ${d.heads}` : '') + units
+  const where = (['attn_probs', 'attn_heads', 'q', 'k', 'v', 'kv_k', 'kv_v'].includes(d.hook) && d.heads && d.heads !== 'all' ? ` heads ${d.heads}` : '') + units
   const steps = d.steps && d.steps !== 'all' ? ` · steps ${d.steps}` : ''
   const pos = d.hook !== 'weights' && d.positions && d.positions !== 'all' ? ` · tok ${d.positions}` : ''
   const region = d.region ? ' · region' : ''

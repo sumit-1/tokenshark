@@ -88,7 +88,8 @@ def test_routes_ask_the_plugin_for_features(tmp_path_factory):
 def test_no_em_dashes_in_repository():
     """Guardrail test: ensure no em dash (U+2014) appears in any source, web, doc, or test file."""
     root = Path(__file__).parent.parent
-    skip_dirs = {".git", ".venv", "models", "data", "__pycache__", ".pytest_cache", "dist", "build", "tokenshark.egg-info"}
+    skip_dirs = {".git", ".venv", "models", "data", "__pycache__", ".pytest_cache", "dist", "build", "tokenshark.egg-info",
+                 "research"}                          # experiment data may quote model output verbatim
     bin_exts = {".png", ".gif", ".jpg", ".jpeg", ".webp", ".ico", ".safetensors", ".bin", ".pth", ".pyc", ".pdf"}
     em_char = chr(0x2014)
     em_esc = chr(92) + "u2014"

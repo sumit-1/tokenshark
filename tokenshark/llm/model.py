@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from ..engine import RunContext, apply_op
+from ..engine import RunContext, apply_op, store_attention, to_host
 from ..flow import parse_index_spec
 from ..kvcache import KVCache
 from ..weights import WeightStore
@@ -179,7 +179,7 @@ class RawLLM:
         out = tt.transpose(0, 1) if token_dim == 1 else tt
         if cap and ctx.store.get("want_parts", False) and hook in ("q", "k", "v", "kv_k", "kv_v"):
             if hook in ("q", "k", "v"):
-                ctx.store.setdefault(hook, {}).setdefault(p, []).append(tt.reshape(tt.shape[0], -1).detach().float().cpu())
+                ctx.store.setdefault(hook, {}).setdefault(p, []).append(to_host(tt.reshape(tt.shape[0], -1).detach().float()))
         return out
 
     def block(self, p: int, l: int, x: torch.Tensor, cache: KVCache, ctx: RunContext, idx_of) -> torch.Tensor:
@@ -191,7 +191,7 @@ class RawLLM:
             x = apply_op(x, iv, ctx, 0, idx_of(iv))
         cap = ctx.capture
         if cap:
-            ctx.store.setdefault("resid_pre", {}).setdefault(p, []).append(x.detach().float().cpu())
+            ctx.store.setdefault("resid_pre", {}).setdefault(p, []).append(to_host(x.detach().float()))
 
         code = ctx.store.get("code", {}).get(p)
         if code is not None:
@@ -259,11 +259,32 @@ class RawLLM:
                 allowed &= (kj < a) | (kj >= b)
         return allowed
 
+    def _probs_hook(self, p: int, probs: torch.Tensor, cache, ctx: RunContext) -> torch.Tensor:
+        """attn_probs hook: act on the attention weights [heads, queries, keys] after softmax, before they mix the
+        values. `positions` picks KEY positions (run-relative, like every other hook), `heads` the heads; the op
+        acts on those columns for every query. No renormalisation: scale by λ turns the head's output into
+        λ·Σ_{i∈S} p_i v_i + Σ_{i∉S} p_i v_i (the sink-subspace modulation of Mackey et al., 2026)."""
+        ivs = ctx.active("attn_probs")
+        if not ivs:
+            return probs
+        H, _, T = probs.shape
+        n_pre = sum(b - a for a, b, _ in cache.prefix_spans)      # imported prefix tokens sit before the run
+        for iv in ivs:
+            heads = parse_index_spec(iv.heads, H)
+            keys = [n_pre + j for j in parse_index_spec(iv.positions, max(0, T - n_pre), ctx.token_ranges)]
+            if not heads or not keys:
+                continue
+            hsel = torch.tensor(heads, device=probs.device)
+            probs = probs.clone()
+            probs[hsel] = apply_op(probs[hsel], iv, ctx, 2, keys)
+        return probs
+
     def note_units(self, p: int, hook: str, a: torch.Tensor, ctx: RunContext):
-        lo, hi = a.detach().float().amin(0).cpu(), a.detach().float().amax(0).cpu()
+        lo, hi = a.detach().float().amin(0), a.detach().float().amax(0)      # kept on the device until _collect
         rng = ctx.store.setdefault("unit_range", {})
         old = rng.get((p, hook))
-        rng[(p, hook)] = (lo, hi) if old is None else (torch.minimum(old[0], lo), torch.maximum(old[1], hi))
+        rng[(p, hook)] = (lo, hi) if old is None else (torch.minimum(old[0].to(lo.device), lo),
+                                                       torch.maximum(old[1].to(hi.device), hi))
 
     def _rope_for_block(self, p: int, n: int, T: int, cache: KVCache, ctx: RunContext, l: int | None = None):
         bc = cache.block_caches.get(cache.shared.get(p, p))
@@ -294,7 +315,7 @@ class RawLLM:
             if r_cfg.get("q_offset"):
                 pos_q = pos_q + float(r_cfg["q_offset"])
             if ctx.capture:
-                ctx.store.setdefault("rope_pos", {})[p] = (pos_q.detach().cpu(), pos_k.detach().cpu())
+                ctx.store.setdefault("rope_pos", {})[p] = (to_host(pos_q.detach()), to_host(pos_k.detach()))
             return pos_q, pos_k, inv_freq
 
         pos_k = cache.pos.to(self.inv_freq.device).float().clone()
@@ -323,7 +344,7 @@ class RawLLM:
         if r_cfg.get("q_offset"):
             pos_q = pos_q + float(r_cfg["q_offset"])
         if ctx.capture:
-            ctx.store.setdefault("rope_pos", {})[p] = (pos_q.detach().cpu(), pos_k.detach().cpu())
+            ctx.store.setdefault("rope_pos", {})[p] = (to_host(pos_q.detach()), to_host(pos_k.detach()))
         return pos_q, pos_k, inv_freq
 
     def _full_attn(self, p, pre, h, cache, ctx, idx_of):
@@ -401,9 +422,9 @@ class RawLLM:
         pos_q, pos_k, inv_freq = self._rope_for_block(p, n, T, cache, ctx, l)
         if cap:                                   # every query (pre-RoPE, fp16) + position by cache index, for the KV tab
             hist = ctx.store.setdefault("last_q", {}).setdefault(p, {})
-            qs = q.detach().to("cpu", torch.float16)
+            qs, qp = to_host(q.detach().to(torch.float16)), to_host(pos_q.detach().float())
             for i in range(n):
-                hist[T - n + i] = (qs[:, i], float(pos_q[i]))
+                hist[T - n + i] = (qs[:, i], qp[i])         # position: a host tensor until _collect (no GPU stall)
             keep = max(2, _Q_HISTORY_BYTES // max(1, cfg.n_layers * qs[:, 0].numel() * 2))
             while len(hist) > keep:               # over budget: forget the oldest queries first
                 del hist[next(iter(hist))]
@@ -415,9 +436,8 @@ class RawLLM:
             V = V.repeat_interleave(rep, 0)
         scores = (qr.float() @ kr.float().transpose(1, 2)) * self.attn_scale(l)
         scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, x.device, ctx, l), float("-inf"))
-        probs = torch.softmax(scores, -1)
-        if cap and ctx.store.get("want_attn", True):
-            ctx.store.setdefault("attn", {}).setdefault(p, []).append(probs.detach().to(torch.float16).cpu())
+        probs = self._probs_hook(p, torch.softmax(scores, -1), cache, ctx)
+        store_attention(ctx, p, probs)
         z = (probs.to(V.dtype) @ V)
         for iv in ctx.active("attn_heads"):
             heads = parse_index_spec(iv.heads, cfg.n_heads)
@@ -478,9 +498,8 @@ class RawLLM:
             kr = torch.cat([kr[..., :a["rope"]] * self.rope_mult, kr[..., a["rope"]:]], -1)
         scores = (qr @ kr.transpose(1, 2)) * (self.score_mult / math.sqrt(cfg.head_dim))
         scores = scores.masked_fill(~self.attn_allowed(p, n, T, cache, h.device, ctx), float("-inf"))
-        probs = torch.softmax(scores, -1)
-        if cap and ctx.store.get("want_attn", True):
-            ctx.store.setdefault("attn", {}).setdefault(p, []).append(probs.detach().to(torch.float16).cpu())
+        probs = self._probs_hook(p, torch.softmax(scores, -1), cache, ctx)
+        store_attention(ctx, p, probs)
         z = probs.to(V.dtype) @ V
         for iv in ctx.active("attn_heads"):
             heads = parse_index_spec(iv.heads, H)
@@ -534,7 +553,7 @@ class RawLLM:
             o = o.clone()
             o[:, heads] = apply_op(o[:, heads], iv, ctx, 0, idx_of(iv))
         if ctx.capture:
-            ctx.store.setdefault("lin_mem", {}).setdefault(p, []).append(S.norm(dim=(1, 2)).cpu())
+            ctx.store.setdefault("lin_mem", {}).setdefault(p, []).append(to_host(S.norm(dim=(1, 2))))
         o = o * torch.rsqrt(o.pow(2).mean(-1, keepdim=True) + cfg.eps)
         o = o * W(a_ + "norm.weight").float() * F.silu(z.float())
         return o.reshape(n, vd).to(h.dtype) @ self._w(a_ + "out_proj.weight", ctx).T
@@ -687,13 +706,13 @@ class RawLLM:
         if cap:
             self.note_units(p, "router", logits.clamp(min=-1e4), ctx)
             st = ctx.store
-            st.setdefault("router", {}).setdefault(p, []).append(logits.detach().clamp(min=-1e4).float().cpu())
-            st.setdefault("moe_sel", {}).setdefault(p, []).append(sel.detach().to(torch.int16).cpu())
-            st.setdefault("moe_w", {}).setdefault(p, []).append(w.detach().float().cpu())
+            st.setdefault("router", {}).setdefault(p, []).append(to_host(logits.detach().clamp(min=-1e4).float()))
+            st.setdefault("moe_sel", {}).setdefault(p, []).append(to_host(sel.detach().to(torch.int16)))
+            st.setdefault("moe_w", {}).setdefault(p, []).append(to_host(w.detach().float()))
             if parts is not None:
                 st.setdefault("moe_parts", {}).setdefault(p, []).append(parts)
                 if shared is not None:
-                    st.setdefault("moe_shared", {}).setdefault(p, []).append(shared.detach().to(torch.float16).cpu())
+                    st.setdefault("moe_shared", {}).setdefault(p, []).append(to_host(shared.detach().to(torch.float16)))
         return out
 
     def neuron_hook(self, p, neurons, ctx, idx_of, cap):
@@ -702,7 +721,7 @@ class RawLLM:
         for iv in ctx.active("mlp_neurons"):
             neurons = apply_op(neurons, iv, ctx, 0, idx_of(iv))
         if cap and ctx.store.get("want_neurons", False):
-            ctx.store.setdefault("neurons", {}).setdefault(p, []).append(neurons.detach().to(torch.float16).cpu())
+            ctx.store.setdefault("neurons", {}).setdefault(p, []).append(to_host(neurons.detach().to(torch.float16)))
         return neurons
 
     def _finish(self, p, x, attn_out, mlp_out, ctx, idx_of, cap):
@@ -710,15 +729,15 @@ class RawLLM:
             x = apply_op(x, iv, ctx, 0, idx_of(iv))
         zero = torch.zeros(x.shape[0])
         st = ctx.store.setdefault("stats", {}).setdefault(p, {"attn": [], "mlp": [], "resid": []})
-        st["attn"].append(attn_out.detach().float().norm(dim=-1).cpu() if attn_out is not None else zero)
-        st["mlp"].append(mlp_out.detach().float().norm(dim=-1).cpu() if mlp_out is not None else zero)
-        st["resid"].append(x.detach().float().norm(dim=-1).cpu())
+        st["attn"].append(to_host(attn_out.detach().float().norm(dim=-1)) if attn_out is not None else zero)
+        st["mlp"].append(to_host(mlp_out.detach().float().norm(dim=-1)) if mlp_out is not None else zero)
+        st["resid"].append(to_host(x.detach().float().norm(dim=-1)))
         if cap:
-            ctx.store.setdefault("resid_post", {}).setdefault(p, []).append(x.detach().float().cpu())
+            ctx.store.setdefault("resid_post", {}).setdefault(p, []).append(to_host(x.detach().float()))
             if ctx.store.get("want_parts", False):
                 for key, t in (("attn_out", attn_out), ("mlp_out", mlp_out)):
                     if t is not None:
-                        ctx.store.setdefault(key, {}).setdefault(p, []).append(t.detach().float().cpu())
+                        ctx.store.setdefault(key, {}).setdefault(p, []).append(to_host(t.detach().float()))
         # Side-branch fork execution: any ForkSpec wired to this block's "fork" port runs on resid_post
         forks_at_p = (ctx.store.get("forks") or {}).get(p) or []
         if forks_at_p:

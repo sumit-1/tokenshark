@@ -606,3 +606,38 @@ def test_neuron_ab_hunt_word_search_and_wire(lab):
     batch = lab.batch_test_neurons(f_wire, test_prompts=[A], control_prompts=[B], max_new_tokens=2)
     assert batch["status"] == "done" and len(batch["test_rows"]) == 1 and len(batch["control_rows"]) == 1
 
+
+
+# ---------------------------------------------------------------- attention-probability hook (sink gain)
+
+def test_attn_probs_scale_all_keys_equals_head_output_scale(lab):
+    # z = P V is linear in P: scaling every key column by λ == scaling the head output by λ
+    f1 = lab.flow(A, max_new_tokens=1, temperature=0)
+    f1.attn_gain(1, "all", 0.3, heads="0:2")
+    f2 = lab.flow(A, max_new_tokens=1, temperature=0)
+    f2.intervene(1, hook="attn_heads", op="scale", value=0.3, heads="0:2")
+    assert torch.allclose(lab.run(f1).logits(), lab.run(f2).logits(), atol=1e-5)
+
+
+def test_attn_probs_gain_one_is_identity_and_keys_matter(lab):
+    base = lab.run(A, max_new_tokens=1, temperature=0).logits()
+    f = lab.flow(A, max_new_tokens=1, temperature=0)
+    f.attn_gain(1, "1,2", 1.0)
+    assert torch.allclose(lab.run(f).logits(), base, atol=1e-6)
+    outs = []
+    for keys in ("1", "2"):
+        f = lab.flow(A, max_new_tokens=1, temperature=0)
+        f.attn_gain(1, keys, 0.0)
+        outs.append(lab.run(f).logits())
+    assert not torch.allclose(outs[0], base) and not torch.allclose(outs[0], outs[1])
+
+
+def test_attn_probs_capture_shows_scaled_columns(lab):
+    f = lab.flow(A, max_new_tokens=2, temperature=0)
+    f.attn_gain(1, "2", 3.0, heads="1")
+    run = lab.run(f)
+    base = lab.run(A, max_new_tokens=2, temperature=0)
+    a, b = run.attention(1), base.attention(1)              # [H, Q, T]
+    q = slice(2, a.shape[1])                                 # queries that can see key 2
+    assert torch.allclose(a[1, q, 2].float(), 3 * b[1, q, 2].float(), rtol=1e-2, atol=1e-3)
+    assert torch.allclose(a[0].float(), b[0].float(), atol=1e-3)   # other heads untouched

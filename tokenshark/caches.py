@@ -1,8 +1,11 @@
 """KV-cache library: caches saved from runs or uploaded by users, kept as files under data/caches/."""
 from __future__ import annotations
 
+import os
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from .kvcache import KVCache
@@ -11,9 +14,37 @@ from .runs import DATA
 CACHE_DIR = DATA / "caches"
 
 
+def _cache_bytes(c: KVCache) -> int:
+    n = sum(t.numel() * t.element_size() for t in list(c.k) + list(c.v) if t is not None)
+    return n + sum(t.numel() * t.element_size() for st in c.states.values() for t in st.values())
+
+
 class CacheLibrary:
     def __init__(self):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # caches read by runs (load_shared), kept in memory: {id: (mtime, bytes, cache, extra)}, least recent first
+        self._mem: OrderedDict[str, tuple] = OrderedDict()
+        self._mem_lock = threading.Lock()
+        self.mem_limit = int(os.environ.get("TOKENSHARK_CACHE_MEM_MB", "2048")) * 2**20
+
+    def load_shared(self, cid: str) -> tuple[KVCache, dict]:
+        """Like load(), but served from memory when the file hasn't changed. The cache is SHARED between callers:
+        read it, never modify it in place (runs copy it before positioning it as a prefix)."""
+        path = self.path(cid)
+        mtime = path.stat().st_mtime_ns
+        with self._mem_lock:
+            hit = self._mem.get(cid)
+            if hit and hit[0] == mtime:
+                self._mem.move_to_end(cid)
+                return hit[2], dict(hit[3])
+        cache, extra = KVCache.load(path)
+        size = _cache_bytes(cache)
+        with self._mem_lock:
+            if size <= self.mem_limit:
+                self._mem[cid] = (mtime, size, cache, extra)
+                while sum(v[1] for v in self._mem.values()) > self.mem_limit:
+                    self._mem.popitem(last=False)
+        return cache, dict(extra)
 
     def path(self, cid: str) -> Path:
         if not cid.replace("-", "").isalnum():
@@ -61,6 +92,8 @@ class CacheLibrary:
 
     def delete(self, cid: str):
         self.path(cid).unlink()
+        with self._mem_lock:
+            self._mem.pop(cid, None)
 
 
 LIBRARY = CacheLibrary()

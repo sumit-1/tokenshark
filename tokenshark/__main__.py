@@ -23,6 +23,11 @@ def _ensure_venv():
 
 def main():
     _ensure_venv()
+    for stream in (sys.stdout, sys.stderr):      # Windows consoles default to cp1252: token pieces would crash prints
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description="Tokenshark - inspect and edit open-weight models in the browser")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)

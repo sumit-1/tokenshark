@@ -69,6 +69,17 @@ def add_local_spec(spec: dict) -> dict:
 
 
 def get_spec(model_id: str) -> dict:
+    """A registry entry by id. "hf:<org>/<repo>" names any Hugging Face repo without a registry entry: it is
+    downloaded to models/<repo name, lower case> and handled by whichever plugin matches its files."""
+    if model_id.startswith("hf:"):
+        repo = model_id[3:].strip().strip("/")
+        if repo.count("/") != 1:
+            raise KeyError(f"{model_id}: expected hf:<org>/<repo>")
+        mid = repo.split("/")[1].lower()
+        for s in list_specs():
+            if s.get("repo", "").lower() == repo.lower() or s["id"] == mid:
+                return s
+        return {"id": mid, "repo": repo, "family": "causal_lm"}     # the plugin is chosen from the downloaded files
     for s in reversed(list_specs()):     # local entries override built-ins with the same id
         if s["id"] == model_id:
             return s

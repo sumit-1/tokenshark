@@ -16,3 +16,4 @@ dist/
 .env
 .env.*
 coding-agent.md
+/research

@@ -112,7 +112,7 @@ def load_prefixes(plan, adapter, state_key: str = "") -> list[KVCache]:
     out, system = [], None
     for d in specs:
         try:
-            c, extra = LIBRARY.load(d["cache_id"])
+            c, extra = LIBRARY.load_shared(d["cache_id"])      # read-only: the stepper copies it
         except KeyError:
             raise ValueError("The selected KV cache no longer exists.") from None
         fp = adapter.fingerprint()
@@ -197,7 +197,9 @@ def _build_word_map(ids: list[int], pieces: list[str]) -> list[dict]:
 
 
 def tokenize(adapter, text: str, chat: bool = False, system: str = "",
-             history: list[dict] | None = None, prefill: str = "", add_bos: bool = False) -> dict:
+             history: list[dict] | None = None, prefill: str = "", add_bos: bool = False,
+             literal_content: bool = False) -> dict:
+    """literal_content: control-token text inside the messages stays plain text (the template's markers don't)."""
     tok = adapter.tok
     turns = [{"role": m["role"], "content": m["content"]} for m in (history or []) if m.get("content")]
     if text or not turns:
@@ -205,13 +207,14 @@ def tokenize(adapter, text: str, chat: bool = False, system: str = "",
     if chat and tok.chat_template:
         msgs = ([{"role": "system", "content": system}] if system else []) + turns
         rendered = tok.apply_chat(msgs, True)
-        ids = tok.encode(rendered, add_special=False)
+        ids, _ = tok.encode_spans(rendered, tok.locate(rendered, [m["content"] for m in msgs]), False,
+                                  literal=literal_content)
     else:
         earlier = "".join(f"{m['role'].capitalize()}: {m['content']}\n" for m in (history or []) if m.get("content"))
         rendered = (system + "\n\n" if system else "") + earlier + text
-        ids = tok.encode(rendered, add_special=bool(add_bos))
+        ids = tok.encode(rendered, add_special=bool(add_bos), parse_special=not literal_content)
     if prefill:
-        prefill_ids = tok.encode(prefill, add_special=False)
+        prefill_ids = tok.encode(prefill, add_special=False, parse_special=not literal_content)
         ids = ids + prefill_ids
         rendered = rendered + prefill
     pieces = [tok.piece(i) for i in ids]

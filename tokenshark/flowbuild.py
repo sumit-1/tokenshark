@@ -80,9 +80,11 @@ class FlowBuilder:
 
     # ---------------------------------------------------------------- inputs and sampling
     def prompt(self, prompt=None, system=None, prefill=None, chat=None, thinking=None, negative_prompt=None,
-               history=None, images=None):
+               history=None, images=None, literal_content=None):
         """history: the conversation so far, [{"role": "user" | "assistant", "content": …}, …]; `prompt` is then the
         newest user turn (leave it "" to have the model answer the last turn of the history).
+        literal_content=True: control-token text inside messages (e.g. "<|im_end|>") stays plain text instead of
+        becoming the real control token; the chat template's own markers are unaffected.
         images (models whose plugin provides image input): file paths, PIL images, bytes or data: URLs. Each one
         fills a `<|image|>` marker in the text; without markers they go in front of the prompt."""
         if images is not None:
@@ -90,7 +92,8 @@ class FlowBuilder:
             images = [to_data_url(i) for i in images]
         return self._set("input_prompt", prompt=prompt, system=system, prefill=prefill, use_chat_template=chat,
                          thinking=thinking, negative_prompt=negative_prompt,
-                         history=[dict(m) for m in history] if history is not None else None, images=images)
+                         history=[dict(m) for m in history] if history is not None else None, images=images,
+                         literal_content=literal_content)
 
     def say(self, role: str, content: str):
         """Append one earlier turn to the conversation: flow.say("user", "Hi").say("assistant", "Hello!")."""
@@ -105,6 +108,19 @@ class FlowBuilder:
         return self._set("sampler", max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p,
                          seed=seed, rope_step_stride=rope_step_stride, rope_prompt_scale=rope_prompt_scale,
                          rope_gen_start=rope_gen_start, kv_zero=kv_zero)
+
+    def capture(self, attn_budget_mb: int | None = None, neuron_budget_mb: int | None = None,
+                parts_budget_mb: int | None = None, expert_budget_mb: int | None = None,
+                attn_layers: str | None = None, attn_queries: str | None = None):
+        """What the run records. Budgets are upper bounds in MB for each kind of capture (0 = record none; a run
+        over a budget records none of that kind and says so in run.notes). attn_layers: schedule positions whose
+        attention is kept ("all", "5,11", "10:14"). attn_queries: "all" keeps [heads, T, T]; "last" keeps one row
+        per forward pass (the token being predicted), far smaller at long contexts."""
+        if attn_queries is not None and str(attn_queries).lower() not in ("all", "last"):
+            raise ValueError('attn_queries must be "all" or "last".')
+        return self._set("sampler", attn_budget_mb=attn_budget_mb, neuron_budget_mb=neuron_budget_mb,
+                         parts_budget_mb=parts_budget_mb, expert_budget_mb=expert_budget_mb,
+                         attn_layers=attn_layers, attn_queries=attn_queries)
 
     def rope_step(self, stride: float | None = None, prompt_scale: float | None = None):
         """Change how RoPE positions advance per generation step (stride=0 freezes decode position; stride=50
@@ -197,6 +213,12 @@ class FlowBuilder:
             "steps": steps, "enabled": True, "experts": str(experts)})
 
     intervene = intercept
+
+    def attn_gain(self, block, keys, value: float = 0.0, heads="all") -> str:
+        """Scale the attention weights every query puts on key positions `keys` by `value`, in `heads` of `block`,
+        without renormalising (value=1 no change, >1 amplify, 0 ablate). Sink-subspace modulation per head."""
+        return self.intercept(block, hook="attn_probs", op="scale", value=value, positions=str(keys),
+                              heads=str(heads), label=f"attn ×{value:g} @ keys {keys}")
 
     def patch(self, block, source_run, hook: str = "resid_post", positions: str = "all", src_positions: str = "") -> str:
         """Activation patching: at `block`, overwrite this run's activation with the one `source_run` had there."""

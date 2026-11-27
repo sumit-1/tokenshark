@@ -130,8 +130,8 @@ class RunStore:
                 # If the stepper is still unfinished, keep it in stepping state so the user can step or continue!
                 if run.status != "stepping":
                     run.status, run.message = "cancelled", "cancelled"
-                print(f"[{time.strftime('%H:%M:%S')}] run {run.id} stopped"
-                      + (" (output & stepper state kept)" if run.outputs else ""), flush=True)
+                from .logs import log
+                log.info(f"run {run.id} stopped" + (" (output & stepper state kept)" if run.outputs else ""))
             except Exception as e:
                 run.status, run.error = "error", f"{type(e).__name__}: {e}"
                 traceback.print_exc()

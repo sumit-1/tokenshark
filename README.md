@@ -241,6 +241,27 @@ flow.patch(18, clean, hook="resid_post", positions="last")
 print(lab.run(flow).text)
 ```
 
+Long runs and loops over many runs:
+
+```python
+lab = Lab("hf:Qwen/Qwen2.5-14B-Instruct", keep_runs=8)    # any Hugging Face repo; lab.runs keeps the newest 8
+
+# Record less, so long contexts fit: attention of two blocks, one row per forward pass (the token being predicted)
+run = lab.run(long_prompt, system=rules, chat=True, attn_layers="5,11", attn_queries="last", attn_budget_mb=4096)
+sys_span = run.span("system")                       # token range of each message: run.roles, run.span("user")
+share = run.attention(11)[:, -1, sys_span.start:sys_span.stop].sum(-1)   # per head: attention on the system prompt
+run.notes                                           # e.g. why attention was not recorded (also issued as a warning)
+
+lab.run(prompt, keep=False)                         # not kept in lab.runs: memory stays flat in loops
+lab.run(untrusted, chat=True, literal_content=True) # "<|im_end|>" typed in a message stays text, not a control token
+lab.bench(prompt_tokens=512, new_tokens=32)         # prefill / decode tokens per second, GB streamed per token
+
+import tokenshark; tokenshark.set_verbosity("warning")   # loading messages go to stderr; this silences them
+```
+
+The same capture settings are on the flow (`flow.capture(...)`, stored on the Sampler box), so extensions and the
+app use them the same way. On Windows, `set PYTHONIOENCODING=utf-8` before printing token pieces from a script.
+
 To connect Claude Desktop, Claude Code, or Cursor to a running Tokenshark instance via MCP:
 
 ```json

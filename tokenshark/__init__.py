@@ -13,6 +13,12 @@ def code_stamp() -> str:
 STARTED_WITH = code_stamp()
 
 
+def set_verbosity(level="info") -> None:
+    """How chatty the library is on stderr: 'debug' | 'info' | 'warning' | 'error' (see tokenshark.logs)."""
+    from .logs import set_verbosity as _sv
+    _sv(level)
+
+
 def __getattr__(name: str):
     if name in ("Lab", "RunResult", "FlowBuilder"):
         from . import api

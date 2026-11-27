@@ -39,7 +39,8 @@ _REPORTERS: dict = {"phase": None, "bytes": None}
 
 
 def report_phase(msg: str):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    from .logs import log
+    log.info(msg)
     if _REPORTERS["phase"]:
         _REPORTERS["phase"](msg)
 

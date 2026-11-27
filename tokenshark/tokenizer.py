@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import html
 import json
+import threading
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -66,15 +67,88 @@ class LLMTokenizer:
         self.vocab_size = len(ranks) + len(special)
 
     # ---------------------------------------------------------------- basic ops
-    def encode(self, text: str, add_special: bool = False) -> list[int]:
+    _special_lock = threading.Lock()
+
+    def encode(self, text: str, add_special: bool = False, parse_special: bool = True) -> list[int]:
+        """parse_special=False reads control-token text such as "<|im_end|>" as ordinary characters, the way
+        untrusted user text should be read; True (the tokenizer's normal behaviour) turns it into the real token."""
+        return self.encode_offsets(text, add_special, parse_special)[0]
+
+    def encode_offsets(self, text: str, add_special: bool = False,
+                       parse_special: bool = True) -> tuple[list[int], list[tuple[int, int]]]:
+        """Token ids and each token's (start, end) character span in `text` (added BOS: (0, 0))."""
         if not text:
-            return [self.bos_id] if add_special and self.bos_id is not None else []
+            return ([self.bos_id], [(0, 0)]) if add_special and self.bos_id is not None else ([], [])
         if self.kind == "hf":
-            return self.tk.encode(text, add_special_tokens=add_special).ids
-        ids = self.tk.encode(text, allowed_special="all")
+            if parse_special:
+                e = self.tk.encode(text, add_special_tokens=add_special)
+            else:
+                with self._special_lock:
+                    self.tk.encode_special_tokens = True
+                    try:
+                        e = self.tk.encode(text, add_special_tokens=add_special)
+                    finally:
+                        self.tk.encode_special_tokens = False
+            return list(e.ids), [tuple(o) for o in e.offsets]
+        if parse_special:
+            ids = self.tk.encode(text, allowed_special="all")
+        else:
+            ids = self.tk.encode(text, allowed_special=set(), disallowed_special=())
+        _, starts = self.tk.decode_with_offsets(ids)
+        offs = [(a, b) for a, b in zip(starts, list(starts[1:]) + [len(text)])]
         if add_special and self.bos_id is not None and (not ids or ids[0] != self.bos_id):
-            ids = [self.bos_id] + ids
-        return ids
+            ids, offs = [self.bos_id] + ids, [(0, 0)] + offs
+        return ids, offs
+
+    @staticmethod
+    def locate(text: str, contents: list[str]) -> list[tuple[int, int] | None]:
+        """Character span of each content string in `text`, searched in order (a chat template renders the messages
+        in order). Templates that trim a message are matched by its trimmed text; one not found gives None."""
+        out, cur = [], 0
+        for c in contents:
+            span = None
+            for cand in (c, c.strip()):
+                if cand:
+                    i = text.find(cand, cur)
+                    if i >= 0:
+                        span = (i, i + len(cand))
+                        break
+            out.append(span)
+            if span:
+                cur = span[1]
+        return out
+
+    def encode_spans(self, text: str, spans: list[tuple[int, int] | None], add_special: bool = False,
+                     literal: bool = False) -> tuple[list[int], list[tuple[int, int] | None]]:
+        """Encode `text` and give the token range [start, end) of each character span (None stays None).
+        literal=True: the text inside the spans is read with parse_special=False (the template's own control
+        tokens outside them are still parsed), each span then starting on a token boundary."""
+        if not literal:
+            ids, offs = self.encode_offsets(text, add_special)
+            out = []
+            for sp in spans:
+                if sp is None:
+                    out.append(None)
+                    continue
+                hit = [j for j, (a, b) in enumerate(offs) if b > sp[0] and a < sp[1] and b > a]
+                out.append((hit[0], hit[-1] + 1) if hit else None)
+            return ids, out
+        cuts, kinds, cur = [], [], 0
+        order = sorted((sp, k) for k, sp in enumerate(spans) if sp is not None)
+        for sp, k in order:
+            if sp[0] > cur:
+                cuts.append((cur, sp[0])); kinds.append(None)
+            cuts.append(sp); kinds.append(k)
+            cur = sp[1]
+        if cur < len(text):
+            cuts.append((cur, len(text))); kinds.append(None)
+        ids, out = (self.encode("", add_special=True) if add_special else []), [None] * len(spans)
+        for (a, b), k in zip(cuts, kinds):
+            piece = self.encode(text[a:b], parse_special=k is None)
+            if k is not None:
+                out[k] = (len(ids), len(ids) + len(piece))
+            ids += piece
+        return ids, out
 
     def decode(self, ids: list[int], skip_special: bool = False) -> str:
         if self.kind == "hf":

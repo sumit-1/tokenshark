@@ -25,6 +25,7 @@ Everything returned is plain torch tensors and dicts, so the next step can be yo
 from __future__ import annotations
 
 import uuid
+import warnings
 from pathlib import Path
 
 import torch
@@ -63,6 +64,20 @@ class RunResult:
         return self.outputs.get("token_ids", [])
 
     @property
+    def roles(self) -> list[dict]:
+        """Where each message's content sits in run.tokens: [{"role", "index", "start", "end"}] (end exclusive)."""
+        return [dict(r) for r in self.outputs.get("roles") or []]
+
+    def span(self, role: str, which: int = -1) -> range:
+        """Token range of one message's content: span("system"), span("user") (the last user turn),
+        span("user", 0) (the first), span("prefill"). Use it to slice attention: run.attention(b)[:, q, span]."""
+        hits = [r for r in self.roles if r["role"] == role]
+        if not hits:
+            raise KeyError(f"No {role!r} message in this run's tokens (roles: {[r['role'] for r in self.roles]}).")
+        r = hits[which]
+        return range(r["start"], r["end"])
+
+    @property
     def image(self):
         """Image models: the picture as a PIL image."""
         import base64, io
@@ -82,10 +97,31 @@ class RunResult:
         """attn_out or mlp_out of a block: what attention / the MLP added to the stream."""
         return interp.activation(self.captures, hook, block)
 
+    @property
+    def notes(self) -> list[str]:
+        """What the engine wants you to know about this run (e.g. attention that was over budget, so not recorded)."""
+        return list(self.outputs.get("notes") or [])
+
     def attention(self, block: int, head: int | None = None) -> torch.Tensor:
-        """Attention pattern [heads, tokens, tokens] (or [tokens, tokens] for one head)."""
-        a = self.captures["attn"][block].float()
+        """Attention pattern [heads, queries, keys] (or [queries, keys] for one head). Rows are every token, or with
+        attn_queries="last" one row per forward pass (attention_rows(block) gives their token indices). Keys
+        include any prefix-cache tokens first."""
+        attn = self.captures.get("attn") or {}
+        if block not in attn:
+            why = next((n for n in self.notes if n.startswith("attention not captured")), None)
+            if why:
+                raise KeyError(f"No attention for block {block}: {why}")
+            if attn:
+                raise KeyError(f"No attention for block {block}: recorded blocks are {sorted(attn)} "
+                               f"(attn_layers, or a linear-attention block).")
+            raise KeyError(f"No attention for block {block}: this run recorded none (attn_budget_mb=0?).")
+        a = attn[block].float()
         return a if head is None else a[head]
+
+    def attention_rows(self, block: int) -> list[int]:
+        """Token index of each row of attention(block)."""
+        rows = (self.captures.get("attn_rows") or {}).get(block)
+        return list(rows) if rows is not None else list(range(self.captures["attn"][block].shape[1]))
 
     def neurons(self, block: int) -> torch.Tensor:
         """Every MLP neuron's activation: [tokens, d_ff]."""
@@ -198,16 +234,16 @@ class Lab:
     """A loaded model plus the tools to run and take it apart."""
 
     def __init__(self, model: str, device: str = "auto", dtype: str = "auto", policy: str = "auto",
-                 keep_layers: int = 0, download: bool = True):
-        import os
+                 keep_layers: int = 0, download: bool = True, keep_runs: int | None = 16):
+        """model: a registry id, a folder on disk, or "hf:<org>/<repo>" for any Hugging Face repo.
+        device / dtype: "auto" uses TOKENSHARK_DEVICE / TOKENSHARK_DTYPE or the best available; the choice stays on
+        this Lab (nothing global is changed). keep_runs: how many finished runs lab.runs keeps (oldest dropped
+        first; None = all). Each run holds its captures, which can be gigabytes at long contexts."""
         from .registry import get_spec
         from .weights import resolve_model_dir
-        if device != "auto":
-            os.environ["TOKENSHARK_DEVICE"] = device
-        if dtype != "auto":
-            os.environ["TOKENSHARK_DTYPE"] = dtype
-        self.device = pick_device()
-        self.dtype = pick_dtype(self.device)
+        self.device = pick_device(None if device == "auto" else device)
+        self.dtype = pick_dtype(self.device, None if dtype == "auto" else dtype)
+        self.keep_runs = keep_runs
         p = Path(model).expanduser()
         if p.is_dir():                     # a folder on disk
             spec = {"id": p.name, "path": str(p), "family": "t2i" if (p / "model_index.json").exists() else "causal_lm"}
@@ -228,8 +264,8 @@ class Lab:
         """The model's default flow. Keyword arguments go to the prompt box (system, prefill, chat, images) or the sampler
         (max_new_tokens, temperature, top_k, top_p, seed)."""
         fb = FlowBuilder(self.plugin.default_flow(self.info))
-        pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt", "history", "images")
-              if k in kw}
+        pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt", "history", "images",
+                                     "literal_content") if k in kw}
         if prompt is not None or pk:
             fb.prompt(prompt=prompt, **pk)
         if kw:
@@ -240,18 +276,32 @@ class Lab:
         return compile_flow(flow.to_dict() if isinstance(flow, FlowBuilder) else flow, self.info)
 
     @torch.no_grad()
-    def run(self, flow_or_prompt=None, **kw) -> RunResult:
-        """Run a flow (FlowBuilder or flow dict) or just a prompt. Returns a RunResult."""
+    def run(self, flow_or_prompt=None, keep: bool = True, **kw) -> RunResult:
+        """Run a flow (FlowBuilder or flow dict) or just a prompt. Returns a RunResult.
+
+        Keyword arguments as for lab.flow (system, max_new_tokens, temperature, ...), plus what the run records
+        (FlowBuilder.capture): attn_budget_mb, neuron_budget_mb, parts_budget_mb, expert_budget_mb, attn_layers,
+        attn_queries. These also apply to a FlowBuilder or flow dict without changing it.
+        keep=False: don't add the run to lab.runs (loops over many runs then hold no captures after each result is
+        dropped). Notes about the run (such as attention that was not recorded) are issued as warnings."""
+        from .flow import CAPTURE_KEYS
+        cap = {k: kw.pop(k) for k in CAPTURE_KEYS if k in kw}
         if isinstance(flow_or_prompt, (FlowBuilder, dict)):
             flow = flow_or_prompt.to_dict() if isinstance(flow_or_prompt, FlowBuilder) else flow_or_prompt
+            if cap or kw:                                               # on a copy: the caller's flow is unchanged
+                fb = FlowBuilder(flow)
+                if kw:
+                    fb.sampler(**kw)
+                flow = (fb.capture(**cap) if cap else fb).to_dict()
         else:
-            flow = self.flow(flow_or_prompt, **kw).to_dict()
+            fb = self.flow(flow_or_prompt, **kw)
+            flow = (fb.capture(**cap) if cap else fb).to_dict()
         plan = compile_flow(flow, self.info)
         if self.family != "causal_lm":
             res = self.adapter.run(plan)
         else:
             prefix = interp.load_prefixes(plan, self.adapter, self._state()) if plan.params.get("prefix_cache") else None
-            sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+            sources = interp.resolve_sources(plan, self._captures_of)
             plan.sources = sources                       # kept with the plan for analyses that run the flow again
             st = self.adapter.run_stepper(plan, prefix)
             st.ctx.sources = sources
@@ -259,8 +309,32 @@ class Lab:
                 pass
             res = st.finish()
         r = RunResult(self, plan, res, flow)
-        self.runs[r.id] = r
+        for note in r.notes:
+            warnings.warn(note, RuntimeWarning, stacklevel=2)
+        if keep:
+            self._remember(r)
         return r
+
+    # ---------------------------------------------------------------- the runs this Lab keeps
+    def _remember(self, r: RunResult) -> None:
+        self.runs[r.id] = r
+        if self.keep_runs is not None:
+            while len(self.runs) > max(0, self.keep_runs):
+                del self.runs[next(iter(self.runs))]          # oldest first
+
+    def _captures_of(self, rid: str) -> dict:
+        if rid not in self.runs:
+            raise KeyError(f"Run {rid} is not kept by this Lab any more (keep_runs={self.keep_runs}, or it was made "
+                           f"with keep=False or forgotten). Run it again, or raise Lab(keep_runs=...).")
+        self.runs[rid] = self.runs.pop(rid)                   # used again: now the newest, so dropped last
+        return self.runs[rid].captures
+
+    def forget(self, run=None) -> None:
+        """Drop one run (RunResult or id) from lab.runs, or all of them (run=None), freeing their captures."""
+        if run is None:
+            self.runs.clear()
+        else:
+            self.runs.pop(run.id if isinstance(run, RunResult) else run, None)
 
     def stepper(self, flow=None, **kw):
         """The run loop one block at a time: st.step_block(), st.step_token(), st.force(token_id), st.state()."""
@@ -268,12 +342,65 @@ class Lab:
         plan = self.plan(fb)
         prefix = interp.load_prefixes(plan, self.adapter, self._state()) if plan.params.get("prefix_cache") else None
         st = self.adapter.stepper(plan, prefix)
-        st.ctx.sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+        st.ctx.sources = interp.resolve_sources(plan, self._captures_of)
         return st
 
+    @torch.no_grad()
+    def bench(self, prompt_tokens: int = 512, new_tokens: int = 32, capture: bool = False, repeat: int = 1) -> dict:
+        """Speed of this model on this machine: prefill (the prompt in one pass) and decode (one token per pass)
+        in tokens/s, peak GPU memory, and GB read from disk per decoded token (weights streamed for layers not
+        kept in memory). capture=False turns recording off, so the numbers are the engine's own cost."""
+        import time
+        if self.family != "causal_lm":
+            raise NotImplementedError("bench() measures token generation (causal_lm models).")
+        tok = self.adapter.tok
+        ids = (tok.encode(" the quick brown fox jumps over the lazy dog") * (prompt_tokens // 9 + 1))[:prompt_tokens]
+        off = {} if capture else {k: 0 for k in ("attn_budget_mb", "neuron_budget_mb", "parts_budget_mb",
+                                                 "expert_budget_mb")}
+        fb = self.flow(tok.decode(ids), max_new_tokens=new_tokens, temperature=0)
+        if off:
+            fb.capture(**off)
+        plan = self.plan(fb)
+        plan.params["ignore_eos"] = True
+        cuda = str(self.device).startswith("cuda") and torch.cuda.is_available()
+        sync = torch.cuda.synchronize if cuda else (lambda: None)
+        W = self.adapter.model.W
+        runs = []
+        for _ in range(max(1, repeat)):
+            if cuda:
+                torch.cuda.reset_peak_memory_stats()
+            st = self.adapter.run_stepper(plan, None)
+            b0 = W.bytes_read
+            sync(); t0 = time.perf_counter()
+            st.step_token()                                   # the prompt: one forward pass
+            sync(); t1 = time.perf_counter()
+            b1 = W.bytes_read
+            n = 0
+            while st.step_token():
+                n += 1
+            sync(); t2 = time.perf_counter()
+            runs.append({"prefill_s": t1 - t0, "decode_s": t2 - t1, "n_decode": n, "n_prompt": st.n_in,
+                         "gb_prefill": (b1 - b0) / 2**30, "gb_decode": (W.bytes_read - b1) / 2**30,
+                         "peak_gb": torch.cuda.max_memory_allocated() / 2**30 if cuda else None})
+            del st
+        best = min(runs, key=lambda r: r["prefill_s"] + r["decode_s"])
+        return {"model": self.model_id, "device": str(self.device), "dtype": str(self.dtype).replace("torch.", ""),
+                "prompt_tokens": best["n_prompt"], "new_tokens": best["n_decode"],
+                "prefill_tok_s": round(best["n_prompt"] / max(best["prefill_s"], 1e-9), 1),
+                "decode_tok_s": round(best["n_decode"] / max(best["decode_s"], 1e-9), 2),
+                "time_to_first_token_s": round(best["prefill_s"], 3),
+                "gb_read_prefill": round(best["gb_prefill"], 2),
+                "gb_read_per_token": round(best["gb_decode"] / max(best["n_decode"], 1), 3),
+                "peak_gpu_gb": round(best["peak_gb"], 2) if best["peak_gb"] is not None else None,
+                "capture": capture, "weights": W.describe()}
+
     # ---------------------------------------------------------------- tokens
-    def tokenize(self, text: str, chat: bool = False) -> dict:
-        return interp.tokenize(self.adapter, text, chat)
+    def tokenize(self, text: str, chat: bool = False, parse_special: bool = True) -> dict:
+        """parse_special=False: control-token text in `text` (e.g. "<|endoftext|>") is read as plain characters."""
+        if not parse_special and not chat:
+            ids = self.adapter.tok.encode(text, parse_special=False)
+            return {"ids": ids, "pieces": [self.adapter.tok.piece(i) for i in ids]}
+        return interp.tokenize(self.adapter, text, chat, literal_content=not parse_special)
 
     def decode(self, ids: list[int]) -> str:
         return self.adapter.tok.decode(ids)
@@ -325,7 +452,7 @@ class Lab:
         fb = flow_or_prompt if isinstance(flow_or_prompt, (FlowBuilder, dict)) else self.flow(flow_or_prompt, **kw)
         out = None
         plan = self.plan(fb)
-        plan.sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+        plan.sources = interp.resolve_sources(plan, self._captures_of)
         for out in moe.iter_ablation(self.adapter, plan, block, None, mode):
             pass
         return out
@@ -377,7 +504,7 @@ class Lab:
                            system: str | None = None, chat: bool | None = None, prefill: str | None = None) -> dict:
         """Run `test_prompts` and `control_prompts` before and after the flow's neuron edits/wires."""
         plan = self.plan(flow)
-        plan.sources = interp.resolve_sources(plan, lambda rid: self.runs[rid].captures)
+        plan.sources = interp.resolve_sources(plan, self._captures_of)
         out = None
         for out in interp.iter_neuron_batch_test(
             self.adapter, plan, test_prompts, control_prompts,

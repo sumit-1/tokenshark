@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import torch
 
-from ..engine import RunContext
+from ..engine import RunContext, host_sync
 from ..flow import Plan
 from ..kvcache import BlockKVCache, KVCache
 from ..tokenizer import LLMTokenizer
@@ -123,7 +123,7 @@ class LLMAdapter(LLMAnalysisMixin):
             "capabilities": {"repeat_blocks": True, "reorder_blocks": True, "remove_blocks": True,
                              "logit_lens": True, "attention": True, "kv_cache": True, "has_moe": bool(c.moe),
                              "image_input": self.media is not None},
-            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_heads", "attn_out",
+            "hooks": ["resid_pre", "q", "k", "v", "kv_k", "kv_v", "rope", "attn_probs", "attn_heads", "attn_out",
                       *(["router", "expert_out"] if c.moe else []), "mlp_neurons", "mlp_out", "resid_post", "weights"],
         }
         if c.heterogeneous():
@@ -214,32 +214,66 @@ class LLMAdapter(LLMAnalysisMixin):
         return out
 
     def build_ids(self, p: dict) -> tuple[list[int], list[int]]:
+        prompt_ids, prefill_ids, _ = self.build_ids_with_roles(p)
+        return prompt_ids, prefill_ids
+
+    def build_ids_with_roles(self, p: dict) -> tuple[list[int], list[int], list[dict]]:
+        """(prompt ids, prefill ids, roles). roles: the token range of each message's content as the chat template
+        placed it, [{"role", "index", "start", "end"}] (end exclusive, run-relative token indices; a system turn
+        held in a prefix cache is not part of the run's tokens). The prefill is listed as role "prefill"."""
         items = self._media_items(p)
         if not items:
-            return self._build_text_ids(p)
-        prompt_ids, prefill_ids = self._build_text_ids(self._with_media_marks(p, len(items)))
-        return self._expand_media(prompt_ids, items), prefill_ids
+            prompt_ids, prefill_ids, roles = self._build_text_ids(p, with_roles=True)
+        else:
+            prompt_ids, prefill_ids, roles = self._build_text_ids(self._with_media_marks(p, len(items)), with_roles=True)
+            size = lambda it: len(self._expand_media([self.media.token_id], [it])) - 1   # noqa: E731
+            marks = [i for i, t in enumerate(prompt_ids) if t == self.media.token_id]
+            grow = {i: size(it) for i, it in zip(marks, items)}       # extra tokens each marker turns into
+            shift = lambda j: j + sum(g for i, g in grow.items() if i < j)            # noqa: E731
+            prompt_ids = self._expand_media(prompt_ids, items)
+            roles = [{**r, "start": shift(r["start"]), "end": shift(r["end"])} if r["role"] != "prefill" else
+                     {**r, "start": len(prompt_ids), "end": len(prompt_ids) + len(prefill_ids)} for r in roles]
+        return prompt_ids, prefill_ids, roles
 
-    def _build_text_ids(self, p: dict) -> tuple[list[int], list[int]]:
+    def _render_prompt(self, p: dict) -> tuple[str, bool, list[tuple[str, str]]]:
+        """The prompt as text (chat template or plain), whether to add BOS, and the (role, content) of each message
+        in the order they appear in the text."""
         tok = self.tok
         has_prefix = bool(p.get("prefix_cache"))
         extra = self.template_extra(p)
         turns = self.turns(p)
+        msgs_in = [(m["role"], m["content"]) for m in turns]
         if has_prefix and p.get("use_chat_template") and tok.chat_template:
             _, text = self.split_system(p.get("prefix_system") or ".", turns, extra)
-            prompt_ids = tok.encode(text, add_special=False)
-        elif p.get("use_chat_template") and tok.chat_template:
-            msgs = []
-            if p.get("system"):
-                msgs.append({"role": "system", "content": p["system"]})
+            return text, False, msgs_in
+        if p.get("use_chat_template") and tok.chat_template:
+            msgs = [{"role": "system", "content": p["system"]}] if p.get("system") else []
             text = tok.apply_chat(msgs + turns, True, extra)
-            prompt_ids = tok.encode(text, add_special=False)
-        else:
-            earlier = "".join(f"{m['role'].capitalize()}: {m['content']}\n" for m in (p.get("history") or []))
-            text = (p["system"] + "\n\n" if p.get("system") else "") + earlier + p.get("prompt", "")
-            prompt_ids = tok.encode(text, add_special=bool(p.get("add_bos", True)) and not has_prefix)
-        prefill_ids = tok.encode(p["prefill"], add_special=False) if p.get("prefill") else []
-        return prompt_ids, prefill_ids
+            return text, False, ([("system", p["system"])] if p.get("system") else []) + msgs_in
+        earlier = "".join(f"{m['role'].capitalize()}: {m['content']}\n" for m in (p.get("history") or []))
+        text = (p["system"] + "\n\n" if p.get("system") else "") + earlier + p.get("prompt", "")
+        msgs = ([("system", p["system"])] if p.get("system") else []) + \
+            [(m["role"], m["content"]) for m in (p.get("history") or [])] + \
+            ([("user", p["prompt"])] if p.get("prompt") else [])
+        return text, bool(p.get("add_bos", True)) and not has_prefix, msgs
+
+    def _build_text_ids(self, p: dict, with_roles: bool = False):
+        """Prompt and prefill ids. p["literal_content"]: message contents are read with parse_special=False, so
+        text such as "<|im_end|>" inside a message stays text instead of becoming the control token."""
+        tok = self.tok
+        text, add_special, msgs = self._render_prompt(p)
+        literal = bool(p.get("literal_content"))
+        spans = tok.locate(text, [c for _, c in msgs])
+        prompt_ids, tspans = tok.encode_spans(text, spans, add_special, literal=literal)
+        prefill_ids = tok.encode(p["prefill"], add_special=False, parse_special=not literal) if p.get("prefill") else []
+        if not with_roles:
+            return prompt_ids, prefill_ids
+        roles = [{"role": r, "index": i, "start": ts[0], "end": ts[1]}
+                 for i, ((r, _), ts) in enumerate(zip(msgs, tspans)) if ts is not None]
+        if prefill_ids:
+            roles.append({"role": "prefill", "index": len(msgs), "start": len(prompt_ids),
+                          "end": len(prompt_ids) + len(prefill_ids)})
+        return prompt_ids, prefill_ids, roles
 
     @staticmethod
     def apply_kv_override_params(base_p: dict, ov: dict) -> dict:
@@ -377,6 +411,7 @@ class LLMAdapter(LLMAnalysisMixin):
         return Stepper(self, plan, prefix=prefix, trace=True)
 
     def _collect(self, ctx, plan, seq, n_prefix):
+        host_sync()                              # captures copied asynchronously (engine.to_host) have all landed
         cat = lambda d: {k: torch.cat(v, 0) for k, v in d.items()}
         attn = {}
         for pp, rows in ctx.store.get("attn", {}).items():
@@ -398,12 +433,16 @@ class LLMAdapter(LLMAnalysisMixin):
                 "moe_k": dict(ctx.store.get("moe_k") or {}), "moe_temp": dict(ctx.store.get("moe_temp") or {}),
                 "moe_noshared": set(ctx.store.get("moe_noshared") or ()),
                 "rope": dict(ctx.store.get("rope") or {}), "rope_pos": dict(ctx.store.get("rope_pos") or {}),
-                "last_q": dict(ctx.store.get("last_q") or {}),
+                "last_q": {pp: {i: (qv, float(pos)) for i, (qv, pos) in h.items()}
+                           for pp, h in (ctx.store.get("last_q") or {}).items()},
                 "interventions": list(plan.interventions), "sources": dict(ctx.sources),
                 "token_ranges": dict(ctx.token_ranges),
-                "unit_range": dict(ctx.store.get("unit_range", {})), "code": dict(ctx.store.get("code", {})),
+                "unit_range": {k: (lo.cpu(), hi.cpu()) for k, (lo, hi) in (ctx.store.get("unit_range") or {}).items()},
+                "code": dict(ctx.store.get("code", {})),
                 "forks": dict(ctx.store.get("fork_outputs") or {}),
-                "attn": attn, "ids": seq, "n_prefix": n_prefix}
+                "attn": attn, "ids": seq, "n_prefix": n_prefix,
+                # attn_queries="last": token index of each stored row, per block (absent = rows are tokens 0..T-1)
+                "attn_rows": {k: list(v) for k, v in (ctx.store.get("attn_rows") or {}).items()}}
 
     def _sample(self, logits: torch.Tensor, p: dict, gen: torch.Generator) -> int:
         if p["temperature"] <= 0:
