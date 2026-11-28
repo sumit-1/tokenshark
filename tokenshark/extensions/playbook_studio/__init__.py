@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import time
 import uuid
@@ -299,10 +300,27 @@ def list_playbooks() -> list[dict[str, Any]]:
     return out
 
 
-def get_playbook(pb_id: str) -> dict[str, Any]:
+def _safe_pb_id(raw_id: str) -> str:
+    clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", (raw_id or "").strip()).strip("_")
+    if not clean:
+        raise KeyError(f"Invalid playbook id '{raw_id}'.")
+    return clean
+
+
+def _find_playbook_file(pb_id: str) -> Path | None:
     PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-    p = PLAYBOOK_DIR / f"{pb_id}.json"
-    if p.exists():
+    clean_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", (pb_id or "").strip()).strip("_")
+    if not clean_id or clean_id != (pb_id or "").strip():
+        return None
+    for p in PLAYBOOK_DIR.glob("*.json"):
+        if p.stem == clean_id:
+            return p
+    return None
+
+
+def get_playbook(pb_id: str) -> dict[str, Any]:
+    p = _find_playbook_file(pb_id)
+    if p is not None and p.is_file():
         return json.loads(p.read_text(encoding="utf-8"))
     if pb_id in BUILTIN_PLAYBOOKS:
         return copy.deepcopy(BUILTIN_PLAYBOOKS[pb_id])
@@ -326,13 +344,17 @@ def save_playbook(playbook: dict[str, Any]) -> dict[str, Any]:
         s.setdefault("kind", "outlier_scan")
         s.setdefault("params", {})
     pb["steps"] = steps
-    (PLAYBOOK_DIR / f"{pb_id}.json").write_text(json.dumps(pb, indent=2), encoding="utf-8")
+    base = os.path.realpath(PLAYBOOK_DIR)
+    target = os.path.realpath(os.path.join(base, f"{pb_id}.json"))
+    if not target.startswith(base + os.sep):
+        raise ValueError(f"Invalid playbook id '{pb_id}'.")
+    Path(target).write_text(json.dumps(pb, indent=2), encoding="utf-8")
     return pb
 
 
 def delete_playbook(pb_id: str) -> bool:
-    p = PLAYBOOK_DIR / f"{pb_id}.json"
-    if p.exists():
+    p = _find_playbook_file(pb_id)
+    if p is not None and p.is_file():
         p.unlink()
         return True
     return False

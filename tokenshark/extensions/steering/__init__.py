@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -30,10 +31,13 @@ class VectorLibrary:
         self._mem: OrderedDict[str, tuple[torch.Tensor, dict]] = OrderedDict()
 
     def path(self, vid: str) -> Path:
-        p = VEC_DIR / f"{vid}.safetensors"
-        if not vid.replace("-", "").isalnum() or not p.exists():
+        if not vid or not vid.replace("-", "").isalnum():
             raise KeyError(vid)
-        return p
+        base = os.path.realpath(VEC_DIR)
+        target = os.path.realpath(os.path.join(base, f"{vid}.safetensors"))
+        if not target.startswith(base + os.sep) or not os.path.isfile(target):
+            raise KeyError(vid)
+        return Path(target)
 
     def hold(self, v: torch.Tensor, name: str = "", meta: dict | None = None) -> dict:
         """Keep vector `v` in memory without writing a .safetensors file to disk."""

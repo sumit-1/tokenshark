@@ -11,6 +11,7 @@ Python / General Text) plus user-definable multi-class categories.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -139,7 +140,11 @@ def save_fork_head(name: str, module: ForkHeadModule, meta: dict) -> dict:
     from safetensors.torch import save_file
     FORKS_DIR.mkdir(parents=True, exist_ok=True)
     fid = _safe_name(name, f"fork-{int(time.time())}")
-    folder = FORKS_DIR / fid
+    base = os.path.realpath(FORKS_DIR)
+    folder_str = os.path.realpath(os.path.join(base, fid))
+    if not folder_str.startswith(base + os.sep):
+        raise ValueError(f"Invalid fork head name '{name}'.")
+    folder = Path(folder_str)
     folder.mkdir(parents=True, exist_ok=True)
     meta_out = {
         "id": fid,
@@ -158,9 +163,10 @@ def save_fork_head(name: str, module: ForkHeadModule, meta: dict) -> dict:
 
 def load_fork_head(fid: str) -> tuple[ForkHeadModule, dict]:
     from safetensors.torch import load_file
+    FORKS_DIR.mkdir(parents=True, exist_ok=True)
     fid_clean = _safe_name(fid, "")
-    folder = FORKS_DIR / fid_clean
-    if not fid_clean or not (folder / "fork_head.json").exists():
+    folder = next((p for p in FORKS_DIR.iterdir() if p.is_dir() and p.name == fid_clean), None) if fid_clean else None
+    if folder is None or not (folder / "fork_head.json").exists():
         raise KeyError(f"Unknown fork head '{fid}'.")
     meta = json.loads((folder / "fork_head.json").read_text())
     mod = ForkHeadModule(

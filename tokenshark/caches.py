@@ -47,12 +47,13 @@ class CacheLibrary:
         return cache, dict(extra)
 
     def path(self, cid: str) -> Path:
-        if not cid.replace("-", "").isalnum():
+        if not cid or not cid.replace("-", "").isalnum():
             raise KeyError(cid)
-        p = CACHE_DIR / f"{cid}.safetensors"
-        if not p.exists():
+        base = os.path.realpath(CACHE_DIR)
+        target = os.path.realpath(os.path.join(base, f"{cid}.safetensors"))
+        if not target.startswith(base + os.sep) or not os.path.isfile(target):
             raise KeyError(cid)
-        return p
+        return Path(target)
 
     def save(self, cache: KVCache, name: str, source: dict) -> dict:
         cid = uuid.uuid4().hex[:10]

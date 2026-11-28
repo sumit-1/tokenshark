@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import random
 import re
 from pathlib import Path
@@ -405,7 +406,11 @@ def api_upload_dataset(req: DatasetUploadReq):
         sample_prompt=req.sample_prompt.strip() or rows[0]["question"],
     )
     register_dataset(spec)
-    (DATASETS_DIR / f"{ds_id}.json").write_text(
+    base = os.path.realpath(DATASETS_DIR)
+    target = os.path.realpath(os.path.join(base, f"{ds_id}.json"))
+    if not target.startswith(base + os.sep):
+        raise HTTPException(400, "Invalid dataset name.")
+    Path(target).write_text(
         json.dumps(
             {
                 "id": spec.id,
