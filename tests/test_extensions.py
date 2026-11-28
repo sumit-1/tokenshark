@@ -277,3 +277,192 @@ def test_unified_stepper_run_sync(client):
     assert dbg["done"] is True
     r_final = client.get(f"/api/runs/{run_id}").json()
     assert r_final["status"] == "done"
+
+
+def test_cosine_diag_outliers_and_cosine_matrix(client):
+    r_out = client.post(
+        "/api/ext/cosine_diag/outliers",
+        json={
+            "prompts": ["Returning a lost wallet.", "Stealing a wallet."],
+            "k": 5.0,
+            "chat": False,
+            "add_bos": True,
+            "compare_no_bos": True,
+        },
+    )
+    assert r_out.status_code == 200, r_out.text
+    out = r_out.json()
+    assert len(out["layers"]) == LOADED.info["n_layers"]
+    assert "outlier_dim" in out and "max_med_ratio" in out
+    assert out["layers"][0]["no_bos_inflation"] is not None
+
+    r_cos = client.post(
+        "/api/ext/cosine_diag/cosine",
+        json={
+            "mode": "groups",
+            "pos": 1,
+            "pooling": "mean",
+            "standardize": True,
+            "n_null": 20,
+        },
+    )
+    assert r_cos.status_code == 200, r_cos.text
+    cos = r_cos.json()
+    assert len(cos["labels"]) == 3
+    assert len(cos["matrix"]) == 3
+    assert cos["null"]["n_samples"] >= 20
+
+
+def test_concept_playbook_extract_transfer_and_steer_eval(client):
+    r_ext = client.post(
+        "/api/ext/concept_playbook/extract",
+        json={
+            "pos": -1,
+            "pooling": "mean",
+            "standardize": False,
+            "persist": False,
+            "name": "test_moral",
+        },
+    )
+    assert r_ext.status_code == 200, r_ext.text
+    ext = r_ext.json()
+    assert "vector_id" in ext and "best_block" in ext
+    assert len(ext["transfer_paired"]) == len(ext["groups"])
+
+    r_ev = client.post(
+        "/api/ext/concept_playbook/eval",
+        json={
+            "vector_id": ext["vector_id"],
+            "shuffled_vector_id": ext["shuffled_vector_id"],
+            "random_vector_id": ext["random_vector_id"],
+            "blocks": ext["chosen_block"],
+            "op": "steer",
+            "scale": "resid",
+            "strengths": [-0.2, 0.2],
+            "include_controls": True,
+            "max_cap_tokens": 4,
+        },
+    )
+    assert r_ev.status_code == 200, r_ev.text
+    ev = r_ev.json()
+    cond_names = [row["condition"] for row in ev["results"]]
+    assert "baseline" in cond_names
+    assert any("shuffled ctrl" in c for c in cond_names)
+    assert any("random ctrl" in c for c in cond_names)
+    assert all("auc" in row and "nll" in row and "cap_acc" in row for row in ev["results"])
+
+
+def test_sink_playbook_suffix_sinks_gain_and_dilution(client):
+    r_sinks = client.post(
+        "/api/ext/sink_playbook/sinks",
+        json={
+            "prompt": "The capital of France is",
+            "suffix": "! ! ! Paris",
+            "max_new_tokens": 3,
+            "ignore_eos": True,
+            "chat": False,
+            "epsilon": 0.15,
+            "include_controls": True,
+            "gains": [0.0, 1.0, 3.0],
+        },
+    )
+    assert r_sinks.status_code == 200, r_sinks.text
+    sinks = r_sinks.json()
+    assert len(sinks["suffix_span"]) == 2
+    assert "attack" in sinks["controls"] and "perm" in sinks["controls"] and "rand" in sinks["controls"]
+    assert len(sinks["gain_sweep"]) == 3
+
+    r_dil = client.post(
+        "/api/ext/sink_playbook/dilution",
+        json={
+            "preset": "verified_suffix",
+            "filler_types": ["noise"],
+            "filler_lengths": [0, 16],
+            "max_new_tokens": 4,
+        },
+    )
+    assert r_dil.status_code == 200, r_dil.text
+    dil = r_dil.json()
+    assert len(dil["trials"]) == 2
+    assert all("to_bos" in t and "to_system" in t and "to_filler" in t for t in dil["trials"])
+
+
+def test_playbook_studio_step_chaining_and_cross_model_replication(client, tmp_path_factory):
+    from tokenshark.api import Lab
+    from tests.make_tiny import make_gemma4
+
+    # 1. Save a custom agent-authored playbook with $step_id.field variable bindings
+    pb = {
+        "id": "pb_cross_model_test",
+        "name": "Cross-Model Hunt -> Wire -> Verify",
+        "author": "test-agent",
+        "steps": [
+            {
+                "id": "hunt",
+                "title": "Hunt writer neurons",
+                "kind": "neuron_hunt",
+                "params": {"promote": ["Paris", "France"], "suppress": ["Tokyo", "Japan"], "block": -1, "k": 4},
+            },
+            {
+                "id": "wire",
+                "title": "Clamp discovered neurons at discovered block",
+                "kind": "apply_flow",
+                "params": {
+                    "prompt": "The capital of France is",
+                    "chat": False,
+                    "max_new_tokens": 3,
+                    "edits": [
+                        {
+                            "do": "clamp",
+                            "block": "$hunt.top_block",
+                            "neurons": "$hunt.top_neurons",
+                            "to": "value",
+                            "value": 0.0,
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "verify",
+                "title": "Verify on test prompt",
+                "kind": "verify_eval",
+                "params": {
+                    "mode": "prompts",
+                    "test_prompts": ["The capital of France is"],
+                    "chat": False,
+                    "max_new_tokens": 3,
+                    "edits": [
+                        {
+                            "do": "clamp",
+                            "block": "$hunt.top_block",
+                            "neurons": "$hunt.top_neurons",
+                            "to": "value",
+                            "value": 0.0,
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    r_save = client.post("/api/ext/playbook_studio/save", json={"playbook": pb})
+    assert r_save.status_code == 200, r_save.text
+
+    # 2. Run on Model A (qwen2 via HTTP client, 3 layers)
+    r_run_a = client.post("/api/ext/playbook_studio/run", json={"playbook_id": "pb_cross_model_test", "reset_ctx": True})
+    assert r_run_a.status_code == 200, r_run_a.text
+    res_a = r_run_a.json()
+    assert len(res_a["step_results"]) == 3
+    top_blk_a = res_a["step_results"][0]["exports"]["top_block"]
+    assert res_a["step_results"][1]["resolved_params"]["edits"][0]["block"] == top_blk_a
+    assert 0 <= top_blk_a < 3
+
+    # 3. Run the exact same playbook on Model B (gemma4 via Lab, 5 layers) and verify dynamic adaptation
+    d_gemma = tmp_path_factory.mktemp("gemma_pb") / "tiny_gemma4"
+    make_gemma4(d_gemma)
+    lab_b = Lab(str(d_gemma), device="cpu", dtype="fp32", policy="device")
+    res_b = lab_b.run_playbook(pb, reset_ctx=True)
+    assert len(res_b["step_results"]) == 3
+    top_blk_b = res_b["step_results"][0]["exports"]["top_block"]
+    assert res_b["step_results"][1]["resolved_params"]["edits"][0]["block"] == top_blk_b
+    assert 0 <= top_blk_b < 5
+

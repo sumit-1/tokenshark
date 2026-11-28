@@ -50,6 +50,7 @@ class LLMTokenizer:
         self.eos_token = _tok_str(self.cfg.get("eos_token")) or ("<|eot_id|>" if self.kind == "tiktoken" else None)
         self.bos_id = self.token_to_id(self.bos_token) if self.bos_token else None
         self.eos_id = self.token_to_id(self.eos_token) if self.eos_token else None
+        self.add_bos = self.bos_id is not None and self.cfg.get("add_bos_token") is not False
 
     def _init_tiktoken(self, path: Path):
         import tiktoken
@@ -78,7 +79,7 @@ class LLMTokenizer:
                        parse_special: bool = True) -> tuple[list[int], list[tuple[int, int]]]:
         """Token ids and each token's (start, end) character span in `text` (added BOS: (0, 0))."""
         if not text:
-            return ([self.bos_id], [(0, 0)]) if add_special and self.bos_id is not None else ([], [])
+            return ([self.bos_id], [(0, 0)]) if add_special and self.add_bos else ([], [])
         if self.kind == "hf":
             if parse_special:
                 e = self.tk.encode(text, add_special_tokens=add_special)
@@ -89,14 +90,15 @@ class LLMTokenizer:
                         e = self.tk.encode(text, add_special_tokens=add_special)
                     finally:
                         self.tk.encode_special_tokens = False
-            return list(e.ids), [tuple(o) for o in e.offsets]
-        if parse_special:
-            ids = self.tk.encode(text, allowed_special="all")
+            ids, offs = list(e.ids), [tuple(o) for o in e.offsets]
         else:
-            ids = self.tk.encode(text, allowed_special=set(), disallowed_special=())
-        _, starts = self.tk.decode_with_offsets(ids)
-        offs = [(a, b) for a, b in zip(starts, list(starts[1:]) + [len(text)])]
-        if add_special and self.bos_id is not None and (not ids or ids[0] != self.bos_id):
+            if parse_special:
+                ids = self.tk.encode(text, allowed_special="all")
+            else:
+                ids = self.tk.encode(text, allowed_special=set(), disallowed_special=())
+            _, starts = self.tk.decode_with_offsets(ids)
+            offs = [(a, b) for a, b in zip(starts, list(starts[1:]) + [len(text)])]
+        if add_special and self.add_bos and (not ids or ids[0] != self.bos_id):
             ids, offs = [self.bos_id] + ids, [(0, 0)] + offs
         return ids, offs
 
@@ -149,6 +151,71 @@ class LLMTokenizer:
                 out[k] = (len(ids), len(ids) + len(piece))
             ids += piece
         return ids, out
+
+    def find_span(self, text: str, substring: str, add_special: bool = False,
+                  literal: bool = False, which: int = -1,
+                  search_range: tuple[int, int] | None = None) -> range:
+        """Token range(start, end) covering `substring` inside `text` (which=-1 picks the last match, 0 the first)."""
+        if not substring:
+            raise ValueError("substring must be non-empty.")
+        lo, hi = search_range if search_range is not None else (0, len(text))
+        matches: list[tuple[int, int]] = []
+        for cand in (substring, substring.strip()):
+            if not cand:
+                continue
+            cur = lo
+            while True:
+                i = text.find(cand, cur, hi)
+                if i < 0:
+                    break
+                matches.append((i, i + len(cand)))
+                cur = i + 1
+            if matches:
+                break
+        if not matches:
+            raise ValueError(f"Substring {substring!r} not found in text.")
+        span = matches[which]
+        _, tspans = self.encode_spans(text, [span], add_special=add_special, literal=literal)
+        ts = tspans[0]
+        if ts is None:
+            raise ValueError(f"Substring {substring!r} did not map to any tokens.")
+        return range(ts[0], ts[1])
+
+    def _strip_special_str(self, s: str) -> str:
+        for tok in (self.eos_token, self.bos_token, "<turn|>", "<|turn>", "<|im_end|>", "<|eot_id|>", "<|end_of_text|>"):
+            if tok:
+                s = s.replace(tok, "")
+        return s.strip()
+
+    def split_thinking(self, ids: list[int]) -> tuple[str, str]:
+        """Split generated token ids into (thought, answer) using tokenizer_config.json's thinking delimiters
+        (e.g. Gemma 4 '<|channel>thought\\n...<channel|>') or '<think>...</think>'. Returns ('', full_text) when no
+        thinking channel is present."""
+        if not ids:
+            return "", ""
+        raw = self.decode(list(ids), skip_special=False)
+        clean = self.decode(list(ids), skip_special=True)
+        delims: list[tuple[str, str]] = []
+        rt = (self.cfg.get("response_template") or {}).get("fields") or {}
+        th = rt.get("thinking") if isinstance(rt, dict) else None
+        if isinstance(th, dict) and th.get("open") and th.get("close"):
+            delims.append((str(th["open"]), str(th["close"])))
+        delims.extend([
+            ("<|channel>thought\n", "<channel|>"),
+            ("<|channel>thought", "<channel|>"),
+            ("<think>", "</think>"),
+        ])
+        for op, cl in delims:
+            if op in raw:
+                after_open = raw.split(op, 1)[1]
+                if cl in after_open:
+                    thought_part, ans_part = after_open.split(cl, 1)
+                    return self._strip_special_str(thought_part), self._strip_special_str(ans_part)
+                return self._strip_special_str(after_open), ""
+            if cl in raw:
+                thought_part, ans_part = raw.split(cl, 1)
+                return self._strip_special_str(thought_part), self._strip_special_str(ans_part)
+        return "", clean.strip()
 
     def decode(self, ids: list[int], skip_special: bool = False) -> str:
         if self.kind == "hf":

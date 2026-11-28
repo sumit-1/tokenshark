@@ -11,8 +11,14 @@ this plugin maps the checkpoint onto them through `ArchHooks` (tokenshark/llm/ar
   `layer_scalar` are detected by the engine from the weight names.
 - Images: no vision transformer. Each 48x48 pixel patch becomes one soft token:
       pixels/255 -> LayerNorm -> Linear -> LayerNorm -> + x/y position table -> LayerNorm -> RMSNorm -> Linear
-  The prompt reads `<|image>` + `<|image|>` x N + `<image|>`; an image's tokens attend to each other in both
-  directions in the sliding-window layers.
+    The prompt reads `<|image>` + `<|image|>` x N + `<image|>`; an image's tokens attend to each other in both
+    directions in the sliding-window layers.
+- Thinking channel & BOS attention sink:
+    * Raw mode (`chat=False`) automatically prepends `<bos>` (`tok.add_bos` is True); running a Gemma-4 checkpoint
+      without `<bos>` (`add_bos=False`) removes its primary attention sink and inflates token activation norms ~7x.
+    * Gemma-4's chat template ends the assistant turn header with `<|channel>thought\n<channel|>` when `thinking=False`.
+      Strong interventions at the final prompt token can nudge generation back into `<|channel>thought\n...<channel|>`
+      before emitting the reply; use `run.answer` (and `run.thought`) to read the post-thought answer cleanly.
 
 Not supported here: video and audio input; per-layer input embeddings (E2B/E4B), mixture-of-experts blocks
 (26B-A4B); the SigLIP-style vision tower of non-unified Gemma-4 checkpoints.

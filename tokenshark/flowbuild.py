@@ -20,6 +20,18 @@ import copy
 import itertools
 
 
+def _fmt_spec(spec) -> str:
+    if spec is None:
+        return ""
+    if isinstance(spec, range):
+        if spec.step == 1:
+            return f"{spec.start}:{spec.stop}"
+        return ",".join(str(i) for i in spec)
+    if isinstance(spec, (list, tuple, set)):
+        return ",".join(str(i) for i in spec)
+    return str(spec)
+
+
 def walk_chain(flow: dict, start_kind: str = "embed", end_kind: str = "final_norm") -> list[dict]:
     """The block boxes on the residual stream, in order (bypassed ones included)."""
     nodes = {n["id"]: n for n in flow.get("nodes", [])}
@@ -80,11 +92,12 @@ class FlowBuilder:
 
     # ---------------------------------------------------------------- inputs and sampling
     def prompt(self, prompt=None, system=None, prefill=None, chat=None, thinking=None, negative_prompt=None,
-               history=None, images=None, literal_content=None):
+               history=None, images=None, literal_content=None, add_bos=None):
         """history: the conversation so far, [{"role": "user" | "assistant", "content": …}, …]; `prompt` is then the
         newest user turn (leave it "" to have the model answer the last turn of the history).
         literal_content=True: control-token text inside messages (e.g. "<|im_end|>") stays plain text instead of
         becoming the real control token; the chat template's own markers are unaffected.
+        add_bos: prepend the model's BOS token in raw mode (chat=False); default True when the tokenizer defines one.
         images (models whose plugin provides image input): file paths, PIL images, bytes or data: URLs. Each one
         fills a `<|image|>` marker in the text; without markers they go in front of the prompt."""
         if images is not None:
@@ -93,7 +106,7 @@ class FlowBuilder:
         return self._set("input_prompt", prompt=prompt, system=system, prefill=prefill, use_chat_template=chat,
                          thinking=thinking, negative_prompt=negative_prompt,
                          history=[dict(m) for m in history] if history is not None else None, images=images,
-                         literal_content=literal_content)
+                         literal_content=literal_content, add_bos=add_bos)
 
     def say(self, role: str, content: str):
         """Append one earlier turn to the conversation: flow.say("user", "Hi").say("assistant", "Hello!")."""
@@ -102,11 +115,16 @@ class FlowBuilder:
         return self
 
     def sampler(self, max_new_tokens=None, temperature=None, top_k=None, top_p=None, seed=None,
+                ignore_eos=None, min_new_tokens=None,
                 rope_step_stride=None, rope_prompt_scale=None, rope_gen_start=None, kv_zero=None):
-        """rope_gen_start: RoPE jump - the first generated token sits at this position in every block.
+        """max_new_tokens=0 runs a single prompt forward pass without a decode step (captures prompt activations and logits).
+        ignore_eos=True keeps generating past end-of-turn / EOS tokens up to max_new_tokens.
+        min_new_tokens suppresses EOS stopping until at least that many tokens have been generated.
+        rope_gen_start: RoPE jump - the first generated token sits at this position in every block.
         kv_zero: KV cache rows (token indices, '3,7' or '0:4') whose key and value are zeroed in every block."""
         return self._set("sampler", max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p,
-                         seed=seed, rope_step_stride=rope_step_stride, rope_prompt_scale=rope_prompt_scale,
+                         seed=seed, ignore_eos=ignore_eos, min_new_tokens=min_new_tokens,
+                         rope_step_stride=rope_step_stride, rope_prompt_scale=rope_prompt_scale,
                          rope_gen_start=rope_gen_start, kv_zero=kv_zero)
 
     def capture(self, attn_budget_mb: int | None = None, neuron_budget_mb: int | None = None,
@@ -197,40 +215,56 @@ class FlowBuilder:
         return self
 
     # ---------------------------------------------------------------- interceptors
-    def intercept(self, block, hook: str = "mlp_out", op: str = "zero", value: float = 0.0, positions: str = "all",
-                  heads: str = "all", neurons: str = "all", source_neurons: str = "", threshold: float = 0.0,
-                  ref: str = "", src_positions: str = "", clamp: str = "max",
-                  seed: int = 0, steps: str = "all", label: str = "", experts: str = "all") -> str:
+    def intercept(self, block, hook: str = "mlp_out", op: str = "zero", value: float = 0.0, positions="all",
+                  heads="all", neurons="all", source_neurons="", threshold: float = 0.0,
+                  ref="", src_positions="", clamp: str = "max", scale: str = "raw",
+                  seed: int = 0, steps="all", label: str = "", experts="all") -> str:
         """Wire an interceptor box into a block. Returns the new box's id."""
+        if hasattr(ref, "shape") and hasattr(ref, "dtype"):   # a torch.Tensor held in memory without disk clutter
+            from . import interp
+            ref = interp.VECTORS.hold(ref, label or f"{op} @ {hook}")["id"]
         ref = getattr(ref, "id", ref)             # a RunResult or a vector dict/id
         if isinstance(ref, dict):
             ref = ref["id"]
+        pos_s = _fmt_spec(positions) or "all"
+        heads_s = _fmt_spec(heads) or "all"
+        neurons_s = _fmt_spec(neurons) or "all"
+        src_neu_s = _fmt_spec(source_neurons)
+        src_pos_s = _fmt_spec(src_positions)
+        steps_s = _fmt_spec(steps) or "all"
+        experts_s = _fmt_spec(experts) or "all"
         return self._add("iv", self.node(block)["id"], "mod", {
             "kind": "intervention", "label": label or f"{op} @ {hook}", "hook": hook, "op": op, "value": value,
-            "positions": str(positions), "heads": str(heads), "neurons": str(neurons),
-            "source_neurons": str(source_neurons), "threshold": float(threshold),
-            "ref": ref or "", "src_positions": str(src_positions), "clamp": clamp, "seed": seed,
-            "steps": steps, "enabled": True, "experts": str(experts)})
+            "positions": pos_s, "heads": heads_s, "neurons": neurons_s,
+            "source_neurons": src_neu_s, "threshold": float(threshold),
+            "ref": ref or "", "src_positions": src_pos_s, "clamp": clamp, "scale": scale, "seed": seed,
+            "steps": steps_s, "enabled": True, "experts": experts_s})
 
     intervene = intercept
 
     def attn_gain(self, block, keys, value: float = 0.0, heads="all") -> str:
         """Scale the attention weights every query puts on key positions `keys` by `value`, in `heads` of `block`,
         without renormalising (value=1 no change, >1 amplify, 0 ablate). Sink-subspace modulation per head."""
-        return self.intercept(block, hook="attn_probs", op="scale", value=value, positions=str(keys),
-                              heads=str(heads), label=f"attn ×{value:g} @ keys {keys}")
+        ks = _fmt_spec(keys)
+        return self.intercept(block, hook="attn_probs", op="scale", value=value, positions=ks,
+                              heads=heads, label=f"attn ×{value:g} @ keys {ks}")
 
-    def patch(self, block, source_run, hook: str = "resid_post", positions: str = "all", src_positions: str = "") -> str:
+    def patch(self, block, source_run, hook: str = "resid_post", positions="all", src_positions="") -> str:
         """Activation patching: at `block`, overwrite this run's activation with the one `source_run` had there."""
         return self.intercept(block, hook=hook, op="patch", ref=source_run, positions=positions,
                               src_positions=src_positions, label="patch")
 
-    def steer(self, block, vector, value: float = 4.0, hook: str = "resid_post", positions: str = "all") -> str:
-        """Add value × a steering vector to the residual stream at `block`."""
-        return self.intercept(block, hook=hook, op="steer", ref=vector, value=value, positions=positions, label="steer")
+    def steer(self, block, vector, value: float = 4.0, hook: str = "resid_post", positions="all",
+              scale: str = "raw") -> str:
+        """Add value × a steering vector to the residual stream at `block`.
+        scale='raw' (default): add `value * v` as-is (so B + 1.0 * (A - B) == A).
+        scale='unit': normalize `v` to unit length first (`value * v / ||v||`).
+        scale='resid': scale unit vector by each token's residual norm (`value * ||resid|| * v / ||v||`)."""
+        return self.intercept(block, hook=hook, op="steer", ref=vector, value=value, positions=positions,
+                              scale=scale, label="steer")
 
-    def project_out(self, block, vector, value: float = 1.0, hook: str = "resid_post", positions: str = "all") -> str:
-        """Remove (value=1) or scale the component along `vector` in the residual stream at `block`."""
+    def project_out(self, block, vector, value: float = 1.0, hook: str = "resid_post", positions="all") -> str:
+        """Remove (value=1) or scale the component along `vector` (normalized to unit length) at `block`."""
         return self.intercept(block, hook=hook, op="project_out", ref=vector, value=value, positions=positions,
                               label="project_out")
 
@@ -440,6 +474,8 @@ class FlowBuilder:
                     self.steer(blk, e.pop("vector"), **e)
                 elif do == "project_out":
                     self.project_out(blk, e.pop("vector"), **e)
+                elif do == "attn_gain":
+                    self.attn_gain(blk, e.pop("keys", e.pop("positions", "all")), **e)
                 elif do == "quantize":
                     self.quantize_block(blk, **e)
                 elif do == "clamp":

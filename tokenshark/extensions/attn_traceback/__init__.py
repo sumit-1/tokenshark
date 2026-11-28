@@ -275,6 +275,8 @@ class AttnTracebackPlugin(FeaturePlugin):
     id = "attn_traceback"
     name = "Previous-Token Attention Attribution Analyser"
     version = "0.2.0"
+    view_type = "diagnose"
+    default_enabled = False
     description = "Trace any previous token across all layers and heads ranked by attention weight, value-weighted norm ||alpha * v * W_O||, and direct logit push."
     families = ("causal_lm",)
     router = router

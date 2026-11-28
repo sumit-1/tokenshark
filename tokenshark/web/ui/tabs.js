@@ -6,13 +6,17 @@ import { esc } from '../flow.js'
 const NO_MODEL = ['train', 'runs']
 
 // Map tab IDs to the extension ID that provides them (so toggling an extension hides/shows its tab).
-const TAB_EXT_MAP = {
+export const TAB_EXT_MAP = {
   neurons: 'neurons',
   experts: 'moe',
   guardrail: 'guardrail_fork',
   lora: 'lora',
   quant: 'quant',
   train: 'training',
+  diag: 'cosine_diag',
+  concepts: 'concept_playbook',
+  sinks: 'sink_playbook',
+  playbooks: 'playbook_studio',
 }
 
 export function tabList() {
@@ -108,22 +112,37 @@ export async function refreshExtensions() {
 function renderExtPop() {
   const pop = $('#ext-pop')
   if (!pop) return
-  pop.innerHTML = `<div class="small">Activate or deactivate modular feature plugins. Disabled plugins hide their tabs and palette actions. Community plugins can be placed in <code>~/.tokenshark/extensions/</code>.</div>`
-  ;(S.extensions || []).forEach(ext => {
-    const row = el('label', { className: 'task', style: 'cursor:pointer;display:flex;align-items:flex-start;gap:8px' })
-    const cb = el('input', { type: 'checkbox', checked: ext.enabled !== false, style: 'margin-top:3px' })
-    cb.onchange = async () => {
-      try {
-        await POST(`/api/extensions/${encodeURIComponent(ext.id)}/toggle`, { enabled: cb.checked })
-        await refreshExtensions()
-        if (!resolve(S.tab)) setTab(S.info ? 'output' : 'runs')
-      } catch (e) { toast(e.message, 'error') }
-    }
-    const info = el('span', { className: 'tl' },
-      `<b>${esc(ext.name)}</b> <span class="chip">${esc(ext.source || 'builtin')}</span><span class="small" style="display:block">${esc(ext.description || '')}</span>`)
-    row.append(cb, info)
-    pop.appendChild(row)
-  })
+  pop.innerHTML = `<div class="small" style="margin-bottom:6px">Check an extension to unlock its tab or tools without cluttering the default workspace. Grouped into <b>Playbook Views</b> (end-to-end experiment workflows) and <b>Diagnose Views</b> (debugging & geometry).</div>`
+  const groups = [
+    ['playbook', 'Playbook Views (Workflows & Replication)'],
+    ['diagnose', 'Diagnose Views (Debugging & Geometry)'],
+  ]
+  for (const [vtype, heading] of groups) {
+    const items = (S.extensions || []).filter(e => (e.view_type || 'playbook') === vtype)
+    if (!items.length) continue
+    pop.appendChild(el('div', { className: 'sechead', style: 'margin:8px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em', textContent: heading }))
+    items.forEach(ext => {
+      const row = el('label', { className: 'task', style: 'cursor:pointer;display:flex;align-items:flex-start;gap:8px' })
+      const cb = el('input', { type: 'checkbox', checked: ext.enabled !== false, style: 'margin-top:3px' })
+      cb.onchange = async () => {
+        try {
+          await POST(`/api/extensions/${encodeURIComponent(ext.id)}/toggle`, { enabled: cb.checked })
+          await refreshExtensions()
+          if (cb.checked && ext.tabs?.length && resolve(ext.tabs[0])) {
+            setTab(ext.tabs[0])
+          } else if (!resolve(S.tab)) {
+            setTab(S.info ? 'output' : 'runs')
+          }
+        } catch (e) { toast(e.message, 'error') }
+      }
+      const tabBadges = (ext.tabs || []).map(tid => `<span class="chip">tab: ${esc(tid)}</span>`).join(' ')
+      const viewBadge = `<span class="chip" style="background:${vtype === 'playbook' ? 'rgba(59,130,246,0.2)' : 'rgba(16,185,129,0.2)'}">${vtype === 'playbook' ? 'Playbook' : 'Diagnose'}</span>`
+      const info = el('span', { className: 'tl' },
+        `<b>${esc(ext.name)}</b> ${viewBadge} ${tabBadges}<span class="small" style="display:block">${esc(ext.description || ext.summary || '')}</span>`)
+      row.append(cb, info)
+      pop.appendChild(row)
+    })
+  }
 }
 
 if ($('#ext-btn')) {

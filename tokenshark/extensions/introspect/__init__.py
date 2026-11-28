@@ -165,6 +165,8 @@ class IntrospectPlugin(FeaturePlugin):
     id = "introspect"
     name = "Concept Injection & Introspection"
     version = "0.2.0"
+    view_type = "diagnose"
+    default_enabled = True
     description = "Concept injection sweeps, residual stream concept meters, and natural-language activation roundtrip explanations."
     families = ("causal_lm",)
     router = router

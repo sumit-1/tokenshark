@@ -240,6 +240,8 @@ class TrainingPlugin(FeaturePlugin):
     id = "training"
     name = "In-Browser Training & Adaptation"
     version = "0.2.0"
+    view_type = "playbook"
+    default_enabled = False
     description = "Train tiny transformers from scratch, adapt loaded LLMs with LoRA/IA3/Bottleneck/Block insertion, or train tiny diffusion."
     families = ("causal_lm", "t2i")
     router = router

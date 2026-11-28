@@ -108,6 +108,8 @@ class PatchingPlugin(FeaturePlugin):
     id = "patching"
     name = "Activation Patching & Causal Tracing"
     version = "0.2.0"
+    view_type = "diagnose"
+    default_enabled = True
     description = "Copy activations from a clean run into a corrupted run and run causal tracing sweeps across blocks and tokens."
     families = ("causal_lm",)
     router = router

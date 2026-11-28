@@ -275,6 +275,69 @@ class LLMAdapter(LLMAnalysisMixin):
                           "end": len(prompt_ids) + len(prefill_ids)})
         return prompt_ids, prefill_ids, roles
 
+    def find_span(self, p: dict, substring: str, role: str | None = None, which: int = -1) -> range:
+        """Token range(start, end) of `substring` inside the prompt (or prefill) rendered by `p`."""
+        if not substring:
+            raise ValueError("substring must be non-empty.")
+        tok = self.tok
+        text, add_special, msgs = self._render_prompt(p)
+        literal = bool(p.get("literal_content"))
+        msg_spans = tok.locate(text, [c for _, c in msgs])
+        if role == "prefill":
+            pf = str(p.get("prefill") or "")
+            if not pf:
+                raise KeyError("No 'prefill' in this prompt.")
+            prompt_ids, _ = tok.encode_spans(text, msg_spans, add_special, literal=literal)
+            r_pf = tok.find_span(pf, substring, add_special=False, literal=literal, which=which)
+            return range(len(prompt_ids) + r_pf.start, len(prompt_ids) + r_pf.stop)
+        search_ranges: list[tuple[int, int]] = []
+        if role is not None:
+            for (r_name, _), sp in zip(msgs, msg_spans):
+                if r_name == role and sp is not None:
+                    search_ranges.append(sp)
+            if not search_ranges:
+                raise KeyError(f"No {role!r} message in this prompt.")
+        else:
+            search_ranges.append((0, len(text)))
+        matches: list[tuple[int, int]] = []
+        for cand in (substring, substring.strip()):
+            if not cand:
+                continue
+            for lo, hi in search_ranges:
+                cur = lo
+                while True:
+                    i = text.find(cand, cur, hi)
+                    if i < 0:
+                        break
+                    matches.append((i, i + len(cand)))
+                    cur = i + 1
+            if matches:
+                break
+        if not matches and role is None and p.get("prefill") and substring in str(p.get("prefill")):
+            return self.find_span(p, substring, role="prefill", which=which)
+        if not matches:
+            raise ValueError(f"Substring {substring!r} not found in prompt.")
+        target = matches[which]
+        if not literal:
+            _, tspans = tok.encode_spans(text, [target], add_special=add_special, literal=False)
+            ts = tspans[0]
+            if ts is None:
+                raise ValueError(f"Substring {substring!r} did not map to any tokens.")
+            return range(ts[0], ts[1])
+        # When literal=True, message spans must be cut at the same boundaries as _build_text_ids
+        prompt_ids, _ = tok.encode_spans(text, msg_spans, add_special=add_special, literal=True)
+        # Map character span `target` onto `prompt_ids` by cumulative piece offsets
+        _, offs = tok.encode_offsets(text, add_special=add_special, parse_special=False)
+        if len(offs) == len(prompt_ids):
+            hit = [j for j, (a, b) in enumerate(offs) if b > target[0] and a < target[1] and b > a]
+            if hit:
+                return range(hit[0], hit[-1] + 1)
+        _, tspans = tok.encode_spans(text, [target], add_special=add_special, literal=False)
+        ts = tspans[0]
+        if ts is None:
+            raise ValueError(f"Substring {substring!r} did not map to any tokens.")
+        return range(ts[0], ts[1])
+
     @staticmethod
     def apply_kv_override_params(base_p: dict, ov: dict) -> dict:
         p = dict(base_p)
@@ -409,6 +472,40 @@ class LLMAdapter(LLMAnalysisMixin):
 
     def stepper(self, plan: Plan, prefix: KVCache | None = None) -> Stepper:
         return Stepper(self, plan, prefix=prefix, trace=True)
+
+    @torch.no_grad()
+    def run_batch(self, plans: list[Plan], prefixes: list | None = None,
+                  sources_list: list[dict] | None = None, progress=None) -> list[dict]:
+        """Execute multiple plans in lockstep one block at a time inside `W.hold_device()` so each block's
+        weights are streamed to the compute device once across the batch instead of once per item."""
+        if not plans:
+            return []
+        prefixes = prefixes or [None] * len(plans)
+        sources_list = sources_list or [{} for _ in plans]
+        W = self.model.W
+        with W.hold_device():
+            steppers = [Stepper(self, pl, prefix=pr) for pl, pr in zip(plans, prefixes)]
+        for st, src in zip(steppers, sources_list):
+            if src:
+                st.ctx.sources = src
+        while any(not st.done for st in steppers):
+            # 1. Embed next token chunk for all idle steppers
+            with W.hold_device():
+                for st in steppers:
+                    if not st.done and st.x is None:
+                        st.step_block()
+            # 2. Step block-by-block in lockstep across all active steppers
+            while True:
+                active = [st for st in steppers if not st.done and st.x is not None]
+                if not active:
+                    break
+                min_bp = min(st.bp for st in active)
+                with W.hold_device():
+                    for st in active:
+                        if st.bp == min_bp:
+                            st.step_block()
+            host_sync()
+        return [st.finish() for st in steppers]
 
     def _collect(self, ctx, plan, seq, n_prefix):
         host_sync()                              # captures copied asynchronously (engine.to_host) have all landed

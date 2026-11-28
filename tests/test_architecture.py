@@ -105,3 +105,37 @@ def test_no_em_dashes_in_repository():
             offenders.append(str(p.relative_to(root)))
     assert not offenders, f"Em dash found in files: {', '.join(offenders)}"
 
+
+def test_all_llm_hooks_present_in_ui_inspector():
+    from tokenshark.flow import LLM_HOOKS
+    insp = (WEB / "ui" / "inspector.js").read_text(encoding="utf-8")
+    m = re.search(r"export const LLM_HOOK_LABELS\s*=\s*\[(.*?)\n\]", insp, re.S)
+    assert m is not None, "LLM_HOOK_LABELS not found in inspector.js"
+    ui_hooks = set(re.findall(r"\[\s*'(\w+)'\s*,", m.group(1)))
+    assert set(LLM_HOOKS) <= ui_hooks, f"Hooks missing from UI inspector: {set(LLM_HOOKS) - ui_hooks}"
+
+
+def test_extension_view_types_and_default_disabled_state():
+    from tokenshark.sdk import get_extensions
+    exts = get_extensions()
+    for ext_id, cls in exts.items():
+        info = cls.info()
+        assert info["view_type"] in ("playbook", "diagnose"), f"{ext_id} has invalid view_type {info['view_type']}"
+    must_default_off = {
+        "cosine_diag",
+        "concept_playbook",
+        "sink_playbook",
+        "playbook_studio",
+        "guardrail_fork",
+        "lora",
+        "quant",
+        "training",
+        "moe",
+        "attn_traceback",
+    }
+    for ext_id in must_default_off:
+        assert ext_id in exts, f"Missing extension {ext_id}"
+        assert exts[ext_id].default_enabled is False, f"Extension {ext_id} should have default_enabled = False"
+    assert {"diag", "concepts", "sinks", "playbooks"} <= TAB_IDS
+
+

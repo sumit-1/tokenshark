@@ -1,6 +1,7 @@
 """Steering vectors extension (`tokenshark.extensions.steering`)."""
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 import time
 import uuid
@@ -21,10 +22,12 @@ VEC_DIR = DATA / "vectors"
 
 
 class VectorLibrary:
-    """Steering vectors as files under data/vectors/ (safetensors: one tensor 'v' + metadata)."""
+    """Steering vectors as files under data/vectors/ (safetensors: one tensor 'v' + metadata), plus bounded in-memory vectors."""
 
-    def __init__(self):
+    def __init__(self, max_mem: int = 256):
         VEC_DIR.mkdir(parents=True, exist_ok=True)
+        self.max_mem = max_mem
+        self._mem: OrderedDict[str, tuple[torch.Tensor, dict]] = OrderedDict()
 
     def path(self, vid: str) -> Path:
         p = VEC_DIR / f"{vid}.safetensors"
@@ -32,8 +35,28 @@ class VectorLibrary:
             raise KeyError(vid)
         return p
 
-    def save(self, v: torch.Tensor, name: str, meta: dict) -> dict:
+    def hold(self, v: torch.Tensor, name: str = "", meta: dict | None = None) -> dict:
+        """Keep vector `v` in memory without writing a .safetensors file to disk."""
+        vid = uuid.uuid4().hex[:10]
+        m = {
+            "id": vid,
+            "name": name or f"vector {vid}",
+            "created": time.time(),
+            "dim": int(v.shape[-1]),
+            "norm": round(float(v.float().norm()), 4),
+            "ephemeral": True,
+            **(meta or {}),
+        }
+        self._mem[vid] = (v.detach().float().cpu().contiguous(), m)
+        while len(self._mem) > self.max_mem:
+            self._mem.popitem(last=False)
+        return m
+
+    def save(self, v: torch.Tensor, name: str, meta: dict, persist: bool = True) -> dict:
+        if not persist:
+            return self.hold(v, name, meta)
         from safetensors.torch import save_file
+        VEC_DIR.mkdir(parents=True, exist_ok=True)
         vid = uuid.uuid4().hex[:10]
         meta = {
             "id": vid,
@@ -51,14 +74,20 @@ class VectorLibrary:
         return meta
 
     def load(self, vid: str) -> tuple[torch.Tensor, dict]:
+        if vid in self._mem:
+            self._mem.move_to_end(vid)
+            return self._mem[vid]
         from safetensors import safe_open
         with safe_open(str(self.path(vid)), framework="pt", device="cpu") as f:
             return f.get_tensor("v"), json.loads((f.metadata() or {}).get("meta", "{}"))
 
     def list(self) -> list[dict]:
         from safetensors import safe_open
-        out = []
+        out = [dict(m) for _, m in reversed(self._mem.values())]
+        seen = {m["id"] for m in out}
         for p in sorted(VEC_DIR.glob("*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True):
+            if p.stem in seen:
+                continue
             try:
                 with safe_open(str(p), framework="pt", device="cpu") as f:
                     out.append({**json.loads((f.metadata() or {}).get("meta", "{}")), "id": p.stem})
@@ -67,6 +96,9 @@ class VectorLibrary:
         return out
 
     def delete(self, vid: str):
+        if vid in self._mem:
+            del self._mem[vid]
+            return
         self.path(vid).unlink()
 
 
@@ -166,6 +198,8 @@ class SteeringPlugin(FeaturePlugin):
     id = "steering"
     name = "Steering Vectors & Residual Directions"
     version = "0.2.0"
+    view_type = "playbook"
+    default_enabled = True
     description = "Extract contrastive or word-unembedding directions in the residual stream and steer or project them out."
     families = ("causal_lm",)
     router = router

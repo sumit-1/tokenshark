@@ -93,6 +93,11 @@ class Stepper:
         cache.prefix_spans = spans
         cache.shared = ad.cfg.kv_sharing(plan.schedule)
         cache.states, self.notes = {}, []
+        if getattr(ad.tok, "add_bos", False) and prefix is None and self.prompt_ids and self.prompt_ids[0] != ad.tok.bos_id:
+            self.notes.append(
+                f"prompt starts without {ad.tok.bos_token or '<bos>'} (token 0 is {ad.tok.piece(self.prompt_ids[0])!r}); "
+                f"this model expects a BOS attention sink and activations may be several times larger than normal."
+            )
         for c, (a, b, slots) in zip(prefixes, spans):
             for slot, stt in c.states.items():
                 if slots is None or slot in slots:
@@ -201,15 +206,24 @@ class Stepper:
         if self.done or self.n_generated >= self.total or not self.logits_rows:
             self.done = True
             return None
+        min_new = int(self.p_.get("min_new_tokens") or 0)
+        last_logits = self.logits_rows[-1][-1]
+        if self.n_generated < min_new and not self.p_.get("ignore_eos") and self.eos:
+            masked = last_logits.clone()
+            for eid in self.eos:
+                if 0 <= int(eid) < masked.shape[-1]:
+                    masked[int(eid)] = float("-inf")
+            if torch.isfinite(masked).any():
+                last_logits = masked
         if self.forced is not None:
             nxt = self.forced
         elif "sampler" in self.box_code:
             from ..blockcode import run_sampler
-            nxt = run_sampler(self.box_code["sampler"], self.logits_rows[-1][-1], self.p_, self.gen, self.ctx)
+            nxt = run_sampler(self.box_code["sampler"], last_logits, self.p_, self.gen, self.ctx)
         else:
-            nxt = self.ad._sample(self.logits_rows[-1][-1], self.p_, self.gen)
+            nxt = self.ad._sample(last_logits, self.p_, self.gen)
         forced, self.forced = self.forced is not None, None
-        if nxt in self.eos and not self.p_.get("ignore_eos") and not forced:
+        if nxt in self.eos and not self.p_.get("ignore_eos") and self.n_generated >= min_new and not forced:
             self.seq.append(nxt)
             self.done = self.eos_stop = True
             return None
@@ -442,11 +456,14 @@ class Stepper:
         n_in = self.n_in
         seq = self.seq
         gen_text = ad.tok.decode(seq[n_in:], skip_special=True)
+        thought_text, answer_text = ad.tok.split_thinking(seq[n_in:])
         gate_halt = ctx.store.get("fork_gate_halt")
         if isinstance(gate_halt, str) and gate_halt.strip() and gate_halt not in gen_text:
             gen_text = (gen_text + (" " if gen_text else "") + gate_halt).strip()
         outputs = {
             "text": gen_text,
+            "thought": thought_text,
+            "answer": answer_text,
             "tokens": [ad.tok.piece(i) for i in seq + inflight], "token_ids": seq + inflight,
             "segments": [{"origin": "prompt", "start": 0, "end": len(self.prompt_ids)},
                          {"origin": "prefill", "start": len(self.prompt_ids), "end": n_in},

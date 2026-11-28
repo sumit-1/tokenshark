@@ -56,12 +56,38 @@ class RunResult:
         return self.outputs.get("text", "")
 
     @property
+    def thought(self) -> str:
+        """Reasoning / thinking channel text emitted before the final answer ('' when none)."""
+        if "thought" in self.outputs:
+            return self.outputs["thought"]
+        return self.lab.adapter.tok.split_thinking(self.new_token_ids)[0]
+
+    @property
+    def answer(self) -> str:
+        """The model's final answer with any thinking channel ('<|channel>thought...<channel|>' or '<think>...</think>') stripped."""
+        if "answer" in self.outputs:
+            return self.outputs["answer"]
+        return self.lab.adapter.tok.split_thinking(self.new_token_ids)[1]
+
+    @property
     def tokens(self) -> list[str]:
         return self.outputs.get("tokens", [])
 
     @property
     def token_ids(self) -> list[int]:
         return self.outputs.get("token_ids", [])
+
+    @property
+    def new_token_ids(self) -> list[int]:
+        """Token ids generated after the prompt and prefill."""
+        n_in = self.captures.get("n_in") if self.captures else None
+        if n_in is None:
+            segs = self.outputs.get("segments") or []
+            gen = next((s for s in segs if s.get("origin") == "generated"), None)
+            if gen:
+                return self.token_ids[gen["start"]:gen["end"]]
+            return []
+        return self.token_ids[n_in:]
 
     @property
     def roles(self) -> list[dict]:
@@ -76,6 +102,11 @@ class RunResult:
             raise KeyError(f"No {role!r} message in this run's tokens (roles: {[r['role'] for r in self.roles]}).")
         r = hits[which]
         return range(r["start"], r["end"])
+
+    def find(self, substring: str, role: str | None = None, which: int = -1) -> range:
+        """Token range(start, end) covering `substring` inside this run's prompt (or inside `role`).
+        Pass directly to `flow.attn_gain(b, keys=run.find(suffix))` or `run.attention(b)[:, q, run.find(suffix)]`."""
+        return self.lab.adapter.find_span(self.plan.params, substring, role=role, which=which)
 
     @property
     def image(self):
@@ -261,11 +292,12 @@ class Lab:
 
     # ---------------------------------------------------------------- flows and runs
     def flow(self, prompt: str | None = None, **kw) -> FlowBuilder:
-        """The model's default flow. Keyword arguments go to the prompt box (system, prefill, chat, images) or the sampler
-        (max_new_tokens, temperature, top_k, top_p, seed)."""
+        """The model's default flow. Keyword arguments go to the prompt box (system, prefill, chat, thinking,
+        images, literal_content, add_bos) or the sampler (max_new_tokens, min_new_tokens, ignore_eos, temperature,
+        top_k, top_p, seed). Set max_new_tokens=0 for a single prompt forward pass without a decode step."""
         fb = FlowBuilder(self.plugin.default_flow(self.info))
         pk = {k: kw.pop(k) for k in ("system", "prefill", "chat", "thinking", "negative_prompt", "history", "images",
-                                     "literal_content") if k in kw}
+                                     "literal_content", "add_bos") if k in kw}
         if prompt is not None or pk:
             fb.prompt(prompt=prompt, **pk)
         if kw:
@@ -279,7 +311,8 @@ class Lab:
     def run(self, flow_or_prompt=None, keep: bool = True, **kw) -> RunResult:
         """Run a flow (FlowBuilder or flow dict) or just a prompt. Returns a RunResult.
 
-        Keyword arguments as for lab.flow (system, max_new_tokens, temperature, ...), plus what the run records
+        Keyword arguments as for lab.flow (system, max_new_tokens, min_new_tokens, ignore_eos, temperature, ...;
+        max_new_tokens=0 runs a single prompt forward pass without decoding), plus what the run records
         (FlowBuilder.capture): attn_budget_mb, neuron_budget_mb, parts_budget_mb, expert_budget_mb, attn_layers,
         attn_queries. These also apply to a FlowBuilder or flow dict without changing it.
         keep=False: don't add the run to lab.runs (loops over many runs then hold no captures after each result is
@@ -290,6 +323,10 @@ class Lab:
             flow = flow_or_prompt.to_dict() if isinstance(flow_or_prompt, FlowBuilder) else flow_or_prompt
             if cap or kw:                                               # on a copy: the caller's flow is unchanged
                 fb = FlowBuilder(flow)
+                pk = {k: kw.pop(k) for k in ("prompt", "system", "prefill", "chat", "thinking", "negative_prompt",
+                                             "history", "images", "literal_content", "add_bos") if k in kw}
+                if pk:
+                    fb.prompt(**pk)
                 if kw:
                     fb.sampler(**kw)
                 flow = (fb.capture(**cap) if cap else fb).to_dict()
@@ -314,6 +351,54 @@ class Lab:
         if keep:
             self._remember(r)
         return r
+
+    @torch.no_grad()
+    def run_batch(self, items: list, keep: bool = False, **kw) -> list[RunResult]:
+        """Run a batch of prompts, FlowBuilders, or flow dicts in lockstep one block at a time.
+        Each block's weights are streamed to the compute device once across the entire batch (`W.hold_device()`),
+        making multi-prompt and multi-intervention sweeps orders of magnitude faster under cpu/disk offloading."""
+        if not items:
+            return []
+        if self.family != "causal_lm" or not hasattr(self.adapter, "run_batch"):
+            return [self.run(it, keep=keep, **kw) for it in items]
+        from .flow import CAPTURE_KEYS
+        flows, plans, prefixes, sources_list = [], [], [], []
+        for it in items:
+            item_kw = dict(kw)
+            cap = {k: item_kw.pop(k) for k in CAPTURE_KEYS if k in item_kw}
+            if isinstance(it, (FlowBuilder, dict)):
+                fl = it.to_dict() if isinstance(it, FlowBuilder) else it
+                if cap or item_kw:
+                    fb = FlowBuilder(fl)
+                    pk = {k: item_kw.pop(k) for k in ("prompt", "system", "prefill", "chat", "thinking",
+                                                      "negative_prompt", "history", "images", "literal_content",
+                                                      "add_bos") if k in item_kw}
+                    if pk:
+                        fb.prompt(**pk)
+                    if item_kw:
+                        fb.sampler(**item_kw)
+                    fl = (fb.capture(**cap) if cap else fb).to_dict()
+            else:
+                fb = self.flow(it, **item_kw)
+                fl = (fb.capture(**cap) if cap else fb).to_dict()
+            pl = compile_flow(fl, self.info)
+            pr = interp.load_prefixes(pl, self.adapter, self._state()) if pl.params.get("prefix_cache") else None
+            src = interp.resolve_sources(pl, self._captures_of)
+            pl.sources = src
+            flows.append(fl)
+            plans.append(pl)
+            prefixes.append(pr)
+            sources_list.append(src)
+        raw_results = self.adapter.run_batch(plans, prefixes=prefixes, sources_list=sources_list)
+        out: list[RunResult] = []
+        for pl, res, fl in zip(plans, raw_results, flows):
+            r = RunResult(self, pl, res, fl)
+            for note in r.notes:
+                warnings.warn(note, RuntimeWarning, stacklevel=2)
+            if keep:
+                self._remember(r)
+            out.append(r)
+        return out
 
     # ---------------------------------------------------------------- the runs this Lab keeps
     def _remember(self, r: RunResult) -> None:
@@ -395,12 +480,20 @@ class Lab:
                 "capture": capture, "weights": W.describe()}
 
     # ---------------------------------------------------------------- tokens
-    def tokenize(self, text: str, chat: bool = False, parse_special: bool = True) -> dict:
+    def tokenize(self, text: str, chat: bool = False, parse_special: bool = True, add_bos: bool | None = None) -> dict:
         """parse_special=False: control-token text in `text` (e.g. "<|endoftext|>") is read as plain characters."""
+        want_bos = (not chat and bool(getattr(self.adapter.tok, "add_bos", False))) if add_bos is None else bool(add_bos)
         if not parse_special and not chat:
-            ids = self.adapter.tok.encode(text, parse_special=False)
+            ids = self.adapter.tok.encode(text, add_special=want_bos, parse_special=False)
             return {"ids": ids, "pieces": [self.adapter.tok.piece(i) for i in ids]}
-        return interp.tokenize(self.adapter, text, chat, literal_content=not parse_special)
+        return interp.tokenize(self.adapter, text, chat, add_bos=want_bos, literal_content=not parse_special)
+
+    def find_span(self, prompt: str, substring: str, chat: bool = True, role: str | None = None,
+                  which: int = -1, **kw) -> range:
+        """Token range(start, end) covering `substring` inside `prompt` as tokenized by this model."""
+        fb = self.flow(prompt, chat=chat, **kw)
+        plan = self.plan(fb)
+        return self.adapter.find_span(plan.params, substring, role=role, which=which)
 
     def decode(self, ids: list[int]) -> str:
         return self.adapter.tok.decode(ids)
@@ -411,25 +504,29 @@ class Lab:
 
     # ---------------------------------------------------------------- steering vectors
     def vector_from_runs(self, a: RunResult, b: RunResult, block: int, hook: str = "resid_post", token="last",
-                         name: str = "") -> dict:
-        """a − b at one block, saved to the vector library. Use it with flow.steer(block, vector, value)."""
+                         name: str = "", persist: bool = True) -> dict:
+        """a − b at one block, saved to the vector library (or kept in memory with persist=False).
+        Use it with flow.steer(block, vector, value)."""
         v = interp.vector_from_runs(a.captures, b.captures, block, hook, token)
         return interp.VECTORS.save(v, name or f"{a.id} − {b.id} @ {block}",
-                                   {"model_id": self.model_id, "source": "runs", "hook": hook, "pos": block, "token": str(token)})
+                                   {"model_id": self.model_id, "source": "runs", "hook": hook, "pos": block, "token": str(token)},
+                                   persist=persist)
 
-    def vector_from_word(self, word: str, minus: str = "", name: str = "") -> dict:
+    def vector_from_word(self, word: str, minus: str = "", name: str = "", persist: bool = True) -> dict:
         v, meta = interp.vector_from_word(self.adapter, word, minus)
         return interp.VECTORS.save(v, name or (f"“{meta['word']}”" + (f" − “{meta['minus']}”" if minus else "")),
-                                   {"model_id": self.model_id, "source": "word", **meta})
+                                   {"model_id": self.model_id, "source": "word", **meta},
+                                   persist=persist)
 
-    def concept_vector(self, word: str, block: int, name: str = "", flow=None) -> dict:
+    def concept_vector(self, word: str, block: int, name: str = "", flow=None, persist: bool = True) -> dict:
         """Activation on "Tell me about <word>." minus the average over unrelated words, at one block; saved to
         the vector library (introspect.concept_vectors)."""
         from . import introspect
         cv = introspect.concept_vectors(self.adapter, self.plan(flow or self.flow("x")), [word])
         return interp.VECTORS.save(cv["vectors"][word][block], name or f"concept: {word} @#{block}",
                                    {"model_id": self.model_id, "source": "concept", "word": word, "pos": block,
-                                    "hook": "resid_post", "resid_norm": round(cv["resid_norm"][block], 3)})
+                                    "hook": "resid_post", "resid_norm": round(cv["resid_norm"][block], 3)},
+                                   persist=persist)
 
     @torch.no_grad()
     def inject(self, concepts: list[str], blocks: list[int], strengths: list[float] = (0.1, 0.2, 0.4),
@@ -514,10 +611,12 @@ class Lab:
             pass
         return out
 
-    def save_vector(self, v: torch.Tensor, name: str = "") -> dict:
-        return interp.VECTORS.save(v, name, {"model_id": self.model_id, "source": "python"})
+    def save_vector(self, v: torch.Tensor, name: str = "", persist: bool = True) -> dict:
+        return interp.VECTORS.save(v, name, {"model_id": self.model_id, "source": "python"}, persist=persist)
 
     def load_vector(self, vector) -> torch.Tensor:
+        if isinstance(vector, torch.Tensor):
+            return vector
         return interp.VECTORS.load(vector["id"] if isinstance(vector, dict) else vector)[0]
 
     # ---------------------------------------------------------------- weights: LoRA and quantization

@@ -40,12 +40,13 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
     if p and p0:
         d = _diff(p["data"], p0["data"], {"prompt": "prompt", "system": "system", "prefill": "prefill",
                                          "use_chat_template": "chat", "thinking": "thinking", "negative_prompt": "negative_prompt",
-                                         "history": "history"})
+                                         "history": "history", "literal_content": "literal_content", "add_bos": "add_bos"})
         if d:
             out.append(f"{var}.prompt({_kw(d)})")
     s, s0 = _node(flow, "sampler"), _node(default, "sampler")
     if s and s0:
-        d = _diff(s["data"], s0["data"], {"max_new_tokens": "max_new_tokens", "temperature": "temperature",
+        d = _diff(s["data"], s0["data"], {"max_new_tokens": "max_new_tokens", "min_new_tokens": "min_new_tokens",
+                                         "ignore_eos": "ignore_eos", "temperature": "temperature",
                                          "top_k": "top_k", "top_p": "top_p", "seed": "seed",
                                          "rope_step_stride": "rope_step_stride", "rope_prompt_scale": "rope_prompt_scale",
                                          "rope_gen_start": "rope_gen_start", "kv_zero": "kv_zero"})
@@ -108,7 +109,8 @@ def flow_lines(flow: dict, default: dict, var: str = "flow", refs: dict | None =
                               {"hook": "hook", "positions": "positions", "src_positions": "src_positions"})
                 out.append(f"{var}.patch({tgt}, {src_ref}{', ' + _kw(extra) if extra else ''})")
             elif op == "steer":
-                extra = _diff(d, {"hook": "resid_post", "positions": "all"}, {"value": "value", "hook": "hook", "positions": "positions"})
+                extra = _diff(d, {"hook": "resid_post", "positions": "all", "scale": "raw"},
+                              {"value": "value", "hook": "hook", "positions": "positions", "scale": "scale"})
                 out.append(f"{var}.steer({tgt}, {src_ref}{', ' + _kw(extra) if extra else ''})")
             elif op == "project_out":
                 extra = _diff(d, {"hook": "resid_post", "positions": "all", "value": 1.0}, {"value": "value", "hook": "hook", "positions": "positions"})

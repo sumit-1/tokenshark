@@ -135,6 +135,7 @@ class WeightStore:
         self._pth: dict[str, torch.Tensor] = {}
         self._resident: dict[str, torch.Tensor] = {}
         self._held: dict[str, torch.Tensor] | None = None
+        self._held_device: dict[str, torch.Tensor] | None = None
         self._lora = None                   # optional LoRAOverlay attached to this store
         self._quant = None                  # optional QuantOverlay (rounds block weights to a few bits)
         self._extra: dict[str, torch.Tensor] = {}   # weights that are not in the files: added blocks, adapter layers
@@ -315,6 +316,18 @@ class WeightStore:
         finally:
             self._held = outer
 
+    @contextlib.contextmanager
+    def hold_device(self, keep: dict | None = None):
+        """Inside this block, weights already moved to `self.device` in `self.dtype` are cached until exit.
+        Used by lockstep batch execution (`run_batch`) so a block's weights are streamed to the GPU once
+        across an entire batch of prompts or intervention flows, then freed before the next block."""
+        outer = self._held_device
+        self._held_device = keep if keep is not None else ({} if outer is None else outer)
+        try:
+            yield
+        finally:
+            self._held_device = outer
+
     def compact(self, name: str) -> torch.Tensor:
         """The weight in its stored dtype (e.g. bf16), CPU unless it is already resident on the device."""
         t = self._resident.get(name)
@@ -327,6 +340,8 @@ class WeightStore:
         self._lora = lora_overlay
 
     def __call__(self, name: str) -> torch.Tensor:
+        if self._held_device is not None and name in self._held_device:
+            return self._held_device[name]
         t = self._extra.get(name) if self._extra else None
         if t is None:
             t = self._resident.get(name)
@@ -351,6 +366,8 @@ class WeightStore:
             out = self._lora.apply(name, out)
         if self._quant is not None:
             out = self._quant.apply(name, out)
+        if self._held_device is not None:
+            self._held_device[name] = out
         return out
 
     def rows(self, name: str, ids: list[int]) -> torch.Tensor:

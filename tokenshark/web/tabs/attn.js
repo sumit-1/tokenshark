@@ -1,4 +1,4 @@
-import { GET, POST, S, btn, el, flow, heat, registerTab, toast } from '../core.js'
+import { GET, POST, S, btn, el, extEnabled, flow, heat, registerTab, toast } from '../core.js'
 import { esc } from '../flow.js'
 import { addIntervention } from '../ui/flowedit.js'
 import { renderTab } from '../ui/tabs.js'
@@ -10,9 +10,13 @@ export async function renderAttn(p) {
   const sched = S.run.plan.schedule, nodes = S.run.plan.schedule_nodes
   const bar = el('div', { className: 'row' })
 
+  if (!extEnabled('attn_traceback') && S.attnView === 'traceback') S.attnView = 'matrix'
   const modeMatrix = btn('Attention Matrix', () => { S.attnView = 'matrix'; renderTab() }, S.attnView === 'matrix' ? 'primary mini' : 'mini ghost')
-  const modeTrace = btn('Previous-Token Attribution (All Layers × Heads)', () => { S.attnView = 'traceback'; renderTab() }, S.attnView === 'traceback' ? 'primary mini' : 'mini ghost')
-  bar.append(modeMatrix, modeTrace)
+  bar.append(modeMatrix)
+  if (extEnabled('attn_traceback')) {
+    const modeTrace = btn('Previous-Token Attribution (All Layers × Heads)', () => { S.attnView = 'traceback'; renderTab() }, S.attnView === 'traceback' ? 'primary mini' : 'mini ghost')
+    bar.append(modeTrace)
+  }
 
   if (S.attnView === 'traceback') {
     p.appendChild(bar)

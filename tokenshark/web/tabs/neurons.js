@@ -48,6 +48,7 @@ S.neu = {
   abK: 10,
   abStrict: true,
   abSystem: DEFAULT_SYS,
+  abPrefill: '',
   abChat: true,
   abSetA: DEFAULT_SET_A,
   abSetB: DEFAULT_SET_B,
@@ -242,8 +243,10 @@ function renderABHunt(p, st, nL) {
   kIn.oninput = () => { st.abK = +kIn.value }
   const strictChk = el('input', { type: 'checkbox', checked: st.abStrict })
   strictChk.onchange = () => { st.abStrict = strictChk.checked }
-  const sysIn = el('input', { value: st.abSystem, style: 'width:260px', placeholder: 'System prompt' })
+  const sysIn = el('input', { value: st.abSystem, style: 'width:240px', placeholder: 'System prompt' })
   sysIn.oninput = () => { st.abSystem = sysIn.value }
+  const preIn = el('input', { value: st.abPrefill || '', style: 'width:260px', placeholder: 'Optional assistant prefill (decision point)' })
+  preIn.oninput = () => { st.abPrefill = preIn.value }
 
   const out = el('div')
   const runBtn = btn('Compare Group A vs Group B', async () => {
@@ -263,6 +266,7 @@ function renderABHunt(p, st, nL) {
         strict: st.abStrict,
         through: st.through || 0,
         system: st.abSystem,
+        prefill: st.abPrefill || undefined,
         chat: st.abChat,
       })
       await followTask(start, r => {
@@ -282,6 +286,7 @@ function renderABHunt(p, st, nL) {
     labelled('Decode words with', throughSelect(st)),
     labelled('Consistent across A', strictChk),
     labelled('System', sysIn),
+    labelled('Prefill', preIn),
     runBtn,
   )
   p.appendChild(topRow)
@@ -374,6 +379,7 @@ function drawABResult(out, st) {
         renderTab()
       }, 'mini'),
       btn('Zero (0)', () => addClampToGraph(n.pos, n.index, 'zero', 0), 'mini'),
+      btn(`Clamp Mean B (${n.mean_b})`, () => addClampToGraph(n.pos, n.index, 'value', n.mean_b), 'mini'),
       btn('Clamp +10', () => addClampToGraph(n.pos, n.index, 'value', 10), 'mini'),
     )
     tr.appendChild(td)

@@ -242,3 +242,140 @@ def test_bench_reports_speed(lab):
     b = lab.bench(prompt_tokens=32, new_tokens=4)
     assert b["prompt_tokens"] >= 32 and b["new_tokens"] == 4
     assert b["prefill_tok_s"] > 0 and b["decode_tok_s"] > 0 and b["capture"] is False
+
+
+# ---------------------------------------------------------------- BOS raw mode, ignore_eos, find_span, steer scale, thinking, run_batch
+def test_raw_mode_bos_and_missing_bos_note(tmp_path):
+    import json
+    d = tmp_path / "bos_model"
+    make_llm(d, "qwen2")
+    cfg_path = d / "tokenizer_config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["bos_token"] = "<|endoftext|>"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    bos_lab = Lab(str(d), device="cpu", dtype="fp32", policy="device")
+    assert bos_lab.adapter.tok.add_bos is True
+    assert bos_lab.adapter.tok.bos_id == 0
+
+    r_with = bos_lab.run("The capital of France is", chat=False, max_new_tokens=1)
+    assert r_with.token_ids[0] == bos_lab.adapter.tok.bos_id
+    assert not any("without" in n for n in r_with.notes)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        r_without = bos_lab.run("The capital of France is", chat=False, add_bos=False, max_new_tokens=1)
+    assert r_without.token_ids[0] != bos_lab.adapter.tok.bos_id
+    assert any("without" in n and "BOS" in n for n in r_without.notes)
+    assert any("BOS" in str(x.message) for x in w)
+
+
+def test_ignore_eos_min_new_tokens_and_zero_decode(lab):
+    r0 = lab.run("The capital of France is", chat=False, max_new_tokens=0)
+    assert len(r0.new_token_ids) == 0
+    assert r0.resid(0).shape[0] == len(r0.token_ids)
+
+    eos_id = list(lab.adapter.cfg.eos_ids)[0]
+    fb = lab.flow("The capital of France is", chat=False, max_new_tokens=5, ignore_eos=True)
+    fb.code("sampler", f"token = {eos_id}")
+    r_ig = lab.run(fb)
+    assert len(r_ig.new_token_ids) == 5
+    assert all(t == eos_id for t in r_ig.new_token_ids)
+
+    fb_min = lab.flow("The capital of France is", chat=False, max_new_tokens=5, min_new_tokens=3, ignore_eos=False)
+    fb_min.code("sampler", f"token = {eos_id}")
+    r_min = lab.run(fb_min)
+    assert len(r_min.new_token_ids) >= 3
+
+
+def test_substring_find_span_and_range_positions(lab):
+    prompt = "The capital of France is Paris. ! ! ! Sure here"
+    suffix = "! ! ! Sure here"
+    sp = lab.find_span(prompt, suffix, chat=False)
+    assert isinstance(sp, range) and len(sp) > 0
+    r = lab.run(prompt, chat=False, max_new_tokens=1)
+    assert r.find(suffix) == sp
+    dec = lab.decode(r.token_ids[sp.start:sp.stop]).strip()
+    assert dec == suffix
+
+    fb = lab.flow(prompt, chat=False, max_new_tokens=1)
+    fb.attn_gain(1, keys=sp, value=0.0, heads=[0, 1])
+    r_gain = lab.run(fb)
+    assert torch.all(r_gain.attention(1)[:2, :, sp] == 0)
+
+
+def test_ephemeral_tensor_vectors_and_steer_scales(lab, tmp_path, monkeypatch):
+    from tokenshark import interp
+    from tokenshark.extensions import steering
+    vec_dir = tmp_path / "vecs"
+    vec_dir.mkdir()
+    monkeypatch.setattr(steering, "VEC_DIR", vec_dir)
+    monkeypatch.setattr(interp, "VEC_DIR", vec_dir)
+
+    ra = lab.run("The capital of France is", chat=False, max_new_tokens=0)
+    rb = lab.run("The capital of Japan is", chat=False, max_new_tokens=0)
+    va = ra.resid(1)[-1]
+    vb = rb.resid(1)[-1]
+    diff = va - vb
+
+    # Direct tensor and persist=False write zero files to disk
+    meta_ephem = lab.save_vector(diff, "ephem_test", persist=False)
+    assert meta_ephem["ephemeral"] is True
+    assert list(vec_dir.glob("*.safetensors")) == []
+
+    # scale='raw': B + 1.0 * (A - B) == A at block 1
+    fb_raw = lab.flow("The capital of Japan is", chat=False, max_new_tokens=0)
+    fb_raw.steer(1, diff, value=1.0, positions="last", scale="raw")
+    r_raw = lab.run(fb_raw)
+    assert list(vec_dir.glob("*.safetensors")) == []
+    assert torch.allclose(r_raw.resid(1)[-1], va, atol=1e-4)
+
+    # scale='unit': adds value * (diff / ||diff||)
+    fb_unit = lab.flow("The capital of Japan is", chat=False, max_new_tokens=0)
+    fb_unit.steer(1, diff, value=2.5, positions="last", scale="unit")
+    r_unit = lab.run(fb_unit)
+    u = diff / diff.norm()
+    assert torch.allclose(r_unit.resid(1)[-1], vb + 2.5 * u, atol=1e-4)
+
+    # scale='resid': adds value * ||vb|| * (diff / ||diff||)
+    fb_res = lab.flow("The capital of Japan is", chat=False, max_new_tokens=0)
+    fb_res.steer(1, diff, value=0.25, positions="last", scale="resid")
+    r_res = lab.run(fb_res)
+    assert torch.allclose(r_res.resid(1)[-1], vb + 0.25 * vb.norm() * u, atol=1e-4)
+
+
+def test_thinking_channel_split_gemma4_and_think_tags(lab):
+    tok = lab.adapter.tok
+    ids_think = tok.encode("<think>Let me calculate 2 + 2.</think>The answer is 4.", add_special=False)
+    th, ans = tok.split_thinking(ids_think)
+    assert th == "Let me calculate 2 + 2."
+    assert ans == "The answer is 4."
+
+    ids_gemma = tok.encode("<|channel>thought\nChecking refund policy.<channel|>Yes, approved.", add_special=False)
+    th_g, ans_g = tok.split_thinking(ids_gemma)
+    assert th_g == "Checking refund policy."
+    assert ans_g == "Yes, approved."
+
+    r = lab.run("The capital of France is", chat=False, max_new_tokens=2)
+    assert isinstance(r.thought, str) and isinstance(r.answer, str)
+    assert r.answer == r.text.strip()
+
+
+def test_run_batch_lockstep_and_hold_device(lab):
+    prompts = [
+        "The capital of France is",
+        "The capital of Japan is",
+        "A red fox sat in the",
+    ]
+    seq_runs = [lab.run(p, chat=False, max_new_tokens=2, keep=False) for p in prompts]
+    batch_runs = lab.run_batch(prompts, chat=False, max_new_tokens=2, keep=False)
+    assert len(batch_runs) == len(seq_runs)
+    for rs, rb in zip(seq_runs, batch_runs):
+        assert rs.token_ids == rb.token_ids
+        assert torch.allclose(rs.resid(2), rb.resid(2), atol=1e-4)
+
+    W = lab.adapter.model.W
+    with W.hold_device() as held:
+        _ = W("model.layers.0.mlp.down_proj.weight")
+        assert "model.layers.0.mlp.down_proj.weight" in W._held_device
+    assert W._held_device is None
+

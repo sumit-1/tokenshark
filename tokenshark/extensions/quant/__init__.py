@@ -73,6 +73,8 @@ class QuantPlugin(FeaturePlugin):
     id = "quant"
     name = "Weight Quantization Explorer"
     version = "0.2.0"
+    view_type = "playbook"
+    default_enabled = False
     description = "Simulated INT8 / INT4 / INT2 per-layer weight quantization and side-by-side bit-width comparison."
     families = ("causal_lm",)
     router = router

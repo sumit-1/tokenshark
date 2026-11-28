@@ -18,6 +18,7 @@ export const LLM_HOOK_LABELS = [
   ['kv_k', 'kv_k · all cached keys in this block\'s KV cache'],
   ['kv_v', 'kv_v · all cached values in this block\'s KV cache'],
   ['rope', 'rope · rotary position angles (zero / scale / jitter token positions)'],
+  ['attn_probs', 'attn_probs · attention weights after softmax (scale / zero sink keys per head)'],
   ['attn_heads', 'attn_heads · each attention head\'s output'],
   ['attn_out', 'attn_out · what attention writes to the stream'],
   ['router', 'router · MoE: the router\'s score for each expert (ban / force experts, patch the routing)'],
@@ -53,7 +54,10 @@ export const FIELDS = {
        ['prefill', 'Assistant prefill (forced tokens)', 'textarea'], ['use_chat_template', 'Use chat template', 'checkbox'],
        ['thinking', 'Let the model think first (<think>…</think>, models that support it)', 'checkbox'],
        ['add_bos', 'Add BOS (no template)', 'checkbox']],
-  sampler: () => [['max_new_tokens', 'Max new tokens', 'number'], ['temperature', 'Temperature (0 = greedy)', 'number'],
+  sampler: () => [['max_new_tokens', 'Max new tokens (0 = single prompt forward pass)', 'number'],
+    ['min_new_tokens', 'Min new tokens (suppress EOS before this count)', 'number'],
+    ['ignore_eos', 'Ignore EOS (keep generating past end-of-turn up to max_new_tokens)', 'checkbox'],
+    ['temperature', 'Temperature (0 = greedy)', 'number'],
     ['top_k', 'Top-k (0 = off)', 'number'], ['top_p', 'Top-p (1 = off)', 'number'], ['seed', 'Seed', 'number'],
     ['rope_step_stride', 'RoPE clock speed while generating (positions per new token: 1 = normal, 0 = frozen, 50 = fast-forward)', 'number'],
     ['rope_prompt_scale', 'RoPE clock speed over the prompt (1 = normal, 0 = every prompt token at position 0)', 'number']],
@@ -85,7 +89,12 @@ export const FIELDS = {
     if (op === 'patch') f.push(['ref', 'Copy from run (the "clean" run)', 'select', [['', '- choose a run -'], ...keepRef(runs, n.data.ref)]],
       ['src_positions', 'Take the source run\'s token (empty = same token index; or last, or a number)', 'text'])
     if (op === 'steer' || op === 'project_out') f.push(['ref', 'Vector direction', 'select', [['', '- choose a vector -'], ...keepRef((S.vectors || []).map(v => [v.id, `${v.name} · length ${v.norm}`]), n.data.ref)]],
-      ['value', op === 'project_out' ? 'Projection strength (1 = erase completely, 2 = reflect)' : 'Strength (multiplies the vector; negative pushes the other way)', 'number'])
+      ['value', op === 'project_out' ? 'Projection strength (1 = erase completely, 2 = reflect)' : 'Strength (multiplies the vector; negative pushes the other way)', 'number'],
+      ...(op === 'steer' ? [['scale', 'Vector scaling', 'select', [
+        ['raw', 'raw · add value × vector as-is (B + 1.0*(A-B) = A)'],
+        ['unit', 'unit · normalize vector to unit length first (value × v/||v||)'],
+        ['resid', 'resid · fraction of token residual norm (value × ||resid|| × v/||v||)'],
+      ]]] : []))
     if (op === 'clamp') f.push(['clamp', 'Pin to', 'select', [['max', 'max · the largest value it reached'], ['min', 'min · the smallest value it reached'], ['value', 'value · the number below']]],
       ['value', n.data.clamp === 'value' ? 'Value' : 'Multiplier (1 = exactly its max / min, 5 = five times that)', 'number'],
       ['ref', 'Max / min measured in run (empty = this run so far)', 'select', [['', '- this run so far -'], ...keepRef(runs, n.data.ref)]])

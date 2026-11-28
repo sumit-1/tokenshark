@@ -161,8 +161,8 @@ class CausalLMPlugin(ModelPlugin):
     run_loop = "token_stepper"
 
     ui_schema = {
-        "tabs": ["output_text", "debug_text", "lens", "cloud", "attn", "experts", "neurons", "guardrail", "tokenizer",
-                 "sampler", "kv", "rope", "lora", "quant", "train", "runs"],
+        "tabs": ["output_text", "debug_text", "lens", "cloud", "attn", "experts", "neurons", "diag", "concepts",
+                 "sinks", "playbooks", "guardrail", "tokenizer", "sampler", "kv", "rope", "lora", "quant", "train", "runs"],
         "palette_actions": ["intervention", "fork_head", "block_kv", "duplicate_block", "bypass_block", "kv_prefix", "code"],
         "train": ["tiny_text", "adapt"],
         "modality": "text",

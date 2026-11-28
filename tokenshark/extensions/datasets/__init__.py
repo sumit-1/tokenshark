@@ -439,6 +439,8 @@ class DatasetsPlugin(FeaturePlugin):
     id = "datasets"
     name = "Reasoning Steps (MultiArith CoT) & Custom Datasets"
     version = "0.2.0"
+    view_type = "playbook"
+    default_enabled = True
     description = "2,000+ step-by-step arithmetic reasoning (MultiArith CoT) problems and custom JSONL/CSV/text dataset upload with Question/Answer split and system prompt."
     families = ("causal_lm",)
     router = router

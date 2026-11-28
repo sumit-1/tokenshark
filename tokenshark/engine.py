@@ -235,12 +235,21 @@ def _op(part, iv, ctx, token_dim, idx, nsel, x, full_part=None):
         # Steering: push the activation along one fixed direction, by the same amount at every selected token.
         if src is None:
             return None
-        v = src.to(part.device, part.dtype)
+        v = src.to(part.device, torch.float32)
         if nsel is not None:
             v = v[nsel]
         if v.shape[-1] != part.shape[-1]:
             raise ValueError(f"The steering vector has {v.shape[-1]} dimensions but this activation has {part.shape[-1]}.")
-        return part + iv.value * v
+        sc = (getattr(iv, "scale", None) or "raw").strip().lower()
+        if sc == "unit":
+            v_unit = v / v.norm().clamp(min=1e-8)
+            return (part.float() + iv.value * v_unit).to(part.dtype)
+        if sc == "resid":
+            v_unit = v / v.norm().clamp(min=1e-8)
+            pf = part.float()
+            rnorm = pf.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            return (pf + iv.value * rnorm * v_unit).to(part.dtype)
+        return part + iv.value * v.to(part.dtype)
     if iv.op == "project_out":
         # Orthogonal projection / directional ablation: remove (value=1) or scale the component along direction v.
         if src is None:

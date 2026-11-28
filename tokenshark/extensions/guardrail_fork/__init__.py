@@ -559,6 +559,8 @@ class GuardrailForkPlugin(FeaturePlugin):
     id = "guardrail_fork"
     name = "Center-Layer Guardrail Fork"
     version = "0.2.0"
+    view_type = "playbook"
+    default_enabled = False
     description = "Fork a middle transformer block into a lightweight classifier head (e.g. PowerShell vs Python detector) to monitor or gate generation mid-network."
     families = ("causal_lm",)
     router = router

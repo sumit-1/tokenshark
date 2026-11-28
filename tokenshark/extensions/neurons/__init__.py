@@ -70,6 +70,8 @@ def neuron_words(adapter, layer: int, idx: list[int], k: int = 8, through: int =
                  pos: int | None = None, token: int = -1, ref_resid: torch.Tensor | None = None) -> list[dict]:
     m = adapter.model
     wd = m.W(f"model.layers.{layer}.mlp.down_proj.weight")[:, torch.tensor(idx, device=m.device)].float().T
+    if getattr(m, "sandwich", False):
+        wd = wd * m.norm_w(f"model.layers.{layer}.post_feedforward_layernorm.weight").float()
     sched = schedule or list(range(m.cfg.n_layers))
     p = pos if pos is not None else (sched.index(layer) if layer in sched else layer)
     S = len(sched)
@@ -95,10 +97,14 @@ def neuron_words(adapter, layer: int, idx: list[int], k: int = 8, through: int =
             if lq in getattr(m, "moe_layers", {}):
                 continue
             pre = f"model.layers.{lq}."
-            h2 = rms_norm(x_all, m.norm_w(pre + "post_attention_layernorm.weight"), m.cfg.eps)
+            pre_norm_name = "pre_feedforward_layernorm.weight" if getattr(m, "sandwich", False) else "post_attention_layernorm.weight"
+            h2 = rms_norm(x_all, m.norm_w(pre + pre_norm_name), m.cfg.eps)
             gate = h2 @ m.W(pre + "mlp.gate_proj.weight").T
             up = h2 @ m.W(pre + "mlp.up_proj.weight").T
-            x_all = x_all + (m.act(gate) * up) @ m.W(pre + "mlp.down_proj.weight").T
+            mlp_out = (m.act(gate) * up) @ m.W(pre + "mlp.down_proj.weight").T
+            if getattr(m, "sandwich", False):
+                mlp_out = rms_norm(mlp_out, m.norm_w(pre + "post_feedforward_layernorm.weight"), m.cfg.eps)
+            x_all = x_all + mlp_out
         h_out = m.final_norm(x_all).float().cpu()
         wd = (h_out[1:] - h_out[:1]) / alpha
     else:
@@ -426,7 +432,8 @@ def search_neurons_by_words(adapter, schedule: list[int], promote: list[str] | s
         if layer in getattr(m, "moe_layers", {}):
             return None
         wd = m.W(f"model.layers.{layer}.mlp.down_proj.weight").float()
-        push = (wd.T @ d_dev).cpu()
+        d_blk = d_dev * m.norm_w(f"model.layers.{layer}.post_feedforward_layernorm.weight").float() if getattr(m, "sandwich", False) else d_dev
+        push = (wd.T @ d_blk).cpu()
         n_take = min(top_n, int(push.shape[0]))
         top = push.topk(n_take)
         idx_list = top.indices.tolist()
@@ -813,6 +820,8 @@ class NeuronsPlugin(FeaturePlugin):
     id = "neurons"
     name = "MLP Neuron Explorer & Contrastive Analysis"
     version = "0.2.0"
+    view_type = "playbook"
+    default_enabled = True
     description = "Inspect per-token MLP neuron activations, compare Group A vs Group B activity, project unembeddings, and wire/clamp neurons."
     families = ("causal_lm",)
     router = router

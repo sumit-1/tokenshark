@@ -65,13 +65,16 @@ class FeaturePlugin:
     name: str = "Base Extension"
     version: str = "0.1.0"
     summary: str = ""
+    description: str = ""
     category: str = "analysis"                 # analysis | intervention | training | guardrail | dataset
+    view_type: str = "playbook"                # playbook | diagnose
     applies_to: tuple[str, ...] = ("causal_lm",)
     default_enabled: bool = True
 
     # UI integration: tabs, palette buttons, train sections, and optional frontend JS module
     tabs: list[str] = []
-    palette_actions: list[str] = []
+    ui_tabs: tuple | list = ()
+    palette_actions: list | tuple = []
     train_sections: list[str] = []
     web_dir: Path | None = None
     js_entry: str | None = None                # relative to web_dir, mounted at /ext/<id>/<js_entry>
@@ -99,16 +102,23 @@ class FeaturePlugin:
                 js_url = cls.js_entry
             else:
                 js_url = f"/ext/{cls.id}/{cls.js_entry}"
+        desc = cls.description or cls.summary or ""
+        raw_tabs = list(cls.tabs) if cls.tabs else list(cls.ui_tabs or ())
+        tab_ids = [t["id"] if isinstance(t, dict) else str(t) for t in raw_tabs]
+        fams = list(getattr(cls, "families", None) or cls.applies_to)
         return {
             "id": cls.id,
             "name": cls.name,
             "version": cls.version,
-            "summary": cls.summary,
+            "summary": desc,
+            "description": desc,
             "category": cls.category,
-            "applies_to": list(cls.applies_to),
+            "view_type": cls.view_type,
+            "applies_to": fams,
             "enabled": cls.is_enabled(),
             "default_enabled": cls.default_enabled,
-            "tabs": list(cls.tabs),
+            "tabs": tab_ids,
+            "ui_tabs": raw_tabs,
             "palette_actions": list(cls.palette_actions),
             "train_sections": list(cls.train_sections),
             "js_url": js_url,

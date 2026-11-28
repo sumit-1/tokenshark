@@ -70,6 +70,7 @@ class Intervention:
     source_neurons: str = "" # wire: detector neuron(s) whose relu(act - threshold) drives the target `neurons`
     threshold: float = 0.0   # wire: activation threshold subtracted before ReLU
     clamp: str = "max"       # clamp: max | min | value
+    scale: str = "raw"       # steer: raw (as-is) | unit (v / ||v||) | resid (||resid|| * v / ||v||)
     experts: str = "all"     # mixture-of-experts hooks (router, expert_out, mlp_neurons): all | 3 | 0:8 | 1,5 | shared
 
 
@@ -245,6 +246,8 @@ def _llm_params(nodes: dict, edges: list, find_kind, chain: list, caps: dict) ->
         use_chat_template=bool(p.get("use_chat_template", False)), thinking=bool(p.get("thinking", False)),
         literal_content=bool(p.get("literal_content", False)),
         max_new_tokens=max(0, min(512, _num(s.get("max_new_tokens"), 24, int))),
+        min_new_tokens=max(0, _num(s.get("min_new_tokens"), 0, int)),
+        ignore_eos=bool(s.get("ignore_eos", False)),
         temperature=max(0.0, _num(s.get("temperature"), 0.0)), top_k=max(0, _num(s.get("top_k"), 0, int)),
         top_p=min(1.0, max(0.0, _num(s.get("top_p"), 1.0))) or 1.0,
         seed=_num(s.get("seed"), 0, int), add_bos=bool(p.get("add_bos", True)),
@@ -675,6 +678,9 @@ def compile_flow(flow: dict, info: dict) -> Plan:
         if op == "clamp" and str(src.get("clamp") or "max") not in ("max", "min", "value"):
             err("Clamp to max, min or value.", e["source"])
             continue
+        if op == "steer" and str(src.get("scale") or "raw") not in ("raw", "unit", "resid"):
+            err("Steer scale must be 'raw', 'unit' or 'resid'.", e["source"])
+            continue
         if op == "wire":
             if hook != "mlp_neurons":
                 err("Wire connects MLP neurons: set the hook to 'mlp_neurons'.", e["source"])
@@ -710,6 +716,7 @@ def compile_flow(flow: dict, info: dict) -> Plan:
                                 source_neurons=str(src.get("source_neurons") or ""),
                                 threshold=_num(src.get("threshold"), 0.0, float),
                                 clamp=str(src.get("clamp") or "max"),
+                                scale=str(src.get("scale") or "raw"),
                                 experts=str(src.get("experts") or "all")))
         try:
             parse_index_spec(ivs[-1].neurons, 1_000_000)
@@ -789,7 +796,11 @@ def _round8(v: int) -> int:
 # Index specs ("all", "last", "a:b", "1,2,5") for token positions and diffusion steps
 # --------------------------------------------------------------------------------------
 
-def parse_index_spec(spec: str, n: int, named: dict[str, range] | None = None) -> list[int]:
+def parse_index_spec(spec: str | range | list | tuple, n: int, named: dict[str, range] | None = None) -> list[int]:
+    if isinstance(spec, range):
+        return sorted({i % n for i in spec if -n <= i < n})
+    if isinstance(spec, (list, tuple, set)):
+        return sorted({int(i) % n for i in spec if -n <= int(i) < n})
     spec = (spec or "all").strip().lower()
     if spec in ("all", "*", ""):
         return list(range(n))

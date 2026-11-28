@@ -84,6 +84,8 @@ class MoEPlugin(FeaturePlugin):
     id = "moe"
     name = "Mixture-of-Experts (MoE) Inspector"
     version = "0.2.0"
+    view_type = "diagnose"
+    default_enabled = False
     description = "Inspect MoE router usage, per-expert vocabulary projections, custom routing, and expert ablation sweeps."
     families = ("causal_lm",)
     router = router
