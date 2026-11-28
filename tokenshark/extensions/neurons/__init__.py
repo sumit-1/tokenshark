@@ -487,6 +487,20 @@ def search_neurons_by_words(adapter, schedule: list[int], promote: list[str] | s
     }
 
 
+def _match_keyword_spec(text: str, spec: str) -> bool:
+    if not spec:
+        return False
+    s = spec.strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    hay = text.lower()
+    for term in s.split("|"):
+        t = term.strip().lower()
+        if t and t in hay:
+            return True
+    return False
+
+
 def iter_neuron_batch_test(adapter, edited_plan, test_prompts: list, control_prompts: list | None = None,
                            max_new_tokens: int = 40, keyword_regex: str = r"(can't|cannot|can not|unable|not able)",
                            system: str | None = None, chat: bool | None = None, prefill: str | None = None):
@@ -499,7 +513,6 @@ def iter_neuron_batch_test(adapter, edited_plan, test_prompts: list, control_pro
     if not tests and not ctrls:
         raise ValueError("Provide at least one test or control prompt.")
 
-    pat = _re.compile(keyword_regex, _re.I) if keyword_regex else None
     total = 2 * (len(tests) + len(ctrls))
     done = 0
 
@@ -553,8 +566,8 @@ def iter_neuron_batch_test(adapter, edited_plan, test_prompts: list, control_pro
         done += 1
         e_txt = gen_one(it, True)
         done += 1
-        b_match = bool(pat.search(b_txt)) if pat else False
-        e_match = bool(pat.search(e_txt)) if pat else False
+        b_match = _match_keyword_spec(b_txt, keyword_regex)
+        e_match = _match_keyword_spec(e_txt, keyword_regex)
         base_hits += int(b_match)
         edit_hits += int(e_match)
         test_rows.append({

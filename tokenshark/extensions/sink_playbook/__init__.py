@@ -30,6 +30,55 @@ from ...server.app import _need
 
 router = APIRouter()
 
+
+def _safe_pattern_match(text: str, spec: str, *, case_insensitive: bool = True) -> bool:
+    """Safely evaluate keyword/rule patterns without compiling untrusted user strings as regular expressions."""
+    if not spec:
+        return False
+    s = spec.strip()
+    if s == r"VERIFIED\s*$":
+        return text.rstrip().endswith("VERIFIED")
+    if s == r"^[^a-z]+$":
+        return bool(text) and not any("a" <= c <= "z" for c in text)
+    if s == r"^\s*\{.*\}\s*$":
+        t = text.strip()
+        return t.startswith("{") and t.endswith("}")
+    if s == r"^[^eE]+$":
+        return bool(text) and ("e" not in text.lower())
+    if s == r"\[\[.*\]\]":
+        return "[[" in text and "]]" in text
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    hay = text.lower() if case_insensitive else text
+    for raw_term in s.split("|"):
+        term = raw_term.strip()
+        if not term:
+            continue
+        end_anchor = term.endswith(r"\s*$") or term.endswith("$")
+        if term.endswith(r"\s*$"):
+            term = term[:-4]
+        elif term.endswith("$"):
+            term = term[:-1]
+        start_anchor = term.startswith("^")
+        if start_anchor:
+            term = term[1:]
+        term = term.replace(r"\[", "[").replace(r"\]", "]").replace(r"\(", "(").replace(r"\)", ")")
+        needle = term.lower() if case_insensitive else term
+        if not needle:
+            continue
+        if start_anchor and end_anchor:
+            if hay.strip() == needle:
+                return True
+        elif start_anchor:
+            if hay.lstrip().startswith(needle):
+                return True
+        elif end_anchor:
+            if hay.rstrip().endswith(needle):
+                return True
+        elif needle in hay:
+            return True
+    return False
+
 RULE_PRESETS = {
     "verified_suffix": {
         "name": "End with VERIFIED",
@@ -233,11 +282,10 @@ def scan_suffix_sinks_and_gain(
         gain_plans.append(compile_flow(fb_g.to_dict(), info))
 
     gain_runs = adapter.run_batch(gain_plans) if gain_plans else []
-    pat = re.compile(match_regex, re.IGNORECASE) if match_regex else None
     sweep_out = []
     for lam, gr in zip(gains, gain_runs):
         out_txt = gr["outputs"].get("answer") or gr["outputs"].get("text") or ""
-        hit = bool(pat.search(out_txt)) if pat else False
+        hit = _safe_pattern_match(out_txt, match_regex, case_insensitive=True) if match_regex else False
         sweep_out.append({
             "gain": float(lam),
             "text": out_txt,
@@ -310,7 +358,6 @@ def run_attention_dilution(
     sys_txt = system_rule.strip() or pr["system"]
     q_txt = user_question.strip() or pr["question"]
     rx_txt = match_regex.strip() or pr["regex"]
-    pat = re.compile(rx_txt) if rx_txt else None
 
     ftypes = filler_types or ["noise", "repeat_the"]
     flens = sorted({int(x) for x in (filler_lengths or [0, 24, 64]) if int(x) >= 0})
@@ -399,7 +446,7 @@ def run_attention_dilution(
                 per_layer_drop[b_pos].append(base_layer_sys[b_pos] - s_sh)
 
         ans = (out.get("answer") or out.get("text") or "").strip()
-        passed = bool(pat.search(ans)) if pat else True
+        passed = _safe_pattern_match(ans, rx_txt, case_insensitive=False) if rx_txt else True
         if preset == "valid_json":
             try:
                 json.loads(ans)

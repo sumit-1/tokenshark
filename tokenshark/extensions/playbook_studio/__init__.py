@@ -32,6 +32,25 @@ from ..neurons import search_neurons_by_words
 from ..sink_playbook import run_attention_dilution, scan_suffix_sinks_and_gain
 
 router = APIRouter()
+
+
+def _safe_pattern_match(text: str, spec: str, *, case_insensitive: bool = True) -> bool:
+    """Safely evaluate keyword/rule patterns without compiling untrusted user strings as regular expressions."""
+    if not spec:
+        return False
+    s = spec.strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    hay = text.lower() if case_insensitive else text
+    for raw_term in s.split("|"):
+        term = raw_term.strip()
+        if not term:
+            continue
+        needle = term.lower() if case_insensitive else term
+        if needle and needle in hay:
+            return True
+    return False
+
 PLAYBOOK_DIR = DATA / "playbooks"
 _VAR_FULL_RE = re.compile(r"^\$(?:\{([a-zA-Z0-9_]+)\.([a-zA-Z0-9_.]+)\}|([a-zA-Z0-9_]+)\.([a-zA-Z0-9_.]+))$")
 _VAR_SUB_RE = re.compile(r"\$(?:\{([a-zA-Z0-9_]+)\.([a-zA-Z0-9_.]+)\}|([a-zA-Z0-9_]+)\.([a-zA-Z0-9_.]+))")
@@ -586,7 +605,6 @@ def execute_playbook_step(
         chat = params.get("chat", bool(info.get("has_chat_template", True)))
         sys_txt = params.get("system", "")
         rx = params.get("match_regex", "")
-        pat = re.compile(rx, re.IGNORECASE) if rx else None
 
         plans, srcs, meta = [], [], []
         for group_name, plist in (("test", test_prompts), ("control", ctrl_prompts)):
@@ -609,8 +627,8 @@ def execute_playbook_step(
             g_name, p_txt, _ = meta[i]
             b_txt = batch_out[i]["outputs"].get("answer") or batch_out[i]["outputs"].get("text") or ""
             iv_txt = batch_out[i + 1]["outputs"].get("answer") or batch_out[i + 1]["outputs"].get("text") or ""
-            b_hit = bool(pat.search(b_txt)) if pat else False
-            iv_hit = bool(pat.search(iv_txt)) if pat else False
+            b_hit = _safe_pattern_match(b_txt, rx, case_insensitive=True) if rx else False
+            iv_hit = _safe_pattern_match(iv_txt, rx, case_insensitive=True) if rx else False
             paired_rows.append({
                 "group": g_name,
                 "prompt": p_txt,

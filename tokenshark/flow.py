@@ -815,12 +815,17 @@ def parse_index_spec(spec: str | range | list | tuple, n: int, named: dict[str, 
         part = part.strip()
         if not part:
             continue
-        m = re.fullmatch(r"(-?\d*)\s*:\s*(-?\d*)", part)
-        if m:
-            a = int(m.group(1)) if m.group(1) else 0
-            b = int(m.group(2)) if m.group(2) else n
-            out += list(range(n))[slice(a, b)]
-        elif re.fullmatch(r"-?\d+", part):
+        if ":" in part:
+            lhs, rhs = (x.strip() for x in part.split(":", 1))
+            if (not lhs or (lhs.lstrip("-").isdigit() and lhs.count("-") <= 1)) and (
+                not rhs or (rhs.lstrip("-").isdigit() and rhs.count("-") <= 1)
+            ):
+                a = int(lhs) if lhs else 0
+                b = int(rhs) if rhs else n
+                out += list(range(n))[slice(a, b)]
+                continue
+            raise ValueError(f"Can't read index spec '{spec}'. Use all, last, a:b or 1,2,5.")
+        if part.lstrip("-").isdigit() and part.count("-") <= 1:
             i = int(part)
             if -n <= i < n:
                 out.append(i % n)
